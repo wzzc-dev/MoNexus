@@ -1,0 +1,6 @@
+// MoNexus workspace manifest (M0 spike scope).
+// Members are module directories with their own moon.mod; the workspace root
+// itself is not a module (same layout idea as MoUI's moon.work).
+members = [
+  "./spikes/m0",
+]
