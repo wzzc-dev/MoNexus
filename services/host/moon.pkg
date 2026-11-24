@@ -1,0 +1,20 @@
+pkgtype(kind: "executable")
+
+import {
+  "monexus/contracts" @contracts,
+  "monexus/host-client" @client,
+  "moonbitlang/async",
+  "moonbitlang/async/aqueue",
+  "moonbitlang/async/fs",
+  "moonbitlang/async/http",
+  "moonbitlang/async/signal",
+  "moonbitlang/async/socket",
+  "moonbitlang/async/websocket",
+  "moonbitlang/core/env",
+  "moonbitlang/core/encoding/hex",
+  "moonbitlang/core/json",
+  "moonbitlang/core/random",
+  "moonbitlang/core/string",
+}
+
+supported_targets = "native"

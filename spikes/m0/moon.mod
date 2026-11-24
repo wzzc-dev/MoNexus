@@ -13,6 +13,7 @@ keywords = [ "monexus", "spike", "m0" ]
 description = "MoNexus M0 spike: native host process, PTY, SSH, ACP stdio"
 
 import {
+  "monexus/providers@0.1.0",
   "moonbitlang/async@0.22.5",
   "moonbit-community/pty@0.4.4",
 }

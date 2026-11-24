@@ -1,5 +1,5 @@
 import {
-  "moonbit-community/pty",
+  "moonbit-community/pty" @pty_ffi,
   "moonbitlang/core/encoding/utf8",
 }
 

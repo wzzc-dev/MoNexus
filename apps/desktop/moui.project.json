@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "id": "monexus-desktop",
+  "title": "MoNexus",
+  "module": "monexus/desktop",
+  "mouiVersion": "0.9.1",
+  "platforms": [
+    "linux"
+  ]
+}

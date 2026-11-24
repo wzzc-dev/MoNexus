@@ -94,7 +94,7 @@ fn pair_int(
 /// visible in the argv that actually runs (no hidden environment).
 fn ssh_target_from_flags(
   pairs : Array[(String, String)],
-) -> @ssh_probe.SshTarget? {
+) -> @ssh.SshTarget? {
   let host = pair_last(pairs, "--ssh-host", "")
   if host == "" {
     return None
@@ -109,7 +109,7 @@ fn ssh_target_from_flags(
     options.push("StrictHostKeyChecking=" + strict)
   }
   Some(
-    @ssh_probe.SshTarget::new(
+    @ssh.SshTarget::new(
       host~,
       port=pair_int(pairs, "--ssh-port", 22),
       identity=pair_last(pairs, "--identity", ""),
@@ -128,7 +128,7 @@ async fn pty_check_command(args : Array[String]) -> (Int32, String) {
     "--cmd",
     "printf 'M0_PTY_OK\\n'; exit 7",
   )
-  let result = @pty_spike.run_pty_check(shell, command)
+  let result = @pty.run_pty_check(shell, command)
   let lines : Array[String] = [
     "M0_PTY_SHELL=" + shell,
     "M0_PTY_PID=" + result.pid.to_string(),
@@ -147,11 +147,12 @@ async fn ssh_probe_command(args : Array[String]) -> (Int32, String) {
     Some(target) => target
     None => return (2, "monexus-host: --ssh-host is required\n" + usage_text())
   }
-  let profile = @ssh_probe.probe(
+  let profile = match @ssh.probe(
     target,
     timeout_seconds=pair_int(pairs, "--timeout", 15),
-  ) catch {
-    error => return (1, "M0_SSH_PROBE_FAILED " + error.to_string())
+  ) {
+    Ok(value) => value
+    Err(error) => return (1, "M0_SSH_PROBE_FAILED " + error.to_string())
   }
   (0, "M0_SSH_PROBE_OK\n" + profile.render())
 }
@@ -166,13 +167,14 @@ async fn ssh_run_command(args : Array[String]) -> (Int32, String) {
   if rest.is_empty() {
     return (2, "monexus-host: ssh-run needs an argv after `--`\n" + usage_text())
   }
-  let result = @ssh_probe.run(
+  let result = match @ssh.run(
     target,
     rest,
     cwd=pair_last(pairs, "--cwd", "."),
     timeout_seconds=pair_int(pairs, "--timeout", 30),
-  ) catch {
-    error => return (1, "M0_SSH_RUN_FAILED " + error.to_string())
+  ) {
+    Ok(value) => value
+    Err(error) => return (1, "M0_SSH_RUN_FAILED " + error.to_string())
   }
   let lines : Array[String] = [
     "M0_SSH_RUN_EXIT=" + result.exit_code.to_string(),

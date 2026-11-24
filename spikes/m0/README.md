@@ -26,6 +26,9 @@ MoSpace 仓库。完整证据、阻塞项与 M1–M4 建议见
 
 ## 目录
 
+> M1 moved the reusable PTY/SSH code to `packages/providers/{pty,ssh}`.
+> The tree below records the M0 spike layout before that move.
+
 ```text
 moon.work                         # workspace 根配置（提交）
 spikes/m0/
