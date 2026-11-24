@@ -100,6 +100,7 @@ pub fn machine_error_label(kind : String) -> String {
     "host_key" => "HostKeyRejected"
     "remote" => "RemoteError"
     "invalid" => "InvalidRequest"
+    "conflict" => "Conflict"
     _ => "Internal"
   }
 }

@@ -4,6 +4,7 @@
 pub(all) enum Page {
   Home
   Machines
+  Projects
   Tasks
   Search
   Settings
@@ -14,6 +15,7 @@ pub fn Page::label(self : Page) -> String {
   match self {
     Home => "Home"
     Machines => "Machines"
+    Projects => "Projects"
     Tasks => "Tasks"
     Search => "Search"
     Settings => "Settings"
@@ -24,6 +26,7 @@ pub fn Page::label(self : Page) -> String {
 pub fn Page::from_label(value : String) -> Page {
   match value.to_lower() {
     "machines" => Machines
+    "projects" => Projects
     "tasks" => Tasks
     "search" => Search
     "settings" => Settings
@@ -106,6 +109,54 @@ pub fn MachineDraft::new() -> MachineDraft {
 }
 
 ///|
+/// M3 Projects page state. The page never knows whether the workspace is
+/// local or SSH: it only holds the machine id (`""` = local) and a root.
+pub(all) struct ProjectState {
+  machine_id : String
+  root : String
+  workspace : @contracts.WorkspaceRecord?
+  entries : Array[@contracts.WorkspaceEntry]
+  selected : String
+  content : String
+  dirty : Bool
+  status_text : String
+  diff_text : String
+  terminal_id : String
+  terminal_text : String
+  terminal_input : String
+  terminal_cursor : Int64
+  worktree_branch : String
+  worktree_path : String
+  worktree_message : String
+  busy : Bool
+  message : String
+}
+
+///|
+pub fn ProjectState::new() -> ProjectState {
+  {
+    machine_id: "",
+    root: "",
+    workspace: None,
+    entries: [],
+    selected: "",
+    content: "",
+    dirty: false,
+    status_text: "",
+    diff_text: "",
+    terminal_id: "",
+    terminal_text: "",
+    terminal_input: "",
+    terminal_cursor: 0L,
+    worktree_branch: "",
+    worktree_path: "",
+    worktree_message: "",
+    busy: false,
+    message: "",
+  }
+}
+
+///|
 pub struct Model {
   page : Page
   host : HostProjection
@@ -114,6 +165,7 @@ pub struct Model {
   machine_busy : String
   machine_message : String
   draft : MachineDraft
+  project : ProjectState
 }
 
 ///|
@@ -187,6 +239,7 @@ pub fn Model::new() -> Model {
     machine_busy: "",
     machine_message: "",
     draft: MachineDraft::new(),
+    project: ProjectState::new(),
   }
 }
 
@@ -270,6 +323,33 @@ pub(all) enum Msg {
   ProbeMachine(String)
   RemoveMachine(String)
   RefreshMachines
+  // Projects page <-> command worker.
+  ProjectOpen
+  ProjectRoot(String)
+  ProjectMachine(String)
+  ProjectOpened(@contracts.WorkspaceRecord)
+  ProjectEntries(Array[@contracts.WorkspaceEntry])
+  ProjectFile(String, String)
+  ProjectStatus(String)
+  ProjectDiff(String)
+  ProjectDraft(String)
+  ProjectNotice(String)
+  ProjectError(String)
+  ProjectSelectFile(String)
+  ProjectOpenDir(String)
+  ProjectOpenFile(String)
+  ProjectSaveFile
+  ProjectRefresh
+  ProjectRefreshDiff
+  ProjectTerminalInput(String)
+  ProjectTerminalOpened(String)
+  ProjectTerminalOutput(Int64, String)
+  ProjectTerminalSend
+  ProjectWorktreeBranch(String)
+  ProjectWorktreePath(String)
+  ProjectCreateWorktree
+  ProjectWorktreeCreated(@contracts.WorktreeRecord)
+  ProjectWorktrees(Array[@contracts.WorktreeRecord])
 }
 
 ///|
@@ -281,6 +361,20 @@ pub(all) enum MachineCommand {
   ProbeMachine(String)
   RemoveMachine(String)
   RefreshMachines
+  // Projects: open/list/read/write/diff/terminal/worktree all go through the
+  // same host RPC surface, so the worker stays local/remote agnostic.
+  OpenProject(String, String)
+  ProjectListFiles(String, String)
+  ProjectReadFile(String, String)
+  ProjectWriteFile(String, String, String)
+  ProjectGitStatus(String)
+  ProjectGitDiff(String, String)
+  ProjectOpenTerminal(String)
+  ProjectTerminalWrite(String, String, Int64)
+  ProjectTerminalRead(String)
+  ProjectCloseTerminal(String)
+  ProjectListWorktrees(String)
+  ProjectCreateWorktree(String, String, String)
 }
 
 ///|
@@ -385,6 +479,40 @@ pub fn machine_profile_summary(
       (if profile.has_gui { " · gui" } else { "" })
     None => "not probed yet"
   }
+}
+
+///|
+fn entry_before(
+  left : @contracts.WorkspaceEntry,
+  right : @contracts.WorkspaceEntry,
+) -> Bool {
+  if left.is_dir != right.is_dir {
+    left.is_dir
+  } else {
+    left.name < right.name
+  }
+}
+
+///|
+pub fn sort_entries(
+  entries : Array[@contracts.WorkspaceEntry],
+) -> Array[@contracts.WorkspaceEntry] {
+  let out : Array[@contracts.WorkspaceEntry] = []
+  for entry in entries {
+    out.push(entry)
+  }
+  let mut index = 1
+  while index < out.length() {
+    let current = out[index]
+    let mut position = index
+    while position > 0 && entry_before(current, out[position - 1]) {
+      out[position] = out[position - 1]
+      position = position - 1
+    }
+    out[position] = current
+    index = index + 1
+  }
+  out
 }
 
 ///|
@@ -559,6 +687,357 @@ pub fn update_full(
       [RemoveMachine(machine_id)],
     )
     RefreshMachines => ({ ..model, machine_message: "" }, [RefreshMachines])
+    ProjectOpen => {
+      let root = model.project.root.trim().to_owned()
+      if root == "" {
+        (
+          {
+            ..model,
+            project: {
+              ..model.project,
+              message: "root is required (absolute path)",
+            },
+          },
+          none,
+        )
+      } else {
+        (
+          {
+            ..model,
+            project: {
+              ..model.project,
+              root,
+              busy: true,
+              message: "opening " + root + "...",
+            },
+          },
+          [OpenProject(model.project.machine_id, root)],
+        )
+      }
+    }
+    ProjectRoot(value) => (
+      { ..model, project: { ..model.project, root: value } },
+      none,
+    )
+    ProjectMachine(value) => (
+      { ..model, project: { ..model.project, machine_id: value } },
+      none,
+    )
+    ProjectOpened(record) => (
+      {
+        ..model,
+        project: {
+          ..model.project,
+          workspace: Some(record),
+          entries: [],
+          selected: "",
+          content: "",
+          dirty: false,
+          status_text: "",
+          diff_text: "",
+          terminal_id: "",
+          terminal_text: "",
+          terminal_cursor: 0L,
+          busy: false,
+          message: "opened " + record.root,
+        },
+      },
+      none,
+    )
+    ProjectEntries(entries) => (
+      {
+        ..model,
+        project: {
+          ..model.project,
+          entries: sort_entries(entries),
+          busy: false,
+        },
+      },
+      none,
+    )
+    ProjectFile(path, content) => (
+      {
+        ..model,
+        project: {
+          ..model.project,
+          selected: path,
+          content,
+          dirty: false,
+          busy: false,
+        },
+      },
+      none,
+    )
+    ProjectStatus(text) => (
+      { ..model, project: { ..model.project, status_text: text } },
+      none,
+    )
+    ProjectDiff(text) => (
+      { ..model, project: { ..model.project, diff_text: text } },
+      none,
+    )
+    ProjectDraft(content) => (
+      {
+        ..model,
+        project: { ..model.project, content, dirty: true },
+      },
+      none,
+    )
+    ProjectNotice(text) => (
+      {
+        ..model,
+        project: { ..model.project, message: text, busy: false },
+      },
+      none,
+    )
+    ProjectError(text) => (
+      {
+        ..model,
+        project: { ..model.project, message: text, busy: false },
+      },
+      none,
+    )
+    ProjectSelectFile(path) => (
+      {
+        ..model,
+        project: {
+          ..model.project,
+          selected: path,
+          content: "",
+          dirty: false,
+          diff_text: "",
+        },
+      },
+      none,
+    )
+    ProjectOpenDir(path) =>
+      match model.project.workspace {
+        Some(record) => (
+          {
+            ..model,
+            project: { ..model.project, busy: true, message: "listing..." },
+          },
+          [ProjectListFiles(record.id, path)],
+        )
+        None => (model, none)
+      }
+    ProjectOpenFile(path) => (
+      {
+        ..model,
+        project: {
+          ..model.project,
+          selected: path,
+          content: "",
+          dirty: false,
+          diff_text: "",
+          busy: true,
+          message: "reading " + path + "...",
+        },
+      },
+      match model.project.workspace {
+        Some(record) => [ProjectReadFile(record.id, path)]
+        None => none
+      },
+    )
+    ProjectSaveFile =>
+      match model.project.workspace {
+        Some(record) =>
+          if model.project.selected == "" {
+            (
+              {
+                ..model,
+                project: {
+                  ..model.project,
+                  message: "select a file first",
+                },
+              },
+              none,
+            )
+          } else {
+            (
+              {
+                ..model,
+                project: { ..model.project, busy: true, message: "saving..." },
+              },
+              [
+                ProjectWriteFile(
+                  record.id,
+                  model.project.selected,
+                  model.project.content,
+                ),
+              ],
+            )
+          }
+        None => (
+          { ..model, project: { ..model.project, message: "open a project first" } },
+          none,
+        )
+      }
+    ProjectRefresh =>
+      match model.project.workspace {
+        Some(record) => (
+          {
+            ..model,
+            project: { ..model.project, busy: true, message: "refreshing..." },
+          },
+          [
+            ProjectListFiles(record.id, ""),
+            ProjectGitStatus(record.id),
+            ProjectListWorktrees(record.id),
+          ],
+        )
+        None => (
+          { ..model, project: { ..model.project, message: "open a project first" } },
+          none,
+        )
+      }
+    ProjectRefreshDiff =>
+      match model.project.workspace {
+        Some(record) =>
+          if model.project.selected == "" {
+            (model, none)
+          } else {
+            (
+              model,
+              [ProjectGitDiff(record.id, model.project.selected)],
+            )
+          }
+        None => (model, none)
+      }
+    ProjectTerminalInput(value) => (
+      { ..model, project: { ..model.project, terminal_input: value } },
+      none,
+    )
+    ProjectTerminalOpened(terminal_id) => (
+      {
+        ..model,
+        project: {
+          ..model.project,
+          terminal_id,
+          terminal_text: model.project.terminal_text + "$ terminal ready\n",
+          busy: false,
+        },
+      },
+      none,
+    )
+    ProjectTerminalOutput(cursor, text) => (
+      {
+        ..model,
+        project: {
+          ..model.project,
+          terminal_cursor: cursor,
+          terminal_text: model.project.terminal_text + text,
+        },
+      },
+      none,
+    )
+    ProjectTerminalSend => {
+      let line = model.project.terminal_input
+      if model.project.terminal_id != "" {
+        (
+          {
+            ..model,
+            project: { ..model.project, terminal_input: "", busy: true },
+          },
+          [
+            ProjectTerminalWrite(
+              model.project.terminal_id,
+              line,
+              model.project.terminal_cursor,
+            ),
+          ],
+        )
+      } else {
+        match model.project.workspace {
+          Some(record) => (
+            {
+              ..model,
+              project: { ..model.project, busy: true },
+            },
+            [ProjectOpenTerminal(record.id)],
+          )
+          None => (
+            {
+              ..model,
+              project: { ..model.project, message: "open a project first" },
+            },
+            none,
+          )
+        }
+      }
+    }
+    ProjectWorktreeBranch(value) => (
+      {
+        ..model,
+        project: { ..model.project, worktree_branch: value },
+      },
+      none,
+    )
+    ProjectWorktreePath(value) => (
+      { ..model, project: { ..model.project, worktree_path: value } },
+      none,
+    )
+    ProjectCreateWorktree =>
+      match model.project.workspace {
+        Some(record) =>
+          if model.project.worktree_branch == "" ||
+            model.project.worktree_path == "" {
+            (
+              {
+                ..model,
+                project: {
+                  ..model.project,
+                  message: "branch and path are required",
+                },
+              },
+              none,
+            )
+          } else {
+            (
+              {
+                ..model,
+                project: {
+                  ..model.project,
+                  busy: true,
+                  message: "creating worktree...",
+                },
+              },
+              [
+                ProjectCreateWorktree(
+                  record.id,
+                  model.project.worktree_branch,
+                  model.project.worktree_path,
+                ),
+              ],
+            )
+          }
+        None => (
+          { ..model, project: { ..model.project, message: "open a project first" } },
+          none,
+        )
+      }
+    ProjectWorktreeCreated(record) => (
+      {
+        ..model,
+        project: {
+          ..model.project,
+          busy: false,
+          worktree_message: "worktree ready " + record.path,
+          message: "worktree " + record.branch + " ready",
+        },
+      },
+      none,
+    )
+    ProjectWorktrees(records) => (
+      {
+        ..model,
+        project: {
+          ..model.project,
+          worktree_message: "worktrees: " + records.length().to_string(),
+        },
+      },
+      none,
+    )
   }
 }
 

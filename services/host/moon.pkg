@@ -6,6 +6,7 @@ import {
   "monexus/machines" @machines,
   "monexus/providers/error" @provider_error,
   "monexus/providers/ssh" @ssh,
+  "monexus/providers/workspace" @workspace,
   "moonbitlang/async",
   "moonbitlang/async/aqueue",
   "moonbitlang/async/fs",

@@ -90,6 +90,14 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
       return Err("cannot rebuild machine projection: " + message)
     }
   }
+  match store.reconcile_workspace_projection() {
+    Ok(_) => ()
+    Err(message) => {
+      store.close()
+      lock.close()
+      return Err("cannot rebuild workspace projection: " + message)
+    }
+  }
   let addr = @socket.Addr::parse(
     "127.0.0.1:" + options.port.to_string(),
   ) catch {
@@ -111,6 +119,7 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
   }
   println("monexus-host listening on " + state.ws_url)
   @async.with_task_group(async fn(group) {
+    state.group.val = Some(group)
     group.spawn_bg(
       no_wait=true,
       allow_failure=true,

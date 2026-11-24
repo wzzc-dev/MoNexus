@@ -9,6 +9,7 @@ using @views {
   spacer,
   tag,
   text,
+  text_area,
   text_field,
 }
 
@@ -187,6 +188,178 @@ fn machines_page(model : Model) -> @moui.View[Msg] {
 }
 
 ///|
+fn entry_row(model : Model, entry : @contracts.WorkspaceEntry) -> @moui.View[Msg] {
+  let label = if entry.is_dir {
+    "[dir] " + entry.name
+  } else {
+    entry.name
+  }
+  let selected = model.project.selected == entry.path
+  let line = row([
+    text(label).mono(),
+    spacer(weight=1.0),
+    button(
+      if entry.is_dir { "list" } else { "open" },
+      on_click=if entry.is_dir {
+        ProjectOpenDir(entry.path)
+      } else {
+        ProjectOpenFile(entry.path)
+      },
+    ),
+  ], spacing=8.0)
+  if selected {
+    line.title()
+  } else {
+    line
+  }
+}
+
+///|
+fn project_page(model : Model) -> @moui.View[Msg] {
+  let project = model.project
+  let lines : Array[@moui.View[Msg]] = [
+    row([
+      text("Projects").title(),
+      spacer(weight=1.0),
+      button("Refresh", on_click=ProjectRefresh),
+    ], spacing=8.0),
+    text(
+      "Open a local or SSH project by machine id + absolute root. Both use the same workspace RPC surface.",
+    ).caption(),
+    row([
+      text_field(
+        project.machine_id,
+        on_input=fn(value) { ProjectMachine(value) },
+        placeholder="machine id (blank = local)",
+        width=260.0,
+      ),
+      text_field(
+        project.root,
+        on_input=fn(value) { ProjectRoot(value) },
+        placeholder="/absolute/project/root",
+        width=320.0,
+      ),
+      button("Open project", on_click=ProjectOpen),
+    ], spacing=8.0),
+  ]
+  if project.message != "" {
+    lines.push(text(project.message).caption())
+  }
+  match project.workspace {
+    Some(record) => {
+      lines.push(
+        text(
+          "workspace " +
+          record.id +
+          " · root " +
+          record.root +
+          " · " +
+          (if record.is_git { "git" } else { "non-git (exclusive lease)" }),
+        ).caption(),
+      )
+      lines.push(text("Files").title())
+      if project.entries.is_empty() {
+        lines.push(text("no entries loaded").caption())
+      } else {
+        for entry in project.entries {
+          lines.push(entry_row(model, entry))
+        }
+      }
+      lines.push(
+        text(
+          if project.selected == "" {
+            "Editor (select a file)"
+          } else {
+            "Editor · " +
+            project.selected +
+            (if project.dirty { " *unsaved*" } else { "" })
+          },
+        ).title(),
+      )
+      lines.push(
+        text_area(
+          project.content,
+          on_input=fn(value) { ProjectDraft(value) },
+          placeholder="file content",
+          lines=8,
+          width=700.0,
+        ),
+      )
+      lines.push(
+        row([
+          button("Save", on_click=ProjectSaveFile),
+          button("Refresh diff", on_click=ProjectRefreshDiff),
+        ], spacing=8.0),
+      )
+      lines.push(text("Git status").title())
+      lines.push(
+        text(
+          if project.status_text == "" {
+            "(not loaded)"
+          } else {
+            project.status_text
+          },
+        ).mono(),
+      )
+      lines.push(text("Git diff").title())
+      lines.push(
+        text(
+          if project.diff_text == "" {
+            "(no diff loaded)"
+          } else {
+            project.diff_text
+          },
+        ).mono(),
+      )
+      lines.push(text("Terminal").title())
+      lines.push(
+        text(
+          if project.terminal_text == "" {
+            "(send a command to start a local PTY or remote ssh -tt + tmux session)"
+          } else {
+            project.terminal_text
+          },
+        ).mono(),
+      )
+      lines.push(
+        row([
+          text_field(
+            project.terminal_input,
+            on_input=fn(value) { ProjectTerminalInput(value) },
+            placeholder="shell command",
+            width=520.0,
+          ),
+          button("Send", on_click=ProjectTerminalSend),
+        ], spacing=8.0),
+      )
+      lines.push(text("Worktree").title())
+      lines.push(
+        row([
+          text_field(
+            project.worktree_branch,
+            on_input=fn(value) { ProjectWorktreeBranch(value) },
+            placeholder="branch",
+            width=200.0,
+          ),
+          text_field(
+            project.worktree_path,
+            on_input=fn(value) { ProjectWorktreePath(value) },
+            placeholder="/absolute/worktree/path",
+            width=320.0,
+          ),
+          button("Create worktree", on_click=ProjectCreateWorktree),
+        ], spacing=8.0),
+      )
+      if project.worktree_message != "" {
+        lines.push(text(project.worktree_message).caption())
+      }
+    }
+    None => lines.push(text("No project open yet.").caption())
+  }
+  column(lines, spacing=8.0)
+}
+
+///|
 fn page_body(model : Model) -> @moui.View[Msg] {
   match model.page {
     Home =>
@@ -198,6 +371,7 @@ fn page_body(model : Model) -> @moui.View[Msg] {
         host_summary(model.host),
       ], spacing=10.0)
     Machines => machines_page(model)
+    Projects => project_page(model)
     Tasks =>
       column([
         text("Tasks").title(),
@@ -223,7 +397,7 @@ fn page_body(model : Model) -> @moui.View[Msg] {
 ///|
 pub fn view(model : Model) -> @moui.View[Msg] {
   let nav : Array[@moui.View[Msg]] = []
-  for page in [Home, Machines, Tasks, Search, Settings] {
+  for page in [Home, Machines, Projects, Tasks, Search, Settings] {
     nav.push(nav_button(page, model.page))
   }
   center(

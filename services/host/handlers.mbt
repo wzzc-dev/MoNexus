@@ -82,6 +82,90 @@ async fn handle_request(
       state.mutex.release()
       handle_machine_list(state, sink, request, client_request_id)
     }
+    @contracts.METHOD_WORKSPACE_OPEN => {
+      state.mutex.release()
+      handle_workspace_open(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_WORKSPACE_LIST => {
+      state.mutex.release()
+      handle_workspace_list(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_WORKSPACE_LIST_FILES => {
+      state.mutex.release()
+      handle_workspace_list_files(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_WORKSPACE_STAT => {
+      state.mutex.release()
+      handle_workspace_stat(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_WORKSPACE_READ => {
+      state.mutex.release()
+      handle_workspace_read(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_WORKSPACE_WRITE => {
+      state.mutex.release()
+      handle_workspace_write(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_WORKSPACE_MOVE => {
+      state.mutex.release()
+      handle_workspace_move(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_WORKSPACE_REMOVE => {
+      state.mutex.release()
+      handle_workspace_remove_file(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_WORKSPACE_GIT_STATUS => {
+      state.mutex.release()
+      handle_workspace_git_status(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_WORKSPACE_GIT_DIFF => {
+      state.mutex.release()
+      handle_workspace_git_diff(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_WORKSPACE_CLOSE => {
+      state.mutex.release()
+      handle_workspace_close(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_WORKTREE_CREATE => {
+      state.mutex.release()
+      handle_worktree_create(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_WORKTREE_REMOVE => {
+      state.mutex.release()
+      handle_worktree_remove(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_WORKTREE_LIST => {
+      state.mutex.release()
+      handle_worktree_list(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_LEASE_ACQUIRE => {
+      state.mutex.release()
+      handle_lease_acquire(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_LEASE_RELEASE => {
+      state.mutex.release()
+      handle_lease_release(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_LEASE_LIST => {
+      state.mutex.release()
+      handle_lease_list(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_TERMINAL_OPEN => {
+      state.mutex.release()
+      handle_terminal_open(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_TERMINAL_WRITE => {
+      state.mutex.release()
+      handle_terminal_write(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_TERMINAL_READ => {
+      state.mutex.release()
+      handle_terminal_read(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_TERMINAL_CLOSE => {
+      state.mutex.release()
+      handle_terminal_close(state, sink, request, client_request_id)
+    }
     @contracts.METHOD_EVENTS_SUBSCRIBE => {
       let since = @contracts.subscribe_since(request.params)
       let replay = match since {

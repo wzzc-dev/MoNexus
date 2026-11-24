@@ -152,3 +152,46 @@ test "host status and subscribe results round-trip" {
     None => fail("subscribe result did not decode")
   }
 }
+
+///|
+test "new ids are unique within one millisecond" {
+  let unique : Array[String] = []
+  for _ in 0..<200 {
+    let id = new_id("evt", 1_234L)
+    let mut duplicate = false
+    for existing in unique {
+      if existing == id {
+        duplicate = true
+        break
+      }
+    }
+    if !duplicate {
+      unique.push(id)
+    }
+  }
+  assert_eq(unique.length(), 200)
+}
+
+///|
+test "workspace params use the wire target and local default" {
+  let remote = workspace_open_params("cid", "mch_1", "/tmp/project")
+  assert_eq(workspace_open_target(remote), "mch_1")
+  let local = workspace_open_params("cid", "", "/tmp/project")
+  assert_eq(workspace_open_target(local), "")
+  match workspace_root_param(local) {
+    Ok(root) => assert_eq(root, "/tmp/project")
+    Err(message) => fail("workspace_root_param failed: " + message)
+  }
+}
+
+///|
+test "workspace conflict errors read as Conflict" {
+  let error = workspace_error(
+    WORKSPACE_ERR_CONFLICT,
+    "worktree is leased by an active run",
+  )
+  assert_eq(
+    machine_error_text(error),
+    "Conflict: worktree is leased by an active run",
+  )
+}
