@@ -35,11 +35,11 @@ async fn run_host_command(args : Array[String]) -> (Int32, String) {
 }
 
 ///|
-const HOST_VERSION : String = "0.3.0-m3"
+const HOST_VERSION : String = "0.4.0-m4"
 
 ///|
 fn host_version_line() -> String {
-  "monexus-host " + HOST_VERSION + " (M3)"
+  "monexus-host " + HOST_VERSION + " (M4)"
 }
 
 ///|

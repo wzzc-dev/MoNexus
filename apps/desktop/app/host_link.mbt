@@ -66,11 +66,20 @@ pub async fn host_link_loop(state_dir : String) -> Unit {
     // Reconnect implies the projection may have changed while the desktop was
     // away (or the host restarted); pull the machine list once.
     enqueue_machine_command(RefreshMachines)
+    enqueue_machine_command(AgentList)
+    enqueue_machine_command(DecisionList(@contracts.DECISION_STATUS_PENDING))
     let mut connected = true
     while connected {
       match client.wait_event() {
         Ok(event) => {
           dispatch(EventArrived(event.event_type, event.seq))
+          if event.event_type == @contracts.EVENT_DECISION_REQUESTED ||
+            event.event_type == @contracts.EVENT_DECISION_RESPONDED ||
+            event.event_type == @contracts.EVENT_DECISION_EXPIRED {
+            enqueue_machine_command(
+              DecisionList(@contracts.DECISION_STATUS_PENDING),
+            )
+          }
           match @contracts.machine_event_removed_id(event) {
             Some(machine_id) => dispatch(MachineRemoved(machine_id))
             None =>

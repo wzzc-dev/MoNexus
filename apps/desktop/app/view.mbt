@@ -360,6 +360,205 @@ fn project_page(model : Model) -> @moui.View[Msg] {
 }
 
 ///|
+fn agents_page(model : Model) -> @moui.View[Msg] {
+  let agent = model.agent
+  let lines : Array[@moui.View[Msg]] = [
+    row([
+      text("Agents / Sessions").title(),
+      spacer(weight=1.0),
+      button("Probe", on_click=AgentProbeNow),
+      button("Refresh", on_click=AgentRefresh),
+    ], spacing=8.0),
+    text(
+      "Starts a local ACP adapter (default: npx @zed-industries/claude-code-acp). The adapter needs a logged-in agent account.",
+    ).caption(),
+    row([
+      text_field(
+        agent.agent_id,
+        on_input=fn(value) { AgentId(value) },
+        placeholder="agent id",
+        width=170.0,
+      ),
+      text_field(
+        agent.mode,
+        on_input=fn(value) { AgentMode(value) },
+        placeholder="mode (acp|stdout)",
+        width=150.0,
+      ),
+      text_field(
+        agent.workspace_id,
+        on_input=fn(value) { AgentWorkspace(value) },
+        placeholder="workspace id (blank = cwd)",
+        width=240.0,
+      ),
+      text_field(
+        agent.worktree_id,
+        on_input=fn(value) { AgentWorktree(value) },
+        placeholder="worktree id (optional)",
+        width=220.0,
+      ),
+    ], spacing=8.0),
+    text_area(
+      agent.prompt,
+      on_input=fn(value) { AgentPromptDraft(value) },
+      placeholder="initial prompt",
+      lines=3,
+      width=700.0,
+    ),
+    row([
+      button("Start session", on_click=AgentStartSession),
+      button("Stop", on_click=AgentStopSession),
+      button("Resume", on_click=AgentResumeSession),
+    ], spacing=8.0),
+  ]
+  if agent.message != "" {
+    lines.push(text(agent.message).caption())
+  }
+  match agent.session {
+    Some(record) =>
+      lines.push(
+        text(
+          "session " +
+          record.id +
+          " · " +
+          (if agent.state_text == "" { record.state } else { agent.state_text }) +
+          " · turns " +
+          record.turns.to_string() +
+          " · chunks " +
+          record.chunks.to_string() +
+          " · memory " +
+          record.memory_bytes.to_string() +
+          "B · artifacts " +
+          record.artifacts.length().to_string() +
+          (if agent.stop_reason == "" {
+            ""
+          } else {
+            " · stop " + agent.stop_reason
+          }),
+        ).caption(),
+      )
+    None => lines.push(text("No session started yet.").caption())
+  }
+  lines.push(text("Transcript").title())
+  lines.push(
+    text(
+      if agent.transcript == "" {
+        "(waiting for output)"
+      } else {
+        agent.transcript
+      },
+    ).mono(),
+  )
+  lines.push(
+    row([
+      text_field(
+        agent.input,
+        on_input=fn(value) { AgentInputDraft(value) },
+        placeholder="follow-up prompt",
+        width=520.0,
+      ),
+      button("Send", on_click=AgentSendInput),
+    ], spacing=8.0),
+  )
+  lines.push(text("Recent sessions").title())
+  if agent.sessions.is_empty() {
+    lines.push(text("(none)").caption())
+  } else {
+    for record in agent.sessions {
+      lines.push(
+        text(
+          record.id +
+          " · " +
+          record.agent_id +
+          " · " +
+          record.state +
+          " · turns " +
+          record.turns.to_string() +
+          " · " +
+          record.cwd,
+        ).caption(),
+      )
+    }
+  }
+  column(lines, spacing=8.0)
+}
+
+///|
+fn inbox_page(model : Model) -> @moui.View[Msg] {
+  let inbox = model.inbox
+  let lines : Array[@moui.View[Msg]] = [
+    row([
+      text("Inbox").title(),
+      spacer(weight=1.0),
+      button("Refresh", on_click=InboxRefresh),
+    ], spacing=8.0),
+    text(
+      "Permission requests and readiness failures wait here. An ACP permission is answered on the same session pipe; nothing is auto-approved.",
+    ).caption(),
+  ]
+  if inbox.message != "" {
+    lines.push(text(inbox.message).caption())
+  }
+  if inbox.decisions.is_empty() {
+    lines.push(text("No pending decisions.").caption())
+  } else {
+    for decision in inbox.decisions {
+      let actions : Array[@moui.View[Msg]] = []
+      for option in decision.options {
+        actions.push(
+          button(
+            option.name,
+            on_click=InboxAnswer(decision.id, option.option_id),
+          ),
+        )
+      }
+      actions.push(
+        button("Answer with text", on_click=InboxSubmitText(decision.id)),
+      )
+      lines.push(
+        card(
+          column([
+            row([
+              text(decision.kind + ": " + decision.title).title(),
+              spacer(weight=1.0),
+              tag(decision.status),
+            ], spacing=8.0),
+            text(
+              "session " +
+              (if decision.session_id == "" {
+                "(none)"
+              } else {
+                decision.session_id
+              }) +
+              " · agent " +
+              decision.agent_id,
+            ).caption(),
+            if decision.detail == "" {
+              text("(no detail)").caption()
+            } else {
+              text(decision.detail).mono()
+            },
+            row(actions, spacing=8.0),
+          ], spacing=6.0),
+          padding=10.0,
+        ),
+      )
+    }
+  }
+  lines.push(
+    row([
+      text_field(
+        inbox.text,
+        on_input=fn(value) { InboxText(value) },
+        placeholder="free-text answer (for questions/readiness)",
+        width=520.0,
+      ),
+    ], spacing=8.0),
+  )
+  column(lines, spacing=8.0)
+}
+
+///|
 fn page_body(model : Model) -> @moui.View[Msg] {
   match model.page {
     Home =>
@@ -372,17 +571,19 @@ fn page_body(model : Model) -> @moui.View[Msg] {
       ], spacing=10.0)
     Machines => machines_page(model)
     Projects => project_page(model)
+    Agents => agents_page(model)
+    Inbox => inbox_page(model)
     Tasks =>
       column([
         text("Tasks").title(),
         text("Tasks page"),
-        text("M3 will show task runs and their event streams here."),
+        text("M5 will show task runs and their event streams here."),
       ], spacing=10.0)
     Search =>
       column([
         text("Search").title(),
         text("Search page"),
-        text("M4 will wire ACP-backed search and results here."),
+        text("Search will be wired in a later milestone."),
       ], spacing=10.0)
     Settings =>
       column([
@@ -397,7 +598,7 @@ fn page_body(model : Model) -> @moui.View[Msg] {
 ///|
 pub fn view(model : Model) -> @moui.View[Msg] {
   let nav : Array[@moui.View[Msg]] = []
-  for page in [Home, Machines, Projects, Tasks, Search, Settings] {
+  for page in [Home, Machines, Projects, Agents, Inbox, Tasks, Search, Settings] {
     nav.push(nav_button(page, model.page))
   }
   center(

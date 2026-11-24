@@ -109,6 +109,16 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
   }
   let server = @http.Server::Server(addr, reuse_addr=false)
   let state = HostState::new(options, server.addr().port(), store)
+  // ACP processes do not survive a host restart (M0), so close every session
+  // that was live and expire its pending decisions before serving clients.
+  match reconcile_agent_sessions(state) {
+    Ok(_) => ()
+    Err(message) => {
+      state.store.close()
+      lock.close()
+      return Err("cannot reconcile agent sessions: " + message)
+    }
+  }
   match write_host_info(state) {
     Ok(_) => ()
     Err(message) => {

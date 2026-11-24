@@ -4,6 +4,7 @@ import {
   "monexus/contracts" @contracts,
   "monexus/host-client" @client,
   "monexus/machines" @machines,
+  "monexus/providers/agent" @agent,
   "monexus/providers/error" @provider_error,
   "monexus/providers/ssh" @ssh,
   "monexus/providers/workspace" @workspace,

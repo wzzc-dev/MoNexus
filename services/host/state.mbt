@@ -45,6 +45,44 @@ pub struct HostState {
   store : @machines.MachineStore
   group : Ref[@async.TaskGroup[Unit]?]
   terminals : Map[String, TerminalSession]
+  agent_sessions : Map[String, AgentSessionRuntime]
+  agent_transcripts : Map[String, AgentTranscript]
+}
+
+///|
+/// Bounded transcript for one agent session. `base` is the absolute cursor of
+/// `text[0]`; trimming the head advances `base`, so a polling client cursor
+/// keeps meaning even after the buffer wraps.
+pub struct AgentTranscript {
+  base : Int64
+  text : String
+}
+
+///|
+/// A permission request that has been turned into a Decision and is waiting
+/// for the owner's answer. `acp_id` is the JSON-RPC id of the agent request,
+/// needed to reply on the same stdio pipe.
+pub struct PendingPermission {
+  acp_id : @json.Json
+}
+
+///|
+/// Live agent session. `process` is owned here; the ACP pump reads it and the
+/// send/decision handlers write through its internal write lock. Everything
+/// else is guarded by the host mutex.
+pub struct AgentSessionRuntime {
+  id : String
+  agent_id : String
+  acp_session_id : String
+  process : @agent.AgentProcess
+  transcript : Ref[AgentTranscript]
+  pending : Map[String, PendingPermission]
+  active_prompts : Map[String, Int]
+  turn_text : Ref[String]
+  home : String
+  memory_before : String
+  stderr_tail : Ref[String]
+  finalized : Ref[Bool]
 }
 
 ///|
@@ -115,6 +153,8 @@ fn HostState::new(
     store,
     group: Ref(None),
     terminals: Map([]),
+    agent_sessions: Map([]),
+    agent_transcripts: Map([]),
   }
 }
 
@@ -292,6 +332,63 @@ fn HostState::append_lease_event(
 ) -> Result[@contracts.EventEnvelope, String] {
   let event = self.next_envelope(event_type, subject, payload)
   match self.store.record_lease_event(event, record, released_id) {
+    Ok(_) => {
+      self.publish(event)
+      Ok(event)
+    }
+    Err(message) => Err(message)
+  }
+}
+
+///|
+/// Append an agent session event and its projection in one transaction.
+fn HostState::append_agent_session_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+  record : @contracts.AgentSessionRecord,
+) -> Result[@contracts.EventEnvelope, String] {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.record_agent_session_event(event, record) {
+    Ok(_) => {
+      self.publish(event)
+      Ok(event)
+    }
+    Err(message) => Err(message)
+  }
+}
+
+///|
+/// Append a Decision event and its projection in one transaction.
+fn HostState::append_decision_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+  record : @contracts.DecisionRecord,
+) -> Result[@contracts.EventEnvelope, String] {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.record_decision_event(event, record) {
+    Ok(_) => {
+      self.publish(event)
+      Ok(event)
+    }
+    Err(message) => Err(message)
+  }
+}
+
+///|
+/// Append an Artifact event and its projection in one transaction.
+fn HostState::append_artifact_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+  record : @contracts.ArtifactRecord,
+) -> Result[@contracts.EventEnvelope, String] {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.record_artifact_event(event, record) {
     Ok(_) => {
       self.publish(event)
       Ok(event)

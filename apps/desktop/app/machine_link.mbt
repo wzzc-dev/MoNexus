@@ -33,6 +33,14 @@ fn machine_notice(command : MachineCommand, detail : String) -> String {
     ProjectCloseTerminal(_) => "terminal closed"
     ProjectListWorktrees(_) => detail
     ProjectCreateWorktree(_, branch, _) => "worktree " + branch + " created"
+    AgentProbe(agent_id, _, _) => "probe " + agent_id + ": " + detail
+    AgentStart(agent_id, _, _, _, _) => "agent " + agent_id + ": " + detail
+    AgentSend(_, _) => "prompt sent"
+    AgentStop(_) => "session stopped"
+    AgentResume(_) => "session resumed"
+    AgentList => detail
+    DecisionList(_) => detail
+    DecisionRespond(_, _, _, _) => "decision answered"
   }
 }
 
@@ -407,8 +415,293 @@ async fn execute_machine_command(
         Err(message) => dispatch(ProjectError("worktree.create: " + message))
       }
     }
+    AgentProbe(agent_id, mode, command) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_AGENT_PROBE,
+          @contracts.agent_probe_params(
+            id,
+            agent_id,
+            mode,
+            command,
+            [],
+            "",
+            Map([]),
+          ),
+        ) {
+        Ok(json) =>
+          match @contracts.agent_readiness_from_result(json) {
+            Ok(readiness) =>
+              dispatch(
+                AgentNotice(
+                  if readiness.ok {
+                    "ready: " +
+                    readiness.agent_name +
+                    " " +
+                    readiness.agent_version +
+                    " · loadSession " +
+                    (if readiness.load_session { "yes" } else { "no" })
+                  } else {
+                    "not ready: " + readiness.error
+                  },
+                ),
+              )
+            Err(message) => dispatch(AgentError(message))
+          }
+        Err(message) => dispatch(AgentError("agent.probe: " + message))
+      }
+    }
+    AgentStart(agent_id, mode, workspace_id, worktree_id, prompt) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_AGENT_START,
+          @contracts.agent_start_params(
+            id,
+            agent_id,
+            mode,
+            "",
+            [],
+            "",
+            workspace_id,
+            worktree_id,
+            prompt,
+            4_096,
+            Map([]),
+          ),
+        ) {
+        Ok(json) =>
+          match @contracts.agent_session_from_result(json) {
+            Ok(record) => {
+              dispatch(AgentStarted(record))
+              enqueue_agent_stream(record.id)
+            }
+            Err(message) => dispatch(AgentError(message))
+          }
+        Err(message) => dispatch(AgentError("agent.start: " + message))
+      }
+    }
+    AgentSend(session_id, text) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_AGENT_SEND,
+          @contracts.agent_send_params(id, session_id, text),
+        ) {
+        Ok(_) => dispatch(AgentNotice("prompt sent"))
+        Err(message) => dispatch(AgentError("agent.send: " + message))
+      }
+    }
+    AgentStop(session_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_AGENT_STOP,
+          @contracts.agent_stop_params(id, session_id),
+        ) {
+        Ok(_) => dispatch(AgentNotice("session stopped"))
+        Err(message) => dispatch(AgentError("agent.stop: " + message))
+      }
+    }
+    AgentResume(session_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_AGENT_RESUME,
+          @contracts.agent_resume_params(id, session_id),
+        ) {
+        Ok(json) =>
+          match @contracts.agent_session_from_result(json) {
+            Ok(record) => {
+              dispatch(AgentStarted(record))
+              enqueue_agent_stream(record.id)
+            }
+            Err(message) => dispatch(AgentError(message))
+          }
+        Err(message) => dispatch(AgentError("agent.resume: " + message))
+      }
+    }
+    AgentList => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_AGENT_LIST,
+          @contracts.agent_list_params(id, ""),
+        ) {
+        Ok(json) =>
+          match @contracts.agent_sessions_from_result(json) {
+            Ok(records) => dispatch(AgentSessions(records))
+            Err(message) => dispatch(AgentError(message))
+          }
+        Err(message) => dispatch(AgentError("agent.list: " + message))
+      }
+    }
+    DecisionList(status) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_DECISION_LIST,
+          @contracts.decision_list_params(id, status, ""),
+        ) {
+        Ok(json) =>
+          match @contracts.decision_list_from_result(json) {
+            Ok(records) => dispatch(InboxDecisions(records))
+            Err(message) => dispatch(AgentError(message))
+          }
+        Err(message) => dispatch(AgentError("decision.list: " + message))
+      }
+    }
+    DecisionRespond(decision_id, option_id, text, answered_by) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_DECISION_RESPOND,
+          @contracts.decision_respond_params(
+            id,
+            decision_id,
+            option_id,
+            text,
+            answered_by,
+          ),
+        ) {
+        Ok(json) =>
+          match @contracts.decision_from_result(json) {
+            Ok(record) =>
+              dispatch(
+                AgentNotice(
+                  "decision " +
+                  record.id +
+                  ": " +
+                  record.status +
+                  (if record.delivery_error == "" {
+                    ""
+                  } else {
+                    " · " + record.delivery_error
+                  }),
+                ),
+              )
+            Err(message) => dispatch(AgentError(message))
+          }
+        Err(message) => dispatch(AgentError("decision.respond: " + message))
+      }
+    }
   }
   client.close()
+}
+
+///|
+/// Session ids that need a streaming poll loop. One entry per started or
+/// resumed session; the loop ends when the session reaches a terminal state.
+let agent_stream_queue : @aqueue.Queue[String] = @aqueue.Queue(kind=Unbounded)
+
+///|
+fn enqueue_agent_stream(session_id : String) -> Unit {
+  ignore(agent_stream_queue.try_put(session_id) catch { _ => false })
+}
+
+///|
+async fn dispatch_pending_decisions(client : @client.RpcClient) -> Unit {
+  let id = request_id("cmd")
+  match
+    client.call_json(
+      id,
+      @contracts.METHOD_DECISION_LIST,
+      @contracts.decision_list_params(
+        id,
+        @contracts.DECISION_STATUS_PENDING,
+        "",
+      ),
+    ) {
+    Ok(json) =>
+      match @contracts.decision_list_from_result(json) {
+        Ok(records) => dispatch(InboxDecisions(records))
+        Err(message) => dispatch(AgentError("decision.list: " + message))
+      }
+    Err(message) => dispatch(AgentError("decision.list: " + message))
+  }
+}
+
+///|
+/// Poll `agent.read` for one session. This is the M4 streaming path: the
+/// desktop polls a cursor and appends the delta, while the host keeps the
+/// transcript bounded. The loop stops as soon as the host reports a terminal
+/// state (stopped/exited/failed).
+pub async fn agent_stream_loop(state_dir : String) -> Unit {
+  for ;; {
+    let session_id = agent_stream_queue.get() catch { _ => return }
+    let info = match @client.read_host_info(state_dir) {
+      Ok(value) => value
+      Err(message) => {
+        dispatch(AgentError("host offline: " + message))
+        continue
+      }
+    }
+    let client = match @client.connect(info) {
+      Ok(value) => value
+      Err(message) => {
+        dispatch(AgentError("host offline: " + message))
+        continue
+      }
+    }
+    let mut cursor = 0L
+    let mut last_pending = ""
+    let mut active = true
+    while active {
+      let id = request_id("stream")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_AGENT_READ,
+          @contracts.agent_read_params(id, session_id, cursor),
+        ) {
+        Ok(json) =>
+          match @contracts.agent_read_from_json(json) {
+            Some(read) => {
+              cursor = read.cursor
+              dispatch(
+                AgentStreamState(
+                  session_id,
+                  read.state,
+                  read.stop_reason,
+                  read.pending_decision,
+                ),
+              )
+              if read.text != "" {
+                dispatch(AgentStreamText(read.cursor, read.text))
+              }
+              if read.pending_decision != last_pending {
+                last_pending = read.pending_decision
+                dispatch_pending_decisions(client)
+              }
+              if !@contracts.agent_state_is_active(read.state) {
+                active = false
+              }
+            }
+            None => {
+              dispatch(AgentError("agent.read: malformed result"))
+              active = false
+            }
+          }
+        Err(message) => {
+          dispatch(AgentError("agent.read: " + message))
+          active = false
+        }
+      }
+      if active {
+        @async.sleep(300)
+      }
+    }
+    client.close()
+  }
 }
 
 ///|
