@@ -21,7 +21,7 @@ pub async fn run_pty_check(
   shell : String,
   command : String,
 ) -> PtyCheckResult {
-  let (output, exit_code, pid) = @pty.with_pty(
+  let (output, exit_code, pid) = @pty_ffi.with_pty(
     shell,
     [],
     rows=24,
