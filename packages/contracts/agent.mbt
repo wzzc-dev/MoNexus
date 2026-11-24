@@ -491,6 +491,7 @@ pub(all) struct DecisionRecord {
   detail : String
   session_id : String
   agent_id : String
+  run_id : String
   options : Array[DecisionOption]
   option_id : String
   answer_text : String
@@ -510,6 +511,7 @@ pub fn DecisionRecord::new(
   agent_id~ : String,
   options~ : Array[DecisionOption],
   created_at~ : String,
+  run_id~ : String = "",
 ) -> DecisionRecord {
   {
     id,
@@ -519,6 +521,7 @@ pub fn DecisionRecord::new(
     detail,
     session_id,
     agent_id,
+    run_id,
     options,
     option_id: "",
     answer_text: "",
@@ -542,6 +545,7 @@ pub fn DecisionRecord::to_json(self : DecisionRecord) -> @json.Json {
     ("detail", json_string(self.detail)),
     ("session_id", json_string(self.session_id)),
     ("agent_id", json_string(self.agent_id)),
+    ("run_id", json_string(self.run_id)),
     ("options", options),
     ("option_id", json_string(self.option_id)),
     ("answer_text", json_string(self.answer_text)),
@@ -582,6 +586,7 @@ pub fn decision_from_json(json : @json.Json) -> DecisionRecord? {
     detail: string_field_or(object, "detail", ""),
     session_id: string_field_or(object, "session_id", ""),
     agent_id: string_field_or(object, "agent_id", ""),
+    run_id: string_field_or(object, "run_id", ""),
     options,
     option_id: string_field_or(object, "option_id", ""),
     answer_text: string_field_or(object, "answer_text", ""),
@@ -599,6 +604,7 @@ pub const ARTIFACT_KIND_MEMORY_DIFF : String = "memory_diff"
 pub(all) struct ArtifactRecord {
   id : String
   session_id : String
+  run_id : String
   kind : String
   uri : String
   digest : String
@@ -617,8 +623,9 @@ pub fn ArtifactRecord::new(
   size~ : Int,
   media_type~ : String,
   created_at~ : String,
+  run_id~ : String = "",
 ) -> ArtifactRecord {
-  { id, session_id, kind, uri, digest, size, media_type, created_at, }
+  { id, session_id, run_id, kind, uri, digest, size, media_type, created_at, }
 }
 
 ///|
@@ -626,6 +633,7 @@ pub fn ArtifactRecord::to_json(self : ArtifactRecord) -> @json.Json {
   json_object([
     ("id", json_string(self.id)),
     ("session_id", json_string(self.session_id)),
+    ("run_id", json_string(self.run_id)),
     ("kind", json_string(self.kind)),
     ("uri", json_string(self.uri)),
     ("digest", json_string(self.digest)),
@@ -648,6 +656,7 @@ pub fn artifact_from_json(json : @json.Json) -> ArtifactRecord? {
   Some({
     id,
     session_id: string_field_or(object, "session_id", ""),
+    run_id: string_field_or(object, "run_id", ""),
     kind: string_field_or(object, "kind", ARTIFACT_KIND_MEMORY_DIFF),
     uri: string_field_or(object, "uri", ""),
     digest: string_field_or(object, "digest", ""),
@@ -724,6 +733,26 @@ pub fn agent_env_from_json(
       for key, value in fields {
         match as_string(value) {
           Some(text) => env.set(key, text)
+          None => ()
+        }
+      }
+    }
+    _ => ()
+  }
+  env
+}
+
+///|
+pub fn agent_env_from_object(
+  object : Map[String, @json.Json],
+  key : String,
+) -> Map[String, String] {
+  let env : Map[String, String] = Map([])
+  match object.get(key) {
+    Some(@json.Json::Object(fields)) => {
+      for name, value in fields {
+        match as_string(value) {
+          Some(text) => env.set(name, text)
           None => ()
         }
       }

@@ -43,6 +43,11 @@ pub fn json_array(items : Array[@json.Json]) -> @json.Json {
 }
 
 ///|
+pub fn json_string_array(items : Array[String]) -> @json.Json {
+  json_array(items.map(fn(item) { json_string(item) }))
+}
+
+///|
 pub fn as_object(json : @json.Json) -> Map[String, @json.Json]? {
   match json {
     @json.Json::Object(map) => Some(map)

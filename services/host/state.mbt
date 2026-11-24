@@ -47,6 +47,7 @@ pub struct HostState {
   terminals : Map[String, TerminalSession]
   agent_sessions : Map[String, AgentSessionRuntime]
   agent_transcripts : Map[String, AgentTranscript]
+  dispatching : Ref[Bool]
 }
 
 ///|
@@ -155,6 +156,7 @@ fn HostState::new(
     terminals: Map([]),
     agent_sessions: Map([]),
     agent_transcripts: Map([]),
+    dispatching: Ref(false),
   }
 }
 
@@ -371,6 +373,14 @@ fn HostState::append_decision_event(
   let event = self.next_envelope(event_type, subject, payload)
   match self.store.record_decision_event(event, record) {
     Ok(_) => {
+      let _ = self.store.search_index(
+        "decision/" + record.id,
+        "decision",
+        record.id,
+        record.title,
+        record.title + "\n" + record.detail + "\n" + record.answer_text,
+        record.created_at,
+      )
       self.publish(event)
       Ok(event)
     }
@@ -457,4 +467,82 @@ fn HostState::replay_after(self : HostState, since : Int64) -> Array[@contracts.
     }
   }
   out
+}
+
+///|
+/// Append a Project event and its projection in one transaction.
+fn HostState::append_project_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+  record : @contracts.ProjectRecord,
+) -> Result[@contracts.EventEnvelope, String] {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.record_project_event(event, record) {
+    Ok(_) => {
+      self.publish(event)
+      Ok(event)
+    }
+    Err(message) => Err(message)
+  }
+}
+
+///|
+/// Append a Task event and its projection in one transaction.
+fn HostState::append_task_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+  record : @contracts.TaskRecord,
+) -> Result[@contracts.EventEnvelope, String] {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.record_task_event(event, record) {
+    Ok(_) => {
+      self.publish(event)
+      Ok(event)
+    }
+    Err(message) => Err(message)
+  }
+}
+
+///|
+/// Append a Run event and its projection in one transaction.
+fn HostState::append_run_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+  record : @contracts.RunRecord,
+) -> Result[@contracts.EventEnvelope, String] {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.record_run_event(event, record) {
+    Ok(_) => {
+      self.publish(event)
+      Ok(event)
+    }
+    Err(message) => Err(message)
+  }
+}
+
+///|
+/// Append an Evidence event and its projection (evidence row + owning run)
+/// in one transaction.
+fn HostState::append_evidence_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+  record : @contracts.EvidenceRecord,
+  run : @contracts.RunRecord,
+) -> Result[@contracts.EventEnvelope, String] {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.record_evidence_event(event, record, run) {
+    Ok(_) => {
+      self.publish(event)
+      Ok(event)
+    }
+    Err(message) => Err(message)
+  }
 }

@@ -12,6 +12,7 @@ import {
   "moonbitlang/async/aqueue",
   "moonbitlang/async/fs",
   "moonbitlang/async/http",
+  "moonbitlang/async/process",
   "moonbitlang/async/signal",
   "moonbitlang/async/socket",
   "moonbitlang/async/websocket",

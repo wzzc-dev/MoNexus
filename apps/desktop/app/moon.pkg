@@ -6,6 +6,7 @@ import {
   "moonbitlang/async",
   "moonbitlang/async/aqueue",
   "moonbitlang/core/env",
+  "moonbitlang/core/json" @json,
   "moonbitlang/core/string",
 }
 

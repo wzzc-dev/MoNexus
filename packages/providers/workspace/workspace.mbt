@@ -1383,3 +1383,93 @@ pub async fn WorkspaceProvider::run_terminal(
       run_ssh_terminal(remote, session_name, command, input, output)
   }
 }
+
+///|
+/// One-shot command result for Run execution and the evidence gate.
+pub(all) struct ExecResult {
+  exit_code : Int
+  stdout : String
+  stderr : String
+  timed_out : Bool
+}
+
+///|
+/// Execute one `sh -c` command with `cwd` as the working directory on the
+/// workspace's transport. Used by M5 Runs and the evidence gate; the command
+/// is owner-declared (project verify[] or an authenticated `run.create`), not
+/// agent-submitted, so it may use shell syntax. Output collection is bounded
+/// at 1 MiB by the caller; the provider returns what the transport produced.
+pub async fn WorkspaceProvider::exec(
+  self : WorkspaceProvider,
+  command : String,
+  cwd~ : String,
+  timeout_seconds~ : Int = 120,
+) -> Result[ExecResult, @error.ProviderError] {
+  if command.trim() == "" {
+    return Err(
+      @error.ProviderError::new(
+        @error.ProviderErrorKind::Internal,
+        "empty command",
+      ),
+    )
+  }
+  match self {
+    Local(_) => {
+      let budget_ms = timeout_seconds.max(1) * 1_000
+      let collected = @async.with_timeout_opt(
+        budget_ms,
+        async fn() -> Result[ExecResult, @error.ProviderError] {
+          let (exit_code, stdout, stderr) = @process.collect_output(
+            "/bin/sh",
+            ["-c", command],
+            cwd=cwd,
+          ) catch {
+            error =>
+              return Err(
+                @error.ProviderError::new(
+                  @error.ProviderErrorKind::SpawnFailed,
+                  "failed to spawn command",
+                ).with_detail(error.to_string()),
+              )
+          }
+          let stdout_text = stdout.text() catch { _ => "" }
+          let stderr_text = stderr.text() catch { _ => "" }
+          Ok({
+            exit_code: exit_code.to_int(),
+            stdout: stdout_text,
+            stderr: stderr_text,
+            timed_out: false,
+          })
+        },
+      )
+      match collected {
+        Some(Ok(value)) => Ok(value)
+        Some(Err(error)) => Err(error)
+        None =>
+          Err(
+            @error.ProviderError::new(
+              @error.ProviderErrorKind::ConnectTimeout,
+              "command timed out after " + timeout_seconds.to_string() + "s",
+            ),
+          )
+      }
+    }
+    Ssh(remote) =>
+      match
+        @ssh.run(
+          remote.target,
+          ["sh", "-c", command],
+          cwd=cwd,
+          timeout_seconds=timeout_seconds,
+        ) {
+        Ok(result) =>
+          Ok({
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            timed_out: false,
+          })
+        Err(error) => Err(error)
+      }
+  }
+}

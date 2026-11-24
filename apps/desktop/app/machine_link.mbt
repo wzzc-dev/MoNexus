@@ -41,6 +41,15 @@ fn machine_notice(command : MachineCommand, detail : String) -> String {
     AgentList => detail
     DecisionList(_) => detail
     DecisionRespond(_, _, _, _) => "decision answered"
+    TaskRefresh(_) => detail
+    TaskCreate(title, _, _, _) => "task created: " + title
+    RunCreate(task_id, _, _, _) => "run dispatched for " + task_id
+    TaskCancel(task_id) => "task cancelled: " + task_id
+    RunList(task_id) => "runs for " + task_id
+    RunGet(run_id) => "run " + run_id
+    RunCancel(run_id) => "run cancelled: " + run_id
+    ArtifactRead(artifact_id) => "artifact " + artifact_id
+    SearchSessions(query) => "search " + query
   }
 }
 
@@ -68,6 +77,67 @@ fn git_status_text(status : @contracts.GitStatus) -> String {
     }
   }
   lines.join("\n")
+}
+
+///|
+async fn dispatch_task_list(
+  client : @client.RpcClient,
+  since : Int64,
+) -> Unit {
+  let id = request_id("cmd")
+  match
+    client.call_json(
+      id,
+      @contracts.METHOD_TASK_LIST,
+      Map([("id", @contracts.json_string(id))]),
+    ) {
+    Ok(json) =>
+      match @contracts.parse_task_list(json) {
+        Ok(records) => dispatch(TasksLoaded(records))
+        Err(message) => dispatch(TaskError("task.list: " + message))
+      }
+    Err(message) => dispatch(TaskError("task.list: " + message))
+  }
+  let events_id = request_id("cmd")
+  match
+    client.call_json(
+      events_id,
+      @contracts.METHOD_EVENTS_LIST,
+      Map([
+        ("id", @contracts.json_string(events_id)),
+        ("since", @contracts.json_int64(since)),
+        ("limit", @contracts.json_int(200)),
+      ]),
+    ) {
+    Ok(json) => {
+      let object = match @contracts.as_object(json) {
+        Some(value) => value
+        None => {
+          dispatch(TaskError("events.list: malformed result"))
+          return
+        }
+      }
+      let events : Array[@contracts.EventEnvelope] = []
+      match object.get("events") {
+        Some(@json.Json::Array(items)) => {
+          for item in items {
+            match @contracts.EventEnvelope::from_json(item) {
+              Some(event) => events.push(event)
+              None => ()
+            }
+          }
+        }
+        _ => ()
+      }
+      dispatch(
+        EventsLoaded(
+          events,
+          @contracts.int64_field_or(object, "next_seq", 0L),
+        ),
+      )
+    }
+    Err(message) => dispatch(TaskError("events.list: " + message))
+  }
 }
 
 ///|
@@ -592,6 +662,231 @@ async fn execute_machine_command(
             Err(message) => dispatch(AgentError(message))
           }
         Err(message) => dispatch(AgentError("decision.respond: " + message))
+      }
+    }
+    TaskRefresh(since) => dispatch_task_list(client, since)
+    TaskCreate(title, goal, workspace_id, verify_text) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_TASK_CREATE,
+          Map([
+            ("id", @contracts.json_string(id)),
+            ("title", @contracts.json_string(title)),
+            ("goal", @contracts.json_string(goal)),
+            (
+              "status",
+              @contracts.json_string(@contracts.TASK_STATUS_READY),
+            ),
+            ("workspace_id", @contracts.json_string(workspace_id)),
+            ("verify", @contracts.json_string(verify_text)),
+          ]),
+        ) {
+        Ok(json) => {
+          let object = match @contracts.as_object(json) {
+            Some(value) => value
+            None => {
+              dispatch(TaskError("task.create: malformed result"))
+              return
+            }
+          }
+          match object.get("task") {
+            Some(value) =>
+              match @contracts.task_from_json(value) {
+                Some(record) => {
+                  dispatch(
+                    TaskNotice("task " + record.id + " · " + record.status),
+                  )
+                  dispatch(TasksRefresh)
+                }
+                None => dispatch(TaskError("task.create: corrupt task record"))
+              }
+            None => dispatch(TaskError("task.create: result has no task"))
+          }
+        }
+        Err(message) => dispatch(TaskError("task.create: " + message))
+      }
+    }
+    RunCreate(task_id, command, machine_id, workspace_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_RUN_CREATE,
+          Map([
+            ("id", @contracts.json_string(id)),
+            ("task_id", @contracts.json_string(task_id)),
+            ("workspace_id", @contracts.json_string(workspace_id)),
+            ("mode", @contracts.json_string(@contracts.RUN_MODE_COMMAND)),
+            ("command", @contracts.json_string(command)),
+            ("machine_id", @contracts.json_string(machine_id)),
+          ]),
+        ) {
+        Ok(json) => {
+          let object = match @contracts.as_object(json) {
+            Some(value) => value
+            None => {
+              dispatch(TaskError("run.create: malformed result"))
+              return
+            }
+          }
+          match object.get("run") {
+            Some(value) =>
+              match @contracts.run_from_json(value) {
+                Some(record) => {
+                  dispatch(
+                    TaskNotice("run " + record.id + " · " + record.status),
+                  )
+                  dispatch(RunSelect(record.id))
+                  dispatch(TasksRefresh)
+                }
+                None => dispatch(TaskError("run.create: corrupt run record"))
+              }
+            None => dispatch(TaskError("run.create: result has no run"))
+          }
+        }
+        Err(message) => dispatch(TaskError("run.create: " + message))
+      }
+    }
+    TaskCancel(task_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_TASK_CANCEL,
+          Map([
+            ("id", @contracts.json_string(id)),
+            ("task_id", @contracts.json_string(task_id)),
+          ]),
+        ) {
+        Ok(_) => {
+          dispatch(TaskNotice("task cancelled: " + task_id))
+          dispatch(TasksRefresh)
+        }
+        Err(message) => dispatch(TaskError("task.cancel: " + message))
+      }
+    }
+    RunList(task_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_RUN_LIST,
+          Map([
+            ("id", @contracts.json_string(id)),
+            ("task_id", @contracts.json_string(task_id)),
+          ]),
+        ) {
+        Ok(json) =>
+          match @contracts.parse_run_list(json) {
+            Ok(records) => dispatch(RunsLoaded(records))
+            Err(message) => dispatch(TaskError("run.list: " + message))
+          }
+        Err(message) => dispatch(TaskError("run.list: " + message))
+      }
+    }
+    RunGet(run_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_RUN_GET,
+          Map([
+            ("id", @contracts.json_string(id)),
+            ("run_id", @contracts.json_string(run_id)),
+          ]),
+        ) {
+        Ok(json) =>
+          match @contracts.parse_run_detail(json) {
+            Ok(detail) => dispatch(RunDetailLoaded(detail))
+            Err(message) => dispatch(TaskError("run.get: " + message))
+          }
+        Err(message) => dispatch(TaskError("run.get: " + message))
+      }
+    }
+    RunCancel(run_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_RUN_CANCEL,
+          Map([
+            ("id", @contracts.json_string(id)),
+            ("run_id", @contracts.json_string(run_id)),
+          ]),
+        ) {
+        Ok(_) => {
+          dispatch(TaskNotice("run cancelled: " + run_id))
+          dispatch(TasksRefresh)
+        }
+        Err(message) => dispatch(TaskError("run.cancel: " + message))
+      }
+    }
+    ArtifactRead(artifact_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_ARTIFACT_READ,
+          Map([
+            ("id", @contracts.json_string(id)),
+            ("artifact_id", @contracts.json_string(artifact_id)),
+          ]),
+        ) {
+        Ok(json) => {
+          let object = match @contracts.as_object(json) {
+            Some(value) => value
+            None => {
+              dispatch(TaskError("artifact.read: malformed result"))
+              return
+            }
+          }
+          let label = match object.get("artifact") {
+            Some(value) =>
+              match @contracts.artifact_from_json(value) {
+                Some(record) => record.kind + " · " + record.uri
+                None => artifact_id
+              }
+            None => artifact_id
+          }
+          dispatch(
+            ArtifactLoaded(
+              label,
+              @contracts.string_field_or(object, "text", ""),
+            ),
+          )
+        }
+        Err(message) => dispatch(TaskError("artifact.read: " + message))
+      }
+    }
+    SearchSessions(query) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_SEARCH_SESSIONS,
+          Map([
+            ("id", @contracts.json_string(id)),
+            ("query", @contracts.json_string(query)),
+            ("limit", @contracts.json_int(20)),
+          ]),
+        ) {
+        Ok(json) => {
+          let hits = match @contracts.parse_search_hits(json) {
+            Ok(value) => value
+            Err(message) => {
+              dispatch(TaskError("search.sessions: " + message))
+              return
+            }
+          }
+          let backend = match @contracts.as_object(json) {
+            Some(object) => @contracts.string_field_or(object, "backend", "")
+            None => ""
+          }
+          dispatch(SearchLoaded(hits, backend))
+        }
+        Err(message) => dispatch(TaskError("search.sessions: " + message))
       }
     }
   }

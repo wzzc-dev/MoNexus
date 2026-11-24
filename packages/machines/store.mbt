@@ -16,6 +16,7 @@
 pub struct MachineStore {
   conn : @sqlite3.Connection
   path : String
+  fts5 : Bool
 }
 
 ///|
@@ -100,18 +101,20 @@ pub fn MachineStore::open(path : String) -> Result[MachineStore, String] {
   let conn = @sqlite3.Connection::open(path) catch {
     error => return Err("cannot open sqlite database " + path + ": " + sqlite_text(error))
   }
-  let store = { conn, path }
   try {
     machine_store_pragmas(conn)
     machine_store_migrate(conn)
     workspace_store_migrate(conn)
     agent_store_migrate(conn)
+    task_store_migrate(conn)
   } catch {
     error => {
       conn.close() catch { _ => () }
       return Err("cannot initialize sqlite database: " + sqlite_text(error))
     }
   }
+  let fts5 = task_store_try_fts(conn)
+  let store = { conn, path, fts5 }
   Ok(store)
 }
 

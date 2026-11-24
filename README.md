@@ -1,33 +1,36 @@
 # MoNexus
 
 MoNexus is a local-first desktop shell for machines, tasks and agent
-sessions. This worktree contains the **M4 vertical slice**: the M3 host and
-MoUI 0.9.1 shell extended with ACP agent sessions, permission requests routed
-through the Decision inbox, an agent home (`AGENTS.md`/`MEMORY.md`) with
-capped memory injection, and memory snapshot artifacts. The host keeps
-machine, workspace/worktree/lease, agent-session, decision and artifact
-records plus the append-only event log in SQLite.
+sessions. This worktree contains the **M5 vertical slice**: the M4 host and
+MoUI shell extended with Task/Run scheduling, per-machine `max_parallel`
+queueing, idempotent dispatch, a `verify[]` evidence gate backed by
+Artifacts and owner Decisions, cursor-based event refresh in the desktop
+Tasks board/Run detail/Activity stream, and `search.sessions` over session
+and decision text (FTS5 with a LIKE fallback). The host keeps machine,
+workspace/worktree/lease, agent-session, decision, artifact, project, task,
+run and evidence records plus the append-only event log in SQLite.
 
-Task/Run scheduling (M5) and ACP-backed search are intentionally **not**
-implemented here.
+Crash recovery for in-flight runs (M6) and packaging (M7) are intentionally
+**not** implemented here.
 
 ## Layout
 
 ```
 moon.work                     workspace manifest
-packages/contracts/           JSON-RPC, event envelope, discovery, machine/agent contracts
-packages/machines/            SQLite store (machines, workspaces, agents, decisions, artifacts) + replay
+packages/contracts/           JSON-RPC, event envelope, discovery, machine/agent/task contracts
+packages/machines/            SQLite store (machines, workspaces, agents, decisions, artifacts, tasks, runs, evidence) + replay
 packages/providers/           SSH/PTY, local-or-SSH workspace provider, ACP agent provider
 packages/host-client/         host.json discovery + WebSocket JSON-RPC client
-services/host/                monexus-host executable (serve/status/subscribe/machine/rpc) + agent handlers
+services/host/                monexus-host executable (serve/status/subscribe/machine/rpc) + agent/task handlers
 apps/desktop/app/             MoUI model/update/view, host-link + machine + agent stream workers, tests
 apps/desktop/linux_skia/      Linux native entry + Vulkan linker shim
 scripts/host_smoke.sh         end-to-end host smoke test (M1 regression)
 scripts/machine_smoke.sh      machine registry + SSH probe smoke test (temp sshd/fake ssh)
 scripts/workspace_smoke.sh    M3 workspace/worktree/lease/terminal smoke (temp sshd)
 scripts/agent_smoke.sh        M4 ACP session/permission/memory smoke (mock adapter)
+scripts/task_smoke.sh         M5 Task/Run scheduling, evidence gate, events/search smoke (temp sshd)
 tests/agent/                  mock ACP + stdout test doubles (test-only, JS)
-docs/m1.md, docs/m2.md, docs/m3.md, docs/m4.md  design notes, verification and limitations
+docs/m1.md … docs/m5.md       design notes, verification and limitations
 spikes/m0/                    frozen M0 spike (see docs/spikes/m0.md)
 ```
 
@@ -117,6 +120,7 @@ scripts/host_smoke.sh       # M1 host regression
 scripts/machine_smoke.sh    # machine add/list/probe/remove, events, restart
 scripts/workspace_smoke.sh  # M3 open/read/write/diff/worktrees/leases/terminals
 scripts/agent_smoke.sh      # M4 ACP session → permission → Decision → memory artifact
+scripts/task_smoke.sh       # M5 tasks/runs/evidence gate/events/search
 M4_REAL_ACP=1 scripts/agent_smoke.sh   # also probes the real claude-code-acp once
 ```
 
@@ -128,6 +132,14 @@ round trip through the Inbox, stop + memory diff artifact, resume via
 `session/load`, the stdout fallback, host-restart reconcile, and event
 replay. The opt-in real-adapter section reports `UNVERIFIED` (skipped)
 instead of failing when the machine is not logged in.
+
+`task_smoke.sh` uses a temp state dir, `MONEXUS_MAX_PARALLEL=1` and a
+throwaway loopback sshd. It proves the local happy path (inherited verify,
+subtask parent, idempotent dispatch, evidence/artifacts/diff/rollup), local
+queueing and cancellation, all three verify-decision options (waive/retry/
+fail), event cursor stability, `search.sessions`, local + SSH runs on one
+task in parallel, host-restart projection reads, and illegal transitions.
+See `docs/m5.md` for the schedule/evidence/event design and M5 limitations.
 
 `machine_smoke.sh` starts an ephemeral non-root sshd on a random loopback
 port and injects a fake `ssh` for error classification. Every `add` passes an
@@ -169,6 +181,16 @@ one button per option and a free-text field, and readiness failures appear on
 the same channel. Transcripts are polled by cursor every 300 ms on a
 short-lived connection so the event subscription is never blocked.
 
+The Tasks page creates a `ready` task (workspace defaults to the open
+Project), dispatches command runs to local or an SSH machine id, and shows the
+selected task's runs with a Run detail: status, evidence (pass/waived/failed,
+exit code, excerpt), artifacts (readable), and the worktree diff. The
+Activity section is a cursor-fed tail of the host event stream; task/run/
+artifact/decision events refresh the board and the open run live, including a
+verify Decision answered from the Inbox. The Search page queries
+`search.sessions` and renders hits with kind, ref, snippet and the backend
+(`fts` or `like`).
+
 With no display server the native entry panics at window creation; this is a
 MoUI Linux backend limitation, not a MoNexus error. Use the headless
 verification below instead.
@@ -204,7 +226,7 @@ display. It also links `-lvulkan` without the package's `cc-link-flags`, so
 point `LIBRARY_PATH` at the repo-local shim directory as shown; the Vulkan
 runtime `libvulkan.so.1` must still be installed.)
 
-## Protocol (M4)
+## Protocol (M5)
 
 - Transport: WebSocket JSON-RPC 2.0 at `ws://127.0.0.1:<random>/ws`,
   `Authorization: Bearer <token>` during the HTTP upgrade; wrong or missing
@@ -212,8 +234,11 @@ runtime `libvulkan.so.1` must still be installed.)
 - Requests: `host.status`, `events.subscribe`, `machine.add`, `machine.list`,
   `machine.probe`, `machine.remove`, the `workspace.*`/`worktree.*`/
   `lease.*`/`terminal.*` methods, `agent.probe/start/send/read/stop/list/
-  resume/memoryRead/memoryWrite`, `decision.list/respond`, and
-  `rpc --method ... --params ...` for shell-driven calls. Every request must
+  resume/memoryRead/memoryWrite`, `decision.list/respond`, the M5
+  `project.create/list`, `task.create/list/get/cancel`,
+  `run.create/list/get/cancel`, `artifact.read`, `events.list` and
+  `search.sessions`, and `rpc --method ... --params ...` for shell-driven
+  calls. Every request must
   carry a non-empty `params.client_request_id`; the host caches the response
   and returns it again for a retry with the same key.
 - Notifications: `events.event` with `params.event` set to the ADR 0002 event
@@ -225,21 +250,27 @@ runtime `libvulkan.so.1` must still be installed.)
   `agent.readiness.ok/failed`, `agent.session.started/updated/output/
   stopped/exited/resumed`, `agent.artifact.created`, `agent.memory.updated`,
   and the decision events `decision.requested/responded/expired`; they carry
-  the full session/decision/artifact record.
-- Persistence: machine, workspace, worktree, lease, agent-session, decision
-  and artifact events live in SQLite (`<state_dir>/monexus.db`, WAL) with
-  their projections. `meta.last_seq` keeps the event sequence monotonic
-  across restarts, and startup replays machine/workspace/worktree/lease
-  events to reconcile the projections and closes agent sessions that were
-  live when the previous host exited. The last 256 events are cached in
-  memory for `events.subscribe --since` replay.
+  the full session/decision/artifact record. M5 adds `project.created`,
+  `task.created/assigned/status.changed/cancelled`,
+  `run.queued/started/progress/verifying/evidence/succeeded/failed/
+  cancelled/waiting_approval`, and `artifact.created` (with `run_id`); every
+  event carries the full Task/Run/Evidence projection.
+- Persistence: machine, workspace, worktree, lease, agent-session, decision,
+  artifact, project, task, run and evidence events live in SQLite
+  (`<state_dir>/monexus.db`, WAL) with their projections. `meta.last_seq`
+  keeps the event sequence monotonic across restarts, startup replays
+  machine/workspace/worktree/lease events to reconcile the projections and
+  closes agent sessions that were live when the previous host exited, and
+  now also rebuilds the task projections from events. The last 256 events
+  are cached in memory for `events.subscribe --since` replay; the desktop
+  uses `events.list --since <cursor>` for the Activity tail.
 - Errors: JSON-RPC codes `-32700`, `-32600`, `-32601`, `-32602`, `-32603`;
   machine/workspace failures use the host error code with `data.kind` =
   `unauthorized|timeout|not_found|unreachable|host_key|remote|invalid|
   conflict|internal`, agent failures add `readiness|unsupported`, and a
   message prefixed by a readable label (`Unauthorized: ...`).
 
-## Known limitations (M1–M4)
+## Known limitations (M1–M5)
 
 - Probing is **manual**: there is no background heartbeat/probe loop yet.
 - File listing is one directory level; reads are whole-file and diffs stop at
@@ -249,8 +280,9 @@ runtime `libvulkan.so.1` must still be installed.)
 - The generic `rpc` CLI uses wire field names; typed machine commands remain
   the only first-class CLI subcommands.
 - `events.subscribe --since` replays from the 256-event in-memory ring, which
-  is seeded from SQLite on startup. Older events remain in the `events` table
-  but there is no full-cursor RPC yet.
+  is seeded from SQLite on startup. Older events are reachable through the
+  M5 `events.list --since` RPC (used by the desktop Activity tail), not
+  through the subscription itself.
 - The response idempotency cache is in memory; a retry with the same
   `client_request_id` after a host restart may execute again. The desktop
   uses fresh ids per command.
@@ -276,8 +308,19 @@ runtime `libvulkan.so.1` must still be installed.)
   stream carries state changes, not transcript chunks.
 - The stdout fallback has no protocol handshake, no turn completion and no
   readiness beyond an executable check.
-- No Task/Run scheduling or queueing yet; sessions are started manually
-  (M5).
+- Task/Run scheduling is in place, but there is **no M6 recovery**: runs that
+  were `running/verifying` when the host exited are not resumed or marked
+  `lost`; startup reconciles projections only.
+- Agent-mode Runs are local-only and use an internal Sink, so they do not
+  stream into the Agents page. Desktop dispatch is command-mode only.
+- `verify[]` commands run serially per run; a waiver applies to every failed
+  evidence row of the run (not a selected row) and stores only the Decision
+  answer as audit text.
+- Search indexes finished session transcripts and decisions; live
+  transcripts are not searchable until finalize. This environment's bundled
+  SQLite reports `backend: like`, not FTS5.
+- The desktop Tasks board refreshes whole lists on relevant events rather
+  than applying deltas, and the Activity tail keeps 200 events (renders 30).
 - Permission answers are manual through `decision.respond`; there is no
   auto-approve or timeout-based policy.
 - The real adapter needs a logged-in account on the host machine. The host

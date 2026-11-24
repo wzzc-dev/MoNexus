@@ -559,6 +559,348 @@ fn inbox_page(model : Model) -> @moui.View[Msg] {
 }
 
 ///|
+fn task_row(model : Model, record : @contracts.TaskRecord) -> @moui.View[Msg] {
+  let selected = model.task.selected_task == record.id
+  let line = row([
+    text(record.title).title(),
+    tag(record.status),
+    spacer(weight=1.0),
+    text(record.id).caption(),
+    button("select", on_click=TaskSelect(record.id)),
+    button("cancel", on_click=TaskCancelNow(record.id)),
+  ], spacing=8.0)
+  let lines : Array[@moui.View[Msg]] = [
+    if selected { line.title() } else { line },
+    text(
+      "workspace " +
+      (if record.workspace_id == "" { "(none)" } else { record.workspace_id }) +
+      (if record.parent_id == "" { "" } else { " · parent " + record.parent_id }) +
+      " · verify " +
+      record.verify.length().to_string() +
+      (if record.goal == "" { "" } else { " · " + record.goal }),
+    ).caption(),
+  ]
+  card(column(lines, spacing=4.0), padding=8.0)
+}
+
+///|
+fn run_row(model : Model, record : @contracts.RunRecord) -> @moui.View[Msg] {
+  let selected = model.task.selected_run == record.id
+  let line = row([
+    text(record.mode + ": " + record.command).mono(),
+    tag(record.status),
+    spacer(weight=1.0),
+    text(
+      if record.machine_id == "" {
+        "local"
+      } else {
+        record.machine_id
+      },
+    ).caption(),
+    button("open", on_click=RunSelect(record.id)),
+    button("cancel", on_click=RunCancelNow(record.id)),
+  ], spacing=8.0)
+  if selected {
+    line.title()
+  } else {
+    line
+  }
+}
+
+///|
+fn run_detail_view(model : Model) -> @moui.View[Msg] {
+  let detail = match model.task.detail {
+    Some(value) => value
+    None =>
+      return column([
+        text("Run detail").title(),
+        text("Select a run to inspect evidence, artifacts and the diff.").caption(),
+      ], spacing=6.0)
+  }
+  let run = detail.run
+  let lines : Array[@moui.View[Msg]] = [
+    row([
+      text("Run " + run.id).title(),
+      tag(run.status),
+      spacer(weight=1.0),
+      text(
+        (if run.machine_id == "" { "local" } else { run.machine_id }) +
+        " · " +
+        run.mode +
+        (if run.worktree_id == "" {
+          ""
+        } else {
+          " · worktree " + run.worktree_id
+        }),
+      ).caption(),
+    ], spacing=8.0),
+    text(
+      (if run.command == "" { run.prompt } else { run.command }) +
+      (if run.stop_reason == "" { "" } else { "\nstop: " + run.stop_reason }) +
+      (if run.last_error == "" { "" } else { "\nerror: " + run.last_error }) +
+      (if run.output_summary == "" { "" } else { "\nsummary: " + run.output_summary }),
+    ).mono(),
+    text("Evidence").title(),
+  ]
+  if detail.evidence.is_empty() {
+    lines.push(text("(no evidence yet)").caption())
+  } else {
+    for evidence in detail.evidence {
+      lines.push(
+        card(
+          column([
+            row([
+              text(evidence.name + " · " + evidence.kind).title(),
+              spacer(weight=1.0),
+              tag(
+                if evidence.passed {
+                  "passed"
+                } else if evidence.waived {
+                  "waived"
+                } else {
+                  "failed"
+                },
+              ),
+            ], spacing=8.0),
+            text("$ " + evidence.command + " · exit " + evidence.exit_code.to_string()).mono(),
+            if evidence.excerpt == "" {
+              text("(no output)").caption()
+            } else {
+              text(evidence.excerpt).mono()
+            },
+            if evidence.artifact_id == "" {
+              text("no artifact").caption()
+            } else {
+              row([
+                text("artifact " + evidence.artifact_id).caption(),
+                button("read", on_click=ArtifactReadNow(evidence.artifact_id)),
+              ], spacing=8.0)
+            },
+          ], spacing=4.0),
+          padding=8.0,
+        ),
+      )
+    }
+  }
+  lines.push(text("Artifacts").title())
+  if detail.artifacts.is_empty() {
+    lines.push(text("(no artifacts)").caption())
+  } else {
+    for artifact in detail.artifacts {
+      lines.push(
+        row([
+          text(
+            artifact.kind +
+            " · " +
+            artifact.size.to_string() +
+            "B · " +
+            artifact.uri,
+          ).mono(),
+          spacer(weight=1.0),
+          button("read", on_click=ArtifactReadNow(artifact.id)),
+        ], spacing=8.0),
+      )
+    }
+  }
+  if model.task.artifact_text != "" {
+    lines.push(
+      text("Artifact: " + model.task.artifact_name).title(),
+    )
+    lines.push(text(model.task.artifact_text).mono())
+  }
+  lines.push(text("Diff (HEAD)").title())
+  lines.push(
+    text(
+      if detail.diff == "" {
+        "(no diff / not a git worktree)"
+      } else {
+        detail.diff
+      },
+    ).mono(),
+  )
+  column(lines, spacing=8.0)
+}
+
+///|
+fn activity_view(model : Model) -> @moui.View[Msg] {
+  let events = model.task.events
+  let lines : Array[@moui.View[Msg]] = [
+    row([
+      text("Activity").title(),
+      spacer(weight=1.0),
+      text(
+        "cursor " +
+        model.task.event_seq.to_string() +
+        " · " +
+        events.length().to_string() +
+        " cached",
+      ).caption(),
+    ], spacing=8.0),
+  ]
+  if events.is_empty() {
+    lines.push(text("(no events yet)").caption())
+  } else {
+    let start = if events.length() > 30 { events.length() - 30 } else { 0 }
+    let mut index = start
+    while index < events.length() {
+      let event = events[index]
+      lines.push(
+        text(
+          "#" +
+          event.seq.to_string() +
+          " " +
+          event.event_type +
+          " · " +
+          event.subject,
+        ).mono(),
+      )
+      index = index + 1
+    }
+  }
+  column(lines, spacing=4.0)
+}
+
+///|
+fn tasks_page(model : Model) -> @moui.View[Msg] {
+  let state = model.task
+  let lines : Array[@moui.View[Msg]] = [
+    row([
+      text("Tasks").title(),
+      spacer(weight=1.0),
+      button("Refresh", on_click=TasksRefresh),
+    ], spacing=8.0),
+    text(
+      "Create a ready task, then dispatch command runs to local or SSH machines. Runs pass through verifying: every verify[] command must pass or be explicitly waived.",
+    ).caption(),
+    row([
+      text_field(
+        state.title,
+        on_input=fn(value) { TaskTitle(value) },
+        placeholder="task title (required)",
+        width=320.0,
+      ),
+      text_field(
+        state.workspace_id,
+        on_input=fn(value) { TaskWorkspace(value) },
+        placeholder="workspace id (blank = open Project)",
+        width=260.0,
+      ),
+      button("Create ready task", on_click=TaskCreateSubmit),
+    ], spacing=8.0),
+    row([
+      text_field(
+        state.goal,
+        on_input=fn(value) { TaskGoal(value) },
+        placeholder="goal (optional)",
+        width=320.0,
+      ),
+      text_field(
+        state.verify_text,
+        on_input=fn(value) { TaskVerify(value) },
+        placeholder="verify commands, one per line",
+        width=420.0,
+      ),
+    ], spacing=8.0),
+  ]
+  if state.message != "" {
+    lines.push(text(state.message).caption())
+  }
+  lines.push(text("Board").title())
+  if state.tasks.is_empty() {
+    lines.push(text("No tasks yet.").caption())
+  } else {
+    for record in state.tasks {
+      lines.push(task_row(model, record))
+    }
+  }
+  if state.selected_task != "" {
+    lines.push(text("Runs for " + state.selected_task).title())
+    if state.runs.is_empty() {
+      lines.push(text("(no runs yet)").caption())
+    } else {
+      for record in state.runs {
+        lines.push(run_row(model, record))
+      }
+    }
+    lines.push(
+      row([
+        text_field(
+          state.command,
+          on_input=fn(value) { TaskCommand(value) },
+          placeholder="command to run in the worktree",
+          width=420.0,
+        ),
+        text_field(
+          state.machine_id,
+          on_input=fn(value) { TaskMachine(value) },
+          placeholder="machine id (blank = local)",
+          width=220.0,
+        ),
+        button("Dispatch run", on_click=RunDispatch),
+      ], spacing=8.0),
+    )
+  }
+  lines.push(run_detail_view(model))
+  lines.push(activity_view(model))
+  column(lines, spacing=9.0)
+}
+
+///|
+fn search_page(model : Model) -> @moui.View[Msg] {
+  let state = model.search
+  let lines : Array[@moui.View[Msg]] = [
+    row([
+      text("Search").title(),
+      spacer(weight=1.0),
+      text(
+        if state.backend == "" {
+          "FTS5 when available, LIKE otherwise"
+        } else {
+          "backend: " + state.backend
+        },
+      ).caption(),
+    ], spacing=8.0),
+    text(
+      "Search session transcripts and decision text recorded by the host.",
+    ).caption(),
+    row([
+      text_field(
+        state.query,
+        on_input=fn(value) { SearchQuery(value) },
+        placeholder="e.g. verify failed, flaky test, waived",
+        width=480.0,
+      ),
+      button("Search", on_click=SearchSubmit),
+    ], spacing=8.0),
+  ]
+  if state.message != "" {
+    lines.push(text(state.message).caption())
+  }
+  if state.hits.is_empty() {
+    lines.push(text("(no hits)").caption())
+  } else {
+    for hit in state.hits {
+      lines.push(
+        card(
+          column([
+            row([
+              tag(hit.kind),
+              text(hit.title).title(),
+              spacer(weight=1.0),
+              text(hit.ref_id).caption(),
+            ], spacing=8.0),
+            text(hit.snippet).mono(),
+            text(hit.ts).caption(),
+          ], spacing=4.0),
+          padding=8.0,
+        ),
+      )
+    }
+  }
+  column(lines, spacing=8.0)
+}
+
+///|
 fn page_body(model : Model) -> @moui.View[Msg] {
   match model.page {
     Home =>
@@ -573,18 +915,8 @@ fn page_body(model : Model) -> @moui.View[Msg] {
     Projects => project_page(model)
     Agents => agents_page(model)
     Inbox => inbox_page(model)
-    Tasks =>
-      column([
-        text("Tasks").title(),
-        text("Tasks page"),
-        text("M5 will show task runs and their event streams here."),
-      ], spacing=10.0)
-    Search =>
-      column([
-        text("Search").title(),
-        text("Search page"),
-        text("Search will be wired in a later milestone."),
-      ], spacing=10.0)
+    Tasks => tasks_page(model)
+    Search => search_page(model)
     Settings =>
       column([
         text("Settings").title(),
