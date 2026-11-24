@@ -5,6 +5,8 @@ pub(all) enum Page {
   Home
   Machines
   Projects
+  Agents
+  Inbox
   Tasks
   Search
   Settings
@@ -16,6 +18,8 @@ pub fn Page::label(self : Page) -> String {
     Home => "Home"
     Machines => "Machines"
     Projects => "Projects"
+    Agents => "Agents"
+    Inbox => "Inbox"
     Tasks => "Tasks"
     Search => "Search"
     Settings => "Settings"
@@ -27,6 +31,8 @@ pub fn Page::from_label(value : String) -> Page {
   match value.to_lower() {
     "machines" => Machines
     "projects" => Projects
+    "agents" => Agents
+    "inbox" => Inbox
     "tasks" => Tasks
     "search" => Search
     "settings" => Settings
@@ -157,6 +163,58 @@ pub fn ProjectState::new() -> ProjectState {
 }
 
 ///|
+/// M4 Agents page: one live ACP session plus the owner's controls.
+pub(all) struct AgentState {
+  agent_id : String
+  mode : String
+  workspace_id : String
+  worktree_id : String
+  prompt : String
+  input : String
+  session : @contracts.AgentSessionRecord?
+  sessions : Array[@contracts.AgentSessionRecord]
+  transcript : String
+  cursor : Int64
+  state_text : String
+  stop_reason : String
+  pending_decision : String
+  message : String
+}
+
+///|
+pub fn AgentState::new() -> AgentState {
+  {
+    agent_id: "default",
+    mode: @contracts.AGENT_MODE_ACP,
+    workspace_id: "",
+    worktree_id: "",
+    prompt: "Reply with a short greeting.",
+    input: "",
+    session: None,
+    sessions: [],
+    transcript: "",
+    cursor: 0L,
+    state_text: "idle",
+    stop_reason: "",
+    pending_decision: "",
+    message: "",
+  }
+}
+
+///|
+/// Inbox page: pending Decisions shared by permissions and readiness.
+pub(all) struct InboxState {
+  decisions : Array[@contracts.DecisionRecord]
+  text : String
+  message : String
+}
+
+///|
+pub fn InboxState::new() -> InboxState {
+  { decisions: [], text: "", message: "", }
+}
+
+///|
 pub struct Model {
   page : Page
   host : HostProjection
@@ -166,6 +224,8 @@ pub struct Model {
   machine_message : String
   draft : MachineDraft
   project : ProjectState
+  agent : AgentState
+  inbox : InboxState
 }
 
 ///|
@@ -240,6 +300,8 @@ pub fn Model::new() -> Model {
     machine_message: "",
     draft: MachineDraft::new(),
     project: ProjectState::new(),
+    agent: AgentState::new(),
+    inbox: InboxState::new(),
   }
 }
 
@@ -350,6 +412,30 @@ pub(all) enum Msg {
   ProjectCreateWorktree
   ProjectWorktreeCreated(@contracts.WorktreeRecord)
   ProjectWorktrees(Array[@contracts.WorktreeRecord])
+  // Agents / Inbox.
+  AgentId(String)
+  AgentMode(String)
+  AgentWorkspace(String)
+  AgentWorktree(String)
+  AgentPromptDraft(String)
+  AgentInputDraft(String)
+  AgentRefresh
+  AgentProbeNow
+  AgentStartSession
+  AgentSendInput
+  AgentStopSession
+  AgentResumeSession
+  AgentStarted(@contracts.AgentSessionRecord)
+  AgentSessions(Array[@contracts.AgentSessionRecord])
+  AgentStreamState(String, String, String, String)
+  AgentStreamText(Int64, String)
+  AgentNotice(String)
+  AgentError(String)
+  InboxRefresh
+  InboxDecisions(Array[@contracts.DecisionRecord])
+  InboxText(String)
+  InboxAnswer(String, String)
+  InboxSubmitText(String)
 }
 
 ///|
@@ -375,6 +461,15 @@ pub(all) enum MachineCommand {
   ProjectCloseTerminal(String)
   ProjectListWorktrees(String)
   ProjectCreateWorktree(String, String, String)
+  // Agents / Inbox.
+  AgentProbe(String, String, String)
+  AgentStart(String, String, String, String, String)
+  AgentSend(String, String)
+  AgentStop(String)
+  AgentResume(String)
+  AgentList
+  DecisionList(String)
+  DecisionRespond(String, String, String, String)
 }
 
 ///|
@@ -524,7 +619,14 @@ pub fn update_full(
 ) -> (Model, Array[MachineCommand]) {
   let none : Array[MachineCommand] = []
   match msg {
-    SelectPage(page) => ({ ..model, page }, none)
+    SelectPage(page) => (
+      { ..model, page },
+      match page {
+        Agents => [AgentList]
+        Inbox => [DecisionList(@contracts.DECISION_STATUS_PENDING)]
+        _ => none
+      },
+    )
     LinkConnecting => {
       let host = {
         ..model.host,
@@ -1037,6 +1139,234 @@ pub fn update_full(
         },
       },
       none,
+    )
+    AgentId(value) => (
+      { ..model, agent: { ..model.agent, agent_id: value } },
+      none,
+    )
+    AgentMode(value) => (
+      { ..model, agent: { ..model.agent, mode: value } },
+      none,
+    )
+    AgentWorkspace(value) => (
+      { ..model, agent: { ..model.agent, workspace_id: value } },
+      none,
+    )
+    AgentWorktree(value) => (
+      { ..model, agent: { ..model.agent, worktree_id: value } },
+      none,
+    )
+    AgentPromptDraft(value) => (
+      { ..model, agent: { ..model.agent, prompt: value } },
+      none,
+    )
+    AgentInputDraft(value) => (
+      { ..model, agent: { ..model.agent, input: value } },
+      none,
+    )
+    AgentRefresh => (model, [AgentList])
+    AgentProbeNow => (
+      {
+        ..model,
+        agent: {
+          ..model.agent,
+          message: "probing " + model.agent.agent_id + "...",
+        },
+      },
+      [AgentProbe(model.agent.agent_id, model.agent.mode, "")],
+    )
+    AgentStartSession => (
+      {
+        ..model,
+        agent: {
+          ..model.agent,
+          transcript: "",
+          cursor: 0L,
+          pending_decision: "",
+          state_text: "starting",
+          stop_reason: "",
+          message: "starting " + model.agent.agent_id + "...",
+        },
+      },
+      [
+        AgentStart(
+          model.agent.agent_id,
+          model.agent.mode,
+          model.agent.workspace_id,
+          model.agent.worktree_id,
+          model.agent.prompt,
+        ),
+      ],
+    )
+    AgentSendInput =>
+      match model.agent.session {
+        Some(record) =>
+          if model.agent.input == "" {
+            (model, none)
+          } else {
+            (
+              {
+                ..model,
+                agent: {
+                  ..model.agent,
+                  input: "",
+                  state_text: "running",
+                  message: "prompt sent",
+                },
+              },
+              [AgentSend(record.id, model.agent.input)],
+            )
+          }
+        None => (
+          {
+            ..model,
+            agent: { ..model.agent, message: "start a session first" },
+          },
+          none,
+        )
+      }
+    AgentStopSession =>
+      match model.agent.session {
+        Some(record) => (
+          {
+            ..model,
+            agent: { ..model.agent, message: "stopping..." },
+          },
+          [AgentStop(record.id)],
+        )
+        None => (model, none)
+      }
+    AgentResumeSession =>
+      match model.agent.session {
+        Some(record) => (
+          {
+            ..model,
+            agent: { ..model.agent, message: "resuming " + record.id + "..." },
+          },
+          [AgentResume(record.id)],
+        )
+        None => (
+          {
+            ..model,
+            agent: { ..model.agent, message: "no session to resume" },
+          },
+          none,
+        )
+      }
+    AgentStarted(record) => (
+      {
+        ..model,
+        agent: {
+          ..model.agent,
+          session: Some(record),
+          transcript: "",
+          cursor: 0L,
+          state_text: record.state,
+          stop_reason: record.stop_reason,
+          pending_decision: "",
+          message:
+            "session " +
+            record.id +
+            " · " +
+            record.mode +
+            " · " +
+            record.cwd,
+        },
+      },
+      [AgentList],
+    )
+    AgentSessions(records) => (
+      {
+        ..model,
+        agent: {
+          ..model.agent,
+          sessions: records,
+          message: "sessions: " + records.length().to_string(),
+        },
+      },
+      none,
+    )
+    AgentStreamState(session_id, state, stop_reason, pending) => {
+      let current = model.agent.session
+      let same = match current {
+        Some(record) => record.id == session_id
+        None => false
+      }
+      (
+        {
+          ..model,
+          agent: {
+            ..model.agent,
+            state_text: if same { state } else { model.agent.state_text },
+            stop_reason: if same {
+              stop_reason
+            } else {
+              model.agent.stop_reason
+            },
+            pending_decision: if same {
+              pending
+            } else {
+              model.agent.pending_decision
+            },
+          },
+        },
+        none,
+      )
+    }
+    AgentStreamText(cursor, text) => (
+      {
+        ..model,
+        agent: {
+          ..model.agent,
+          cursor,
+          transcript: model.agent.transcript + text,
+        },
+      },
+      none,
+    )
+    AgentNotice(text) => (
+      { ..model, agent: { ..model.agent, message: text } },
+      none,
+    )
+    AgentError(text) => (
+      { ..model, agent: { ..model.agent, message: text } },
+      none,
+    )
+    InboxRefresh => (model, [DecisionList(@contracts.DECISION_STATUS_PENDING)])
+    InboxDecisions(records) => (
+      {
+        ..model,
+        inbox: {
+          ..model.inbox,
+          decisions: records,
+          message: "pending decisions: " + records.length().to_string(),
+        },
+      },
+      none,
+    )
+    InboxText(value) => (
+      { ..model, inbox: { ..model.inbox, text: value } },
+      none,
+    )
+    InboxAnswer(decision_id, option_id) => (
+      {
+        ..model,
+        inbox: { ..model.inbox, message: "answering..." },
+      },
+      [
+        DecisionRespond(decision_id, option_id, model.inbox.text, "owner"),
+        DecisionList(@contracts.DECISION_STATUS_PENDING),
+      ],
+    )
+    InboxSubmitText(decision_id) => (
+      {
+        ..model,
+        inbox: { ..model.inbox, message: "answering with text..." },
+      },
+      [
+        DecisionRespond(decision_id, "", model.inbox.text, "owner"),
+        DecisionList(@contracts.DECISION_STATUS_PENDING),
+      ],
     )
   }
 }

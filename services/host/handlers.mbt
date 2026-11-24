@@ -166,6 +166,50 @@ async fn handle_request(
       state.mutex.release()
       handle_terminal_close(state, sink, request, client_request_id)
     }
+    @contracts.METHOD_AGENT_PROBE => {
+      state.mutex.release()
+      handle_agent_probe(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_AGENT_START => {
+      state.mutex.release()
+      handle_agent_start(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_AGENT_SEND => {
+      state.mutex.release()
+      handle_agent_send(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_AGENT_STOP => {
+      state.mutex.release()
+      handle_agent_stop(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_AGENT_READ => {
+      state.mutex.release()
+      handle_agent_read(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_AGENT_LIST => {
+      state.mutex.release()
+      handle_agent_list(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_AGENT_RESUME => {
+      state.mutex.release()
+      handle_agent_resume(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_AGENT_MEMORY_READ => {
+      state.mutex.release()
+      handle_agent_memory_read(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_AGENT_MEMORY_WRITE => {
+      state.mutex.release()
+      handle_agent_memory_write(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_DECISION_LIST => {
+      state.mutex.release()
+      handle_decision_list(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_DECISION_RESPOND => {
+      state.mutex.release()
+      handle_decision_respond(state, sink, request, client_request_id)
+    }
     @contracts.METHOD_EVENTS_SUBSCRIBE => {
       let since = @contracts.subscribe_since(request.params)
       let replay = match since {

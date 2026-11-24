@@ -21,6 +21,9 @@ async fn main {
   let machine_task : async () -> Unit = async fn() {
     @app.machine_command_loop(@client.default_state_dir())
   }
+  let stream_task : async () -> Unit = async fn() {
+    @app.agent_stream_loop(@client.default_state_dir())
+  }
   @async.with_task_group(async fn(group) {
     group.spawn_bg(
       no_wait=true,
@@ -31,6 +34,11 @@ async fn main {
       no_wait=true,
       allow_failure=true,
       machine_task,
+    )
+    group.spawn_bg(
+      no_wait=true,
+      allow_failure=true,
+      stream_task,
     )
     window_task()
   })

@@ -11,7 +11,7 @@ test "the shell renders the header and the Home page" {
 }
 
 ///|
-test "all five pages can be switched by tapping navigation" {
+test "all eight pages can be switched by tapping navigation" {
   let harness = @test_support.WidgetHarness::from_program(
     program=program(),
     width=920.0,
@@ -20,6 +20,11 @@ test "all five pages can be switched by tapping navigation" {
   harness.tap_text("Machines")
   assert_true(harness.has_text("Add machine"))
   assert_true(harness.has_text("Saved machines"))
+  harness.tap_text("Agents")
+  assert_true(harness.has_text("Agents / Sessions"))
+  assert_true(harness.has_text("Start session"))
+  harness.tap_text("Inbox")
+  assert_true(harness.has_text("No pending decisions."))
   harness.tap_text("Tasks")
   assert_true(harness.has_text("Tasks page"))
   harness.tap_text("Search")
