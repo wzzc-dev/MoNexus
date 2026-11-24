@@ -43,6 +43,24 @@ pub struct HostState {
   sinks : Array[Sink]
   cache : Map[String, String]
   store : @machines.MachineStore
+  group : Ref[@async.TaskGroup[Unit]?]
+  terminals : Map[String, TerminalSession]
+}
+
+///|
+/// One open terminal transcript. The provider task pumps PTY/SSH output into
+/// `output`; the host appends it to `transcript` so `terminal.read` can
+/// return everything after a client cursor. All fields except `input` and
+/// `output` are guarded by the host mutex.
+pub struct TerminalSession {
+  id : String
+  workspace_id : String
+  input : @aqueue.Queue[@workspace.TerminalInput]
+  output : @aqueue.Queue[@workspace.TerminalEvent]
+  transcript : Ref[String]
+  cursor : Ref[Int32]
+  eof : Ref[Bool]
+  task : @async.Task[Unit]
 }
 
 ///|
@@ -95,6 +113,8 @@ fn HostState::new(
     sinks: [],
     cache: Map([]),
     store,
+    group: Ref(None),
+    terminals: Map([]),
   }
 }
 
@@ -214,6 +234,64 @@ fn HostState::append_machine_event(
 ) -> Result[@contracts.EventEnvelope, String] {
   let event = self.next_envelope(event_type, subject, payload)
   match self.store.record_machine_event(event, record, removed_id) {
+    Ok(_) => {
+      self.publish(event)
+      Ok(event)
+    }
+    Err(message) => Err(message)
+  }
+}
+
+///|
+/// Append a workspace event and its projection in one transaction.
+fn HostState::append_workspace_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+  record : @contracts.WorkspaceRecord?,
+  removed_id : String?,
+) -> Result[@contracts.EventEnvelope, String] {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.record_workspace_event(event, record, removed_id) {
+    Ok(_) => {
+      self.publish(event)
+      Ok(event)
+    }
+    Err(message) => Err(message)
+  }
+}
+
+///|
+fn HostState::append_worktree_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+  record : @contracts.WorktreeRecord?,
+  removed_id : String?,
+) -> Result[@contracts.EventEnvelope, String] {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.record_worktree_event(event, record, removed_id) {
+    Ok(_) => {
+      self.publish(event)
+      Ok(event)
+    }
+    Err(message) => Err(message)
+  }
+}
+
+///|
+fn HostState::append_lease_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+  record : @contracts.LeaseRecord?,
+  released_id : String?,
+) -> Result[@contracts.EventEnvelope, String] {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.record_lease_event(event, record, released_id) {
     Ok(_) => {
       self.publish(event)
       Ok(event)

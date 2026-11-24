@@ -308,6 +308,104 @@ pub async fn run(
 }
 
 ///|
+/// Execute `argv` on the remote host with `stdin` piped from a string. The
+/// write happens concurrently with the process read, so content larger than a
+/// pipe buffer cannot deadlock. Used by the SSH workspace provider for its
+/// temp-file + atomic-rename write path.
+pub async fn run_with_input(
+  target : SshTarget,
+  argv : Array[String],
+  cwd~ : String = ".",
+  input~ : String,
+  timeout_seconds~ : Int = 30,
+) -> Result[RemoteCommandResult, @error.ProviderError] {
+  if argv.is_empty() {
+    return Err(
+      @error.ProviderError::new(
+        @error.ProviderErrorKind::Internal,
+        "empty argv",
+      ),
+    )
+  }
+  let remote_command = remote_exec_command(cwd, argv)
+  let full_argv = ssh_argv(target, remote_command)
+  let budget_ms = timeout_seconds.max(1) * 1_000
+  let collected = @async.with_timeout_opt(budget_ms, async fn() {
+    let (stdin, stdin_writer) = @process.write_to_process() catch {
+      error =>
+        return Err(
+          @error.ProviderError::new(
+            @error.ProviderErrorKind::SpawnFailed,
+            "cannot create ssh stdin pipe",
+          ).with_detail(error.to_string()),
+        )
+    }
+    let (stdout_reader, stdout_pipe) = @process.read_from_process() catch {
+      error =>
+        return Err(
+          @error.ProviderError::new(
+            @error.ProviderErrorKind::SpawnFailed,
+            "cannot create ssh stdout pipe",
+          ).with_detail(error.to_string()),
+        )
+    }
+    let (stderr_reader, stderr_pipe) = @process.read_from_process() catch {
+      error =>
+        return Err(
+          @error.ProviderError::new(
+            @error.ProviderErrorKind::SpawnFailed,
+            "cannot create ssh stderr pipe",
+          ).with_detail(error.to_string()),
+        )
+    }
+    let (exit_code, stdout, stderr) = @async.with_task_group(async fn(group) {
+      let exit = group.spawn(() => {
+        @process.run(
+          full_argv[0],
+          full_argv[1:].to_owned(),
+          stdin=stdin,
+          stdout=stdout_pipe,
+          stderr=stderr_pipe,
+        )
+      })
+      let out = group.spawn(() => {
+        defer stdout_reader.close()
+        stdout_reader.read_all()
+      })
+      let err = group.spawn(() => {
+        defer stderr_reader.close()
+        stderr_reader.read_all()
+      })
+      let writer = group.spawn(() => {
+        defer stdin_writer.close()
+        stdin_writer.write(input) catch { _ => () }
+      })
+      writer.wait()
+      (exit.wait(), out.wait(), err.wait())
+    })
+    let stdout_text = stdout.text() catch { _ => "" }
+    let stderr_text = stderr.text() catch { _ => "" }
+    Ok({ exit_code, stdout: stdout_text, stderr: stderr_text })
+  })
+  match collected {
+    Some(Ok(result)) =>
+      if result.exit_code == 255 {
+        Err(classify_ssh_failure(255, result.stderr))
+      } else {
+        Ok(result)
+      }
+    Some(Err(error)) => Err(error)
+    None =>
+      Err(
+        @error.ProviderError::new(
+          @error.ProviderErrorKind::ConnectTimeout,
+          "SSH command timed out after " + timeout_seconds.to_string() + "s",
+        ),
+      )
+  }
+}
+
+///|
 /// Parse the fixed `KEY=VALUE` probe output. Exposed so the host and tests can
 /// check profile normalization (clamping, docker/gui booleans) without a
 /// remote connection.

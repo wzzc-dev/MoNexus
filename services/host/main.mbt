@@ -22,6 +22,7 @@ async fn run_host_command(args : Array[String]) -> (Int32, String) {
     "status" => status_command(args[2:].to_owned())
     "subscribe" => subscribe_command(args[2:].to_owned())
     "machine" => machine_command(args[2:].to_owned())
+    "rpc" => rpc_command(args[2:].to_owned())
     _ =>
       (
         2,
@@ -34,11 +35,11 @@ async fn run_host_command(args : Array[String]) -> (Int32, String) {
 }
 
 ///|
-const HOST_VERSION : String = "0.2.0-m2"
+const HOST_VERSION : String = "0.3.0-m3"
 
 ///|
 fn host_version_line() -> String {
-  "monexus-host " + HOST_VERSION + " (M2)"
+  "monexus-host " + HOST_VERSION + " (M3)"
 }
 
 ///|
@@ -59,6 +60,7 @@ fn usage_text() -> String {
     "  monexus-host machine probe --id ID [--state-dir DIR]",
     "      [--timeout-seconds N]",
     "  monexus-host machine remove --id ID [--state-dir DIR]",
+    "  monexus-host rpc --method METHOD [--state-dir DIR] [--params JSON]",
     "",
     "`serve` writes DIR/host.json (mode 0600), binds a random loopback port",
     "and serves JSON-RPC 2.0 over WebSocket. Default DIR: $MONEXUS_STATE_DIR,",
@@ -397,6 +399,7 @@ fn machine_usage() -> String {
     "  monexus-host machine list [--state-dir DIR]",
     "  monexus-host machine probe --id ID [--state-dir DIR] [--timeout-seconds N]",
     "  monexus-host machine remove --id ID [--state-dir DIR]",
+    "  monexus-host rpc --method METHOD [--state-dir DIR] [--params JSON]",
     "",
     "POLICY is accept-new (default), yes, no or config.",
   ].join("\n")
@@ -548,4 +551,54 @@ async fn machine_remove_command(args : Array[String]) -> (Int32, String) {
   }
   client.close()
   (0, "machine removed id=" + removed)
+}
+
+///|
+fn rpc_usage() -> String {
+  [
+    "usage:",
+    "  monexus-host rpc --method METHOD [--state-dir DIR] [--params JSON]",
+    "",
+    "Sends one JSON-RPC request over the authenticated WebSocket and prints",
+    "the raw result as JSON. client_request_id is added when absent, so M3",
+    "workspace/worktree/lease/terminal calls can be driven from shell tests.",
+  ].join("\n")
+}
+
+///|
+async fn rpc_command(args : Array[String]) -> (Int32, String) {
+  let (pairs, _) = parse_pairs(args)
+  let method = pair_last(pairs, "--method", "")
+  if method == "" {
+    return (2, "monexus-host: rpc needs --method\n" + rpc_usage())
+  }
+  let state_dir = pair_last(pairs, "--state-dir", @client.default_state_dir())
+  let params_text = pair_last(pairs, "--params", "{}")
+  let parsed = @json.parse(params_text) catch {
+    error => return (2, "monexus-host: invalid --params JSON: " + error.to_string())
+  }
+  let object = match @contracts.as_object(parsed) {
+    Some(value) => value
+    None => return (2, "monexus-host: --params must be a JSON object")
+  }
+  let params : Map[String, @json.Json] = Map([])
+  for key, value in object {
+    params.set(key, value)
+  }
+  if params.get("client_request_id") is None {
+    params.set("client_request_id", @contracts.json_string(request_id("req")))
+  }
+  let client = match connect_client(state_dir) {
+    Ok(value) => value
+    Err(message) => return (1, "monexus-host: " + message)
+  }
+  let result = match client.call_json(request_id("req"), method, params) {
+    Ok(value) => value
+    Err(message) => {
+      client.close()
+      return (1, "monexus-host: " + method + ": " + message)
+    }
+  }
+  client.close()
+  (0, result.stringify())
 }

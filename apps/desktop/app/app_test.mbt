@@ -204,3 +204,109 @@ test "host key policy cycles through all four values" {
   assert_eq(steps[2], @contracts.MACHINE_HOST_KEY_POLICY_CONFIG)
   assert_eq(steps[3], @contracts.MACHINE_HOST_KEY_POLICY_ACCEPT_NEW)
 }
+
+///|
+test "projects page opens and drives the workspace command surface" {
+  let harness = @test_support.WidgetHarness::from_program(
+    program=program(),
+    width=920.0,
+    height=560.0,
+  )
+  harness.tap_text("Projects")
+  assert_true(harness.has_text("Open project"))
+  assert_true(harness.has_text("No project open yet."))
+}
+
+///|
+test "project open requires a root and emits OpenProject" {
+  let model = Model::new()
+  let (empty, commands) = update_full(model, ProjectOpen)
+  assert_eq(commands.length(), 0)
+  assert_true(empty.project.message.contains("root is required"))
+  let with_root = update(update(model, ProjectMachine("mch_1")), ProjectRoot("/tmp/demo"))
+  let (opened, commands2) = update_full(with_root, ProjectOpen)
+  assert_eq(commands2.length(), 1)
+  match commands2[0] {
+    OpenProject(machine_id, root) => {
+      assert_eq(machine_id, "mch_1")
+      assert_eq(root, "/tmp/demo")
+    }
+    _ => fail("expected OpenProject")
+  }
+  assert_true(opened.project.busy)
+}
+
+///|
+test "project file load, edit and save cycle" {
+  let record : @contracts.WorkspaceRecord = {
+    id: "wsp_1",
+    machine_id: "",
+    kind: "local",
+    root: "/tmp/demo",
+    name: "demo",
+    git_root: "/tmp/demo",
+    is_git: true,
+    state: "open",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  }
+  let entries : Array[@contracts.WorkspaceEntry] = [
+    { name: "src", path: "src", kind: "dir", is_dir: true, size: 0L },
+    { name: "README.md", path: "README.md", kind: "file", is_dir: false, size: 12L },
+  ]
+  let model = update(Model::new(), ProjectOpened(record))
+  let model = update(model, ProjectEntries(entries))
+  assert_eq(model.project.entries[0].name, "src")
+  assert_eq(model.project.entries[1].name, "README.md")
+  let model = update(model, ProjectFile("README.md", "hello"))
+  assert_eq(model.project.selected, "README.md")
+  assert_eq(model.project.content, "hello")
+  assert_true(!model.project.dirty)
+  let model = update(model, ProjectDraft("hello world"))
+  assert_true(model.project.dirty)
+  let (saving, commands) = update_full(model, ProjectSaveFile)
+  assert_true(saving.project.busy)
+  assert_eq(commands.length(), 1)
+  match commands[0] {
+    ProjectWriteFile(workspace_id, path, content) => {
+      assert_eq(workspace_id, "wsp_1")
+      assert_eq(path, "README.md")
+      assert_eq(content, "hello world")
+    }
+    _ => fail("expected ProjectWriteFile")
+  }
+}
+
+///|
+test "worktree create validates branch and path" {
+  let record : @contracts.WorkspaceRecord = {
+    id: "wsp_1",
+    machine_id: "",
+    kind: "local",
+    root: "/tmp/demo",
+    name: "demo",
+    git_root: "/tmp/demo",
+    is_git: true,
+    state: "open",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  }
+  let model = update(Model::new(), ProjectOpened(record))
+  let (missing, commands) = update_full(model, ProjectCreateWorktree)
+  assert_eq(commands.length(), 0)
+  assert_true(missing.project.message.contains("branch and path"))
+  let filled = update(
+    update(model, ProjectWorktreeBranch("m3-test")),
+    ProjectWorktreePath("/tmp/demo-wt"),
+  )
+  let (_, commands2) = update_full(filled, ProjectCreateWorktree)
+  assert_eq(commands2.length(), 1)
+  match commands2[0] {
+    ProjectCreateWorktree(workspace_id, branch, path) => {
+      assert_eq(workspace_id, "wsp_1")
+      assert_eq(branch, "m3-test")
+      assert_eq(path, "/tmp/demo-wt")
+    }
+    _ => fail("expected ProjectCreateWorktree")
+  }
+}

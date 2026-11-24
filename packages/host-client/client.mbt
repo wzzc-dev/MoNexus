@@ -156,6 +156,30 @@ pub async fn RpcClient::subscribe(
 }
 
 ///|
+/// Send one RPC and return its raw `result`. Host-side workspace errors use
+/// the same readable `kind`/`reason` shape as machine errors, so M3 can share
+/// the decoder.
+pub async fn RpcClient::call_json(
+  self : RpcClient,
+  client_request_id : String,
+  method : String,
+  params : Map[String, @json.Json],
+) -> Result[@json.Json, String] {
+  let response = match self.request(client_request_id, method, params) {
+    Ok(value) => value
+    Err(message) => return Err(message)
+  }
+  match response.error {
+    Some(error) => return Err(@contracts.machine_error_text(error))
+    None => ()
+  }
+  match response.result {
+    Some(value) => Ok(value)
+    None => Err(method + " returned no result")
+  }
+}
+
+///|
 /// Send a machine RPC and decode its result. Machine errors carry a readable
 /// `kind`/`reason` payload, so callers get `Unauthorized: ...`-style text
 /// instead of the numeric JSON-RPC envelope.

@@ -1,14 +1,15 @@
 # MoNexus
 
 MoNexus is a local-first desktop shell for machines, tasks and agent
-sessions. This worktree contains the **M2 vertical slice**: the M1 host and
-MoUI 0.9.1 shell extended with a machine registry and SSH probing. The host
-keeps machine records and events in SQLite, exposes `machine.add/list/probe/
-remove`, publishes `machine.*` events with replay, and the desktop Machines
-page can register, probe and remove targets with readable failure reasons.
+sessions. This worktree contains the **M3 vertical slice**: the M2 host and
+MoUI 0.9.1 shell extended with workspaces, worktrees, file editing, git
+status/diff and terminals over one local-or-SSH provider contract. The host
+keeps workspace/worktree/lease records and events in SQLite, enforces one
+active lease per worktree (or non-git workspace), and the desktop Projects
+page opens local or remote roots through the same RPC surface.
 
-M3–M5 business features (remote files, terminals, task execution, agent
-sessions, ACP-backed search) are intentionally **not** implemented here.
+M4–M5 business features (task execution, agent sessions, ACP-backed search)
+are intentionally **not** implemented here.
 
 ## Layout
 
@@ -16,14 +17,15 @@ sessions, ACP-backed search) are intentionally **not** implemented here.
 moon.work                     workspace manifest
 packages/contracts/           JSON-RPC, event envelope, discovery, machine contracts
 packages/machines/            SQLite machine store + pure event replay
-packages/providers/           SSH + PTY providers moved out of the M0 spike
+packages/providers/           SSH/PTY plus the local-or-SSH workspace provider
 packages/host-client/         host.json discovery + WebSocket JSON-RPC client
-services/host/                monexus-host executable (serve/status/subscribe/machine)
+services/host/                monexus-host executable (serve/status/subscribe/machine/rpc)
 apps/desktop/app/             MoUI model/update/view, host-link + machine workers, tests
 apps/desktop/linux_skia/      Linux native entry + Vulkan linker shim
 scripts/host_smoke.sh         end-to-end host smoke test (M1 regression)
 scripts/machine_smoke.sh      machine registry + SSH probe smoke test (temp sshd/fake ssh)
-docs/m1.md, docs/m2.md        design notes, verification and limitations
+scripts/workspace_smoke.sh    M3 workspace/worktree/lease/terminal smoke (temp sshd)
+docs/m1.md, docs/m2.md, docs/m3.md  design notes, verification and limitations
 spikes/m0/                    frozen M0 spike (see docs/spikes/m0.md)
 ```
 
@@ -105,13 +107,16 @@ Smoke tests:
 ```bash
 scripts/host_smoke.sh       # M1 host regression
 scripts/machine_smoke.sh    # machine add/list/probe/remove, events, restart
+scripts/workspace_smoke.sh  # M3 open/read/write/diff/worktrees/leases/terminals
 ```
 
 `machine_smoke.sh` starts an ephemeral non-root sshd on a random loopback
 port and injects a fake `ssh` for error classification. Every `add` passes an
 explicit temporary known-hosts file; the script snapshots the real `~/.ssh`
 before and after and asserts it was not modified. It never contacts an
-external machine.
+external machine. `workspace_smoke.sh` uses the same sshd/temp-HOME pattern
+and additionally proves that two worktrees written in parallel stay isolated
+and that a second lease on the same target is refused.
 
 ## Run the desktop shell
 
@@ -120,7 +125,8 @@ _build/native/debug/build/monexus/desktop/linux_skia/linux_skia.exe
 ```
 
 Start the host first (or let the shell show `offline` and retry). The window
-shows five switchable pages — Home, Machines, Tasks, Search, Settings — and a
+shows six switchable pages — Home, Machines, Projects, Tasks, Search,
+Settings — and a
 live host status (`connecting` / `online` / `offline`) with an event counter
 and a 1.5 s reconnect backoff.
 
@@ -131,6 +137,11 @@ error, and Probe/Remove buttons. Machine commands use a separate short-lived
 connection (a queue worker beside the event subscription) so notifications
 are not dropped while a request is in flight; after a reconnect the page
 refreshes the machine list.
+
+The Projects page opens a local or SSH root by machine id, lists a directory,
+reads/writes a file atomically, shows git status and a file diff, sends
+commands to a local PTY or a remote `ssh -tt`+tmux terminal, and creates
+worktrees.
 
 With no display server the native entry panics at window creation; this is a
 MoUI Linux backend limitation, not a MoNexus error. Use the headless
@@ -167,13 +178,15 @@ display. It also links `-lvulkan` without the package's `cc-link-flags`, so
 point `LIBRARY_PATH` at the repo-local shim directory as shown; the Vulkan
 runtime `libvulkan.so.1` must still be installed.)
 
-## Protocol (M2)
+## Protocol (M3)
 
 - Transport: WebSocket JSON-RPC 2.0 at `ws://127.0.0.1:<random>/ws`,
   `Authorization: Bearer <token>` during the HTTP upgrade; wrong or missing
   token returns `401`.
 - Requests: `host.status`, `events.subscribe`, `machine.add`, `machine.list`,
-  `machine.probe`, `machine.remove`. Every request must carry a non-empty
+  `machine.probe`, `machine.remove`, the `workspace.*`/`worktree.*`/
+  `lease.*`/`terminal.*` methods, and `rpc --method ... --params ...` for
+  shell-driven calls. Every request must carry a non-empty
   `params.client_request_id`; the host caches the response and returns it
   again for a retry with the same key.
 - Notifications: `events.event` with `params.event` set to the ADR 0002 event
@@ -182,20 +195,27 @@ runtime `libvulkan.so.1` must still be installed.)
   `machine.connected`, `machine.probed`, `machine.disconnected` and the
   `machine.removed` tombstone; each carries the full machine snapshot so the
   desktop can upsert without another request.
-- Persistence: machine events and the machine projection live in SQLite
-  (`<state_dir>/monexus.db`, WAL). `meta.last_seq` keeps the event sequence
-  monotonic across restarts, and startup replays `machine.*` events to
-  reconcile the projection. The last 256 events are cached in memory for
+- Persistence: machine, workspace, worktree and lease events live in SQLite
+  (`<state_dir>/monexus.db`, WAL) with their projections. `meta.last_seq`
+  keeps the event sequence monotonic across restarts, and startup replays
+  `machine.*`, `workspace.*`, `worktree.*` and `lease.*` events to reconcile
+  the projections. The last 256 events are cached in memory for
   `events.subscribe --since` replay.
 - Errors: JSON-RPC codes `-32700`, `-32600`, `-32601`, `-32602`, `-32603`;
-  machine failures use the host error code with `data.kind` =
-  `unauthorized|timeout|not_found|unreachable|host_key|remote|invalid|internal`
+  machine/workspace failures use the host error code with `data.kind` =
+  `unauthorized|timeout|not_found|unreachable|host_key|remote|invalid|
+  conflict|internal`
   and a message prefixed by a readable label (`Unauthorized: ...`).
 
-## Known M2 limitations
+## Known M3 limitations
 
-- Probing is **manual**: there is no background heartbeat/probe loop yet
-  (that belongs to M3 scheduling).
+- Probing is **manual**: there is no background heartbeat/probe loop yet.
+- File listing is one directory level; reads are whole-file and diffs stop at
+  128 KiB. Large-file streaming and recursive walking are out of scope.
+- Desktop terminal output is polled after each send rather than streamed, and
+  no `workspace.changed` watcher exists for external edits.
+- The generic `rpc` CLI uses wire field names; typed machine commands remain
+  the only first-class CLI subcommands.
 - `events.subscribe --since` replays from the 256-event in-memory ring, which
   is seeded from SQLite on startup. Older events remain in the `events` table
   but there is no full-cursor RPC yet.
