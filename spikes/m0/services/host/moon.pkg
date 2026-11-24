@@ -1,0 +1,12 @@
+pkgtype(kind: "executable")
+
+import {
+  "moonbitlang/core/env",
+  "moonbitlang/core/string",
+  "moonbitlang/async",
+  "monexus/m0/services/pty_spike",
+  "monexus/m0/services/ssh_probe",
+  "monexus/m0/services/acp_client",
+}
+
+supported_targets = "native"

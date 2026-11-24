@@ -1,0 +1,10 @@
+# MoonBit build artifacts
+_build/
+.mooncakes/
+
+# Spike-local test-only npm dependencies (never product dependencies)
+spikes/m0/.testdeps/
+node_modules/
+
+# Local logs
+*.log
