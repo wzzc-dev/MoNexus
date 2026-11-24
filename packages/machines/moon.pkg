@@ -1,0 +1,8 @@
+import {
+  "monexus/contracts" @contracts,
+  "moonbit-community/sqlite3",
+  "moonbitlang/core/json",
+  "moonbitlang/core/string",
+}
+
+supported_targets = "native"

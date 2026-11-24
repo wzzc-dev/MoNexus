@@ -1,6 +1,7 @@
 # MoonBit build artifacts
 _build/
 .mooncakes/
+pkg.generated.mbti
 
 # Spike-local test-only npm dependencies (never product dependencies)
 spikes/m0/.testdeps/

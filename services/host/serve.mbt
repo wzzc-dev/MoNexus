@@ -59,16 +59,52 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
       options.state_dir,
     )
   }
+  // One SQLite file per state dir: machine projection + append-only events.
+  // It is opened before host.json is published so a broken database never
+  // produces a discovery file that points at an unusable host.
+  let db_path = options.state_dir + "/monexus.db"
+  let store = match @machines.MachineStore::open(db_path) {
+    Ok(value) => value
+    Err(message) => {
+      lock.close()
+      return Err("cannot open " + db_path + ": " + message)
+    }
+  }
+  match store.prune_heartbeats() {
+    Ok(_) => ()
+    Err(message) =>
+      println("monexus-host: warning: cannot prune heartbeat events: " + message)
+  }
+  match store.reconcile_projection() {
+    Ok((live, removed)) =>
+      println(
+        "monexus-host: machine projection rebuilt from events (live=" +
+        live.to_string() +
+        " tombstoned=" +
+        removed.to_string() +
+        ")",
+      )
+    Err(message) => {
+      store.close()
+      lock.close()
+      return Err("cannot rebuild machine projection: " + message)
+    }
+  }
   let addr = @socket.Addr::parse(
     "127.0.0.1:" + options.port.to_string(),
   ) catch {
-    error => return Err("invalid bind address: " + error.to_string())
+    error => {
+      store.close()
+      lock.close()
+      return Err("invalid bind address: " + error.to_string())
+    }
   }
   let server = @http.Server::Server(addr, reuse_addr=false)
-  let state = HostState::new(options, server.addr().port())
+  let state = HostState::new(options, server.addr().port(), store)
   match write_host_info(state) {
     Ok(_) => ()
     Err(message) => {
+      store.close()
       lock.close()
       return Err(message)
     }
@@ -90,6 +126,7 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
   // and the OS releases the flock when the process exits.
   remove_host_info(state)
   server.close()
+  state.store.close()
   lock.close()
   Ok(())
 }

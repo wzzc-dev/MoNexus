@@ -42,6 +42,7 @@ pub struct HostState {
   ring : Array[@contracts.EventEnvelope]
   sinks : Array[Sink]
   cache : Map[String, String]
+  store : @machines.MachineStore
 }
 
 ///|
@@ -58,9 +59,27 @@ fn random_token() -> String {
 fn HostState::new(
   options : HostOptions,
   port : Int,
+  store : @machines.MachineStore,
 ) -> HostState {
   let now = @async.now()
   let token = random_token()
+  // Continue the event sequence where the previous run stopped. Persisted
+  // machine events are also loaded into the ring so a reconnecting subscriber
+  // can replay them after a restart.
+  let last_seq = match store.last_seq() {
+    Ok(value) => value
+    Err(message) => {
+      println("monexus-host: cannot read event sequence: " + message)
+      0L
+    }
+  }
+  let ring = match store.load_recent_events(RING_CAPACITY) {
+    Ok(value) => value
+    Err(message) => {
+      println("monexus-host: cannot load recent events: " + message)
+      []
+    }
+  }
   {
     host_id: @contracts.new_id("host", now),
     version: options.version,
@@ -71,10 +90,11 @@ fn HostState::new(
     token,
     ws_url: "ws://127.0.0.1:" + port.to_string() + "/ws",
     mutex: @async.Mutex::Mutex(),
-    next_seq: 1L,
-    ring: [],
+    next_seq: last_seq + 1L,
+    ring,
     sinks: [],
     cache: Map([]),
+    store,
   }
 }
 
@@ -119,9 +139,9 @@ fn HostState::host_info(self : HostState) -> @contracts.HostInfo {
 }
 
 ///|
-/// Append an event while the caller holds `mutex`. Fills the ADR 0002
-/// envelope fields the M1 host can prove; correlation defaults to host id.
-fn HostState::append_event(
+/// Build the next event envelope while the caller holds `mutex`. Seq
+/// allocation and the envelope fields are shared by every event path.
+fn HostState::next_envelope(
   self : HostState,
   event_type : String,
   subject : String,
@@ -130,7 +150,7 @@ fn HostState::append_event(
   let now = @async.now()
   let seq = self.next_seq
   self.next_seq = seq + 1L
-  let event = @contracts.EventEnvelope::new(
+  @contracts.EventEnvelope::new(
     id=@contracts.new_id("evt", now),
     org_id=@contracts.ORG_LOCAL,
     event_type~,
@@ -142,11 +162,64 @@ fn HostState::append_event(
     correlation_id=self.host_id,
     idempotency_key="evt/" + seq.to_string(),
   )
+}
+
+///|
+/// Push an event into the ring and fan it out to subscribed connections.
+/// Caller holds `mutex`.
+fn HostState::publish(self : HostState, event : @contracts.EventEnvelope) -> Unit {
   self.ring.push(event)
   while self.ring.length() > RING_CAPACITY {
     ignore(self.ring.remove(0))
   }
+  let text = event_notification_text(event)
+  for sink in self.sinks {
+    if sink.subscribed.val {
+      sink.send(text)
+    }
+  }
+}
+
+///|
+/// Append an event while the caller holds `mutex`. The event is persisted
+/// before it is published, so the log stays the authority if the host exits
+/// right after acknowledging an RPC.
+fn HostState::append_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+) -> @contracts.EventEnvelope {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.append_event(event) {
+    Ok(_) => ()
+    Err(message) =>
+      println("monexus-host: cannot persist event " + event.event_type + ": " + message)
+  }
+  self.publish(event)
   event
+}
+
+///|
+/// Append a machine event and its projection row in one transaction. On a
+/// store failure the event is not published, so subscribers never see a
+/// state the database does not have.
+fn HostState::append_machine_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+  record : @contracts.MachineRecord?,
+  removed_id : String?,
+) -> Result[@contracts.EventEnvelope, String] {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.record_machine_event(event, record, removed_id) {
+    Ok(_) => {
+      self.publish(event)
+      Ok(event)
+    }
+    Err(message) => Err(message)
+  }
 }
 
 ///|

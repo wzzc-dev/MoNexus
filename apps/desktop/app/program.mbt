@@ -26,7 +26,24 @@ pub fn program() -> @moui.Program[Model, Msg] {
         ),
       )
     },
-    update=(model, msg) => (update(model, msg), @moui.Effect::none()),
+    update=(model, msg) => {
+      let (next, commands) = update_full(model, msg)
+      let effect = if commands.is_empty() {
+        @moui.Effect::none()
+      } else {
+        @moui.Effect::run(
+          key="machine-commands",
+          kind="machine-command",
+          label="Queue machine command",
+          run= _dispatch => {
+            for command in commands {
+              enqueue_machine_command(command)
+            }
+          },
+        )
+      }
+      (next, effect)
+    },
     view~,
     subscriptions=_model => @moui.Subscription::none(),
   )

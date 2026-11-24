@@ -64,6 +64,24 @@ async fn handle_request(
       state.mutex.release()
       sink.send(text)
     }
+    @contracts.METHOD_MACHINE_ADD => {
+      // Machine handlers manage their own locking: probe releases the mutex
+      // around ssh I/O and add releases it around `ssh -G`.
+      state.mutex.release()
+      handle_machine_add(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_MACHINE_PROBE => {
+      state.mutex.release()
+      handle_machine_probe(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_MACHINE_REMOVE => {
+      state.mutex.release()
+      handle_machine_remove(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_MACHINE_LIST => {
+      state.mutex.release()
+      handle_machine_list(state, sink, request, client_request_id)
+    }
     @contracts.METHOD_EVENTS_SUBSCRIBE => {
       let since = @contracts.subscribe_since(request.params)
       let replay = match since {
@@ -241,17 +259,11 @@ async fn heartbeat_loop(state : HostState) -> Unit {
       ("status", @contracts.json_string(@contracts.HOST_STATUS_ONLINE)),
       ("uptime_ms", @contracts.json_int64(state.uptime_ms())),
     ])
-    let event = state.append_event(
+    let _ = state.append_event(
       @contracts.EVENT_HOST_HEARTBEAT,
       "host/" + state.host_id,
       payload,
     )
-    let text = event_notification_text(event)
-    for sink in state.sinks {
-      if sink.subscribed.val {
-        sink.send(text)
-      }
-    }
     state.mutex.release()
   }
 }

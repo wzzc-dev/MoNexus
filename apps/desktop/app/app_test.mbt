@@ -18,7 +18,8 @@ test "all five pages can be switched by tapping navigation" {
     height=560.0,
   )
   harness.tap_text("Machines")
-  assert_true(harness.has_text("Machines page"))
+  assert_true(harness.has_text("Add machine"))
+  assert_true(harness.has_text("Saved machines"))
   harness.tap_text("Tasks")
   assert_true(harness.has_text("Tasks page"))
   harness.tap_text("Search")
@@ -66,4 +67,140 @@ test "page selection is stable across link updates" {
   )
   assert_eq(online.page.label(), "Settings")
   assert_eq(Model::new().page.label(), "Home")
+}
+
+///|
+/// Local record builder: the app's scene helper is package-private, and the
+/// tests only need a deterministic projection.
+fn test_machine(
+  id : String,
+  name : String,
+  status : String,
+  last_error : String,
+) -> @contracts.MachineRecord {
+  {
+    id,
+    kind: @contracts.MACHINE_KIND_SSH,
+    name,
+    host: "127.0.0.1",
+    port: 2222,
+    user: "tester",
+    identity: "/tmp/key",
+    use_ssh_config: false,
+    host_key_policy: @contracts.MACHINE_HOST_KEY_POLICY_ACCEPT_NEW,
+    known_hosts_file: "",
+    status,
+    profile: None,
+    ssh_effective: Map([]),
+    ssh_effective_error: "",
+    last_seen: "",
+    last_error,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  }
+}
+
+///|
+test "machine draft validation produces a readable error and no command" {
+  let model = Model::new()
+  let empty = update_full(model, SubmitMachine)
+  assert_eq(empty.1.length(), 0)
+  assert_true(empty.0.machine_message.contains("host is required"))
+  let bad_port = update_full(
+    update(empty.0, DraftHost("127.0.0.1")),
+    DraftPort("not-a-port"),
+  )
+  let submitted = update_full(bad_port.0, SubmitMachine)
+  assert_eq(submitted.1.length(), 0)
+  assert_true(submitted.0.machine_message.contains("port must be 1-65535"))
+}
+
+///|
+test "valid machine draft submits an add command with a default name" {
+  let model = update(Model::new(), DraftHost("127.0.0.1"))
+  let model = update(model, DraftPort("2222"))
+  let model = update(model, DraftUser("tester"))
+  let model = update(model, DraftIdentity("/tmp/key"))
+  let model = update(model, DraftUseConfig(false))
+  let (next, commands) = update_full(model, SubmitMachine)
+  assert_eq(commands.length(), 1)
+  match commands[0] {
+    AddMachine(draft) => {
+      assert_eq(draft.host, "127.0.0.1")
+      assert_eq(draft.port, "2222")
+      assert_eq(draft.user, "tester")
+      assert_eq(draft.identity, "/tmp/key")
+      assert_eq(draft.use_ssh_config, false)
+      // Unnamed machines default to the host, matching the host-side parser.
+      assert_eq(draft.name, "127.0.0.1")
+    }
+    _ => fail("expected AddMachine")
+  }
+  assert_eq(next.machine_busy, "add")
+}
+
+///|
+test "machine events upsert and remove records" {
+  let online = test_machine(
+    "mch_2",
+    "later",
+    @contracts.MACHINE_STATUS_ONLINE,
+    "",
+  )
+  let earlier = test_machine(
+    "mch_1",
+    "first",
+    @contracts.MACHINE_STATUS_OFFLINE,
+    "Timeout: SSH connection timed out",
+  )
+  let model = update(Model::new(), MachineUpserted(online))
+  let model = update(model, MachineUpserted(earlier))
+  assert_eq(model.machines.length(), 2)
+  // Sorted by created_at then id, so the list is stable across replays.
+  assert_eq(model.machines[0].id, "mch_1")
+  assert_eq(model.machines[1].id, "mch_2")
+  assert_eq(model.machines[0].status, @contracts.MACHINE_STATUS_OFFLINE)
+  assert_true(model.machines_loaded)
+  let replaced = update(model, MachineUpserted({ ..online, status: @contracts.MACHINE_STATUS_DEGRADED }))
+  assert_eq(replaced.machines.length(), 2)
+  let removed = update(replaced, MachineRemoved("mch_1"))
+  assert_eq(removed.machines.length(), 1)
+  assert_eq(removed.machines[0].id, "mch_2")
+}
+
+///|
+test "probe and remove set busy state, result messages clear it" {
+  let model = update(Model::new(), ProbeMachine("mch_x"))
+  assert_eq(model.machine_busy, "mch_x")
+  let done = update(model, MachineNotice("probe: demo online"))
+  assert_eq(done.machine_busy, "")
+  assert_eq(done.machine_message, "probe: demo online")
+  let failed = update(model, MachineError("Unauthorized: SSH authentication failed"))
+  assert_eq(failed.machine_busy, "")
+  assert_true(failed.machine_message.contains("Unauthorized"))
+}
+
+///|
+test "refresh asks the command worker for a list" {
+  let (next, commands) = update_full(Model::new(), RefreshMachines)
+  assert_eq(commands.length(), 1)
+  match commands[0] {
+    RefreshMachines => assert_eq(next.machine_message, "")
+    _ => fail("expected RefreshMachines")
+  }
+}
+
+///|
+test "host key policy cycles through all four values" {
+  let model = Model::new()
+  let steps : Array[String] = []
+  let mut current = model
+  for _ in 0..<4 {
+    current = update(current, CycleDraftPolicy)
+    steps.push(current.draft.host_key_policy)
+  }
+  assert_eq(steps[0], @contracts.MACHINE_HOST_KEY_POLICY_STRICT)
+  assert_eq(steps[1], @contracts.MACHINE_HOST_KEY_POLICY_INSECURE)
+  assert_eq(steps[2], @contracts.MACHINE_HOST_KEY_POLICY_CONFIG)
+  assert_eq(steps[3], @contracts.MACHINE_HOST_KEY_POLICY_ACCEPT_NEW)
 }

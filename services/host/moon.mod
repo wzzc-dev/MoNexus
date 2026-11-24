@@ -11,5 +11,7 @@ description = "MoNexus host: local WebSocket JSON-RPC host and discovery file (M
 import {
   "monexus/contracts@0.1.0",
   "monexus/host-client@0.1.0",
-  "moonbitlang/async@0.22.5",
+  "monexus/machines@0.1.0",
+  "monexus/providers@0.1.0",
+  "moonbitlang/async@0.22.7",
 }

@@ -21,6 +21,7 @@ async fn run_host_command(args : Array[String]) -> (Int32, String) {
     "serve" => serve_command(args[2:].to_owned())
     "status" => status_command(args[2:].to_owned())
     "subscribe" => subscribe_command(args[2:].to_owned())
+    "machine" => machine_command(args[2:].to_owned())
     _ =>
       (
         2,
@@ -33,11 +34,11 @@ async fn run_host_command(args : Array[String]) -> (Int32, String) {
 }
 
 ///|
-const HOST_VERSION : String = "0.1.0-m1"
+const HOST_VERSION : String = "0.2.0-m2"
 
 ///|
 fn host_version_line() -> String {
-  "monexus-host " + HOST_VERSION + " (M1)"
+  "monexus-host " + HOST_VERSION + " (M2)"
 }
 
 ///|
@@ -49,6 +50,15 @@ fn usage_text() -> String {
     "  monexus-host status [--state-dir DIR]",
     "  monexus-host subscribe [--state-dir DIR] [--since SEQ]",
     "      [--timeout-ms N] [--max-events N]",
+    "  monexus-host machine add [--state-dir DIR] --host HOST [--name NAME]",
+    "      [--port N] [--user USER] [--identity FILE]",
+    "      [--use-ssh-config true|false]",
+    "      [--host-key-policy accept-new|yes|no|config]",
+    "      [--known-hosts-file FILE]",
+    "  monexus-host machine list [--state-dir DIR]",
+    "  monexus-host machine probe --id ID [--state-dir DIR]",
+    "      [--timeout-seconds N]",
+    "  monexus-host machine remove --id ID [--state-dir DIR]",
     "",
     "`serve` writes DIR/host.json (mode 0600), binds a random loopback port",
     "and serves JSON-RPC 2.0 over WebSocket. Default DIR: $MONEXUS_STATE_DIR,",
@@ -274,4 +284,268 @@ async fn subscribe_command(args : Array[String]) -> (Int32, String) {
       (1, lines.join("\n"))
     }
   }
+}
+
+///|
+fn pair_bool(
+  pairs : Array[(String, String)],
+  key : String,
+  default : Bool,
+) -> Bool {
+  match pair_last_opt(pairs, key) {
+    Some(value) =>
+      match value.to_lower() {
+        "true" | "1" | "yes" | "on" => true
+        "false" | "0" | "no" | "off" => false
+        _ => default
+      }
+    None => default
+  }
+}
+
+///|
+async fn connect_client(
+  state_dir : String,
+) -> Result[@client.RpcClient, String] {
+  let info = match @client.read_host_info(state_dir) {
+    Ok(value) => value
+    Err(message) => return Err("offline: " + message)
+  }
+  @client.connect(info)
+}
+
+///|
+fn sorted_effective_lines(
+  record : @contracts.MachineRecord,
+) -> Array[String] {
+  let keys : Array[String] = []
+  for key, _ in record.ssh_effective {
+    keys.push(key)
+  }
+  keys.sort()
+  let lines : Array[String] = []
+  for key in keys {
+    let value = match record.ssh_effective.get(key) {
+      Some(item) => item
+      None => ""
+    }
+    lines.push("ssh_effective." + key + "=" + value)
+  }
+  if record.ssh_effective_error != "" {
+    lines.push("ssh_effective_error=" + record.ssh_effective_error)
+  }
+  lines
+}
+
+///|
+fn machine_record_lines(record : @contracts.MachineRecord) -> Array[String] {
+  let lines : Array[String] = [
+    "id=" + record.id,
+    "name=" + record.name,
+    "target=" + record.target_label(),
+    "port=" + record.port.to_string(),
+    "status=" + record.status,
+    "use_ssh_config=" + record.use_ssh_config.to_string(),
+    "host_key_policy=" + record.host_key_policy,
+    "identity=" + record.identity,
+    "known_hosts_file=" + record.known_hosts_file,
+    "last_seen=" + record.last_seen,
+    "last_error=" + record.last_error,
+    "updated_at=" + record.updated_at,
+  ]
+  for line in sorted_effective_lines(record) {
+    lines.push(line)
+  }
+  lines
+}
+
+///|
+fn profile_lines(profile : @contracts.MachineProfile) -> Array[String] {
+  let lines : Array[String] = [
+    "profile.os=" + profile.os,
+    "profile.arch=" + profile.arch,
+    "profile.hostname=" + profile.hostname,
+    "profile.shell=" + profile.shell,
+    "profile.max_parallel=" + profile.max_parallel.to_string(),
+    "profile.has_docker=" + profile.has_docker.to_string(),
+    "profile.has_gui=" + profile.has_gui.to_string(),
+    "profile.notes=" + profile.notes,
+  ]
+  let tools : Array[String] = []
+  for name, _ in profile.toolchains {
+    tools.push(name)
+  }
+  tools.sort()
+  for name in tools {
+    let path = match profile.toolchains.get(name) {
+      Some(value) => value
+      None => ""
+    }
+    lines.push("profile.tool." + name + "=" + path)
+  }
+  lines
+}
+
+///|
+fn machine_usage() -> String {
+  [
+    "usage:",
+    "  monexus-host machine add [--state-dir DIR] --host HOST [--name NAME]",
+    "      [--port N] [--user USER] [--identity FILE]",
+    "      [--use-ssh-config true|false] [--host-key-policy POLICY]",
+    "      [--known-hosts-file FILE]",
+    "  monexus-host machine list [--state-dir DIR]",
+    "  monexus-host machine probe --id ID [--state-dir DIR] [--timeout-seconds N]",
+    "  monexus-host machine remove --id ID [--state-dir DIR]",
+    "",
+    "POLICY is accept-new (default), yes, no or config.",
+  ].join("\n")
+}
+
+///|
+async fn machine_command(args : Array[String]) -> (Int32, String) {
+  let sub = if args.length() > 0 { args[0] } else { "help" }
+  match sub {
+    "add" => machine_add_command(args[1:].to_owned())
+    "list" => machine_list_command(args[1:].to_owned())
+    "probe" => machine_probe_command(args[1:].to_owned())
+    "remove" => machine_remove_command(args[1:].to_owned())
+    "help" | "--help" | "-h" => (0, machine_usage())
+    _ => (
+      2,
+      "monexus-host: unknown machine command " + sub + "\n" + machine_usage(),
+    )
+  }
+}
+
+///|
+async fn machine_add_command(args : Array[String]) -> (Int32, String) {
+  let (pairs, _) = parse_pairs(args)
+  let state_dir = pair_last(pairs, "--state-dir", @client.default_state_dir())
+  let host = pair_last(pairs, "--host", "")
+  if host == "" {
+    return (2, "monexus-host: machine add needs --host\n" + machine_usage())
+  }
+  let client = match connect_client(state_dir) {
+    Ok(value) => value
+    Err(message) => return (1, "monexus-host: " + message)
+  }
+  let record = match client.call_machine_add(
+    request_id("req"),
+    name=pair_last(pairs, "--name", host),
+    host=host,
+    port=pair_int(pairs, "--port", 22),
+    user=pair_last(pairs, "--user", ""),
+    identity=pair_last(pairs, "--identity", ""),
+    use_ssh_config=pair_bool(pairs, "--use-ssh-config", true),
+    host_key_policy=pair_last(
+      pairs,
+      "--host-key-policy",
+      @contracts.MACHINE_HOST_KEY_POLICY_ACCEPT_NEW,
+    ),
+    known_hosts_file=pair_last(pairs, "--known-hosts-file", ""),
+  ) {
+    Ok(value) => value
+    Err(message) => {
+      client.close()
+      return (1, "monexus-host: machine add: " + message)
+    }
+  }
+  client.close()
+  (0, ["machine added"].join("\n") + "\n" + machine_record_lines(record).join("\n"))
+}
+
+///|
+async fn machine_list_command(args : Array[String]) -> (Int32, String) {
+  let (pairs, _) = parse_pairs(args)
+  let state_dir = pair_last(pairs, "--state-dir", @client.default_state_dir())
+  let client = match connect_client(state_dir) {
+    Ok(value) => value
+    Err(message) => return (1, "monexus-host: " + message)
+  }
+  let machines = match client.call_machine_list(request_id("req")) {
+    Ok(value) => value
+    Err(message) => {
+      client.close()
+      return (1, "monexus-host: machine list: " + message)
+    }
+  }
+  client.close()
+  let lines : Array[String] = []
+  for record in machines {
+    lines.push(
+      "machine id=" +
+      record.id +
+      " status=" +
+      record.status +
+      " name=" +
+      record.name +
+      " target=" +
+      record.target_label() +
+      ":" +
+      record.port.to_string() +
+      (if record.last_error == "" {
+        ""
+      } else {
+        " last_error=" + record.last_error
+      }),
+    )
+  }
+  lines.push("machines=" + machines.length().to_string())
+  (0, lines.join("\n"))
+}
+
+///|
+async fn machine_probe_command(args : Array[String]) -> (Int32, String) {
+  let (pairs, _) = parse_pairs(args)
+  let state_dir = pair_last(pairs, "--state-dir", @client.default_state_dir())
+  let machine_id = pair_last(pairs, "--id", "")
+  if machine_id == "" {
+    return (2, "monexus-host: machine probe needs --id\n" + machine_usage())
+  }
+  let timeout_seconds = pair_int(pairs, "--timeout-seconds", 10).max(1).min(120)
+  let client = match connect_client(state_dir) {
+    Ok(value) => value
+    Err(message) => return (1, "monexus-host: " + message)
+  }
+  let view = match client.call_machine_probe(
+    request_id("req"),
+    machine_id,
+    timeout_seconds=timeout_seconds,
+  ) {
+    Ok(value) => value
+    Err(message) => {
+      client.close()
+      return (1, "monexus-host: machine probe: " + message)
+    }
+  }
+  client.close()
+  let lines = machine_record_lines(view.machine)
+  for line in profile_lines(view.profile) {
+    lines.push(line)
+  }
+  (0, lines.join("\n"))
+}
+
+///|
+async fn machine_remove_command(args : Array[String]) -> (Int32, String) {
+  let (pairs, _) = parse_pairs(args)
+  let state_dir = pair_last(pairs, "--state-dir", @client.default_state_dir())
+  let machine_id = pair_last(pairs, "--id", "")
+  if machine_id == "" {
+    return (2, "monexus-host: machine remove needs --id\n" + machine_usage())
+  }
+  let client = match connect_client(state_dir) {
+    Ok(value) => value
+    Err(message) => return (1, "monexus-host: " + message)
+  }
+  let removed = match client.call_machine_remove(request_id("req"), machine_id) {
+    Ok(value) => value
+    Err(message) => {
+      client.close()
+      return (1, "monexus-host: machine remove: " + message)
+    }
+  }
+  client.close()
+  (0, "machine removed id=" + removed)
 }

@@ -3,6 +3,9 @@ pkgtype(kind: "executable")
 import {
   "monexus/contracts" @contracts,
   "monexus/host-client" @client,
+  "monexus/machines" @machines,
+  "monexus/providers/error" @provider_error,
+  "monexus/providers/ssh" @ssh,
   "moonbitlang/async",
   "moonbitlang/async/aqueue",
   "moonbitlang/async/fs",

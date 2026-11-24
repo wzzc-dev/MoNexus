@@ -183,7 +183,7 @@ Workspace 1─* Worktree 1─* Run
 ### 5.2 事件族
 
 ```text
-machine.registered / machine.probed / machine.connected / machine.disconnected / machine.degraded
+machine.registered / machine.probed / machine.connected / machine.disconnected / machine.removed
 workspace.opened / workspace.changed / workspace.closed
 worktree.created / worktree.ready / worktree.archived
 agent.registered / agent.readiness.failed / agent.session.started / agent.session.output / agent.session.stopped / agent.error
@@ -194,6 +194,10 @@ decision.requested / decision.answered / decision.expired
 artifact.created / artifact.gc
 sync.reconcile.started / sync.reconcile.completed / sync.conflict
 ```
+
+`machine.degraded` 不单独成事件：探测成功但 profile 不完整时由 `machine.probed`
+携带 `status=degraded`。`machine.removed` 是墓碑事件，投影据此删除记录，不做
+物理级联删除。
 
 `agent.session.output` 是高容量事件：只保留有界缓冲 + 落盘日志引用，不全量进投影。
 
