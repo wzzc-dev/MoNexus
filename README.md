@@ -1,26 +1,29 @@
 # MoNexus
 
 MoNexus is a local-first desktop shell for machines, tasks and agent
-sessions. This worktree contains the **M1 minimal vertical slice**: a real
-local host (WebSocket JSON-RPC 2.0) plus a MoUI 0.9.1 desktop shell that
-launches, reads `host.json`, connects to the host and switches between five
-pages.
+sessions. This worktree contains the **M2 vertical slice**: the M1 host and
+MoUI 0.9.1 shell extended with a machine registry and SSH probing. The host
+keeps machine records and events in SQLite, exposes `machine.add/list/probe/
+remove`, publishes `machine.*` events with replay, and the desktop Machines
+page can register, probe and remove targets with readable failure reasons.
 
-M2–M5 business features (machine inventory, task execution, sessions,
-ACP-backed search) are intentionally **not** implemented here.
+M3–M5 business features (remote files, terminals, task execution, agent
+sessions, ACP-backed search) are intentionally **not** implemented here.
 
 ## Layout
 
 ```
 moon.work                     workspace manifest
-packages/contracts/           JSON-RPC, event envelope, discovery contracts
+packages/contracts/           JSON-RPC, event envelope, discovery, machine contracts
+packages/machines/            SQLite machine store + pure event replay
 packages/providers/           SSH + PTY providers moved out of the M0 spike
 packages/host-client/         host.json discovery + WebSocket JSON-RPC client
-services/host/                monexus-host executable (serve/status/subscribe)
-apps/desktop/app/             MoUI model/update/view, host-link worker, tests
+services/host/                monexus-host executable (serve/status/subscribe/machine)
+apps/desktop/app/             MoUI model/update/view, host-link + machine workers, tests
 apps/desktop/linux_skia/      Linux native entry + Vulkan linker shim
-scripts/host_smoke.sh         end-to-end host smoke test
-docs/m1.md                    M1 design notes, verification and limitations
+scripts/host_smoke.sh         end-to-end host smoke test (M1 regression)
+scripts/machine_smoke.sh      machine registry + SSH probe smoke test (temp sshd/fake ssh)
+docs/m1.md, docs/m2.md        design notes, verification and limitations
 spikes/m0/                    frozen M0 spike (see docs/spikes/m0.md)
 ```
 
@@ -52,7 +55,7 @@ moon test  --target native
 ```
 
 Expected: build succeeds and all tests pass (contracts, providers,
-host-client, host, desktop app).
+host-client, machines, host, desktop app).
 
 If the Vulkan shim cannot be used in your environment, set
 `MOUI_SKIA_ENABLE_GPU_VULKAN=0` before building; that avoids linking against
@@ -70,15 +73,45 @@ _build/native/debug/build/monexus/host/host.exe subscribe --max-events 3
 ```
 
 `serve` writes `host.json` atomically with mode `0600`, binds a random
-`127.0.0.1` port, and rejects a second instance with the `host.lock` flock.
-The bearer token in `host.json` is the only credential; the endpoint is
-loopback-only.
+`127.0.0.1` port, rejects a second instance with the `host.lock` flock, and
+opens `<state_dir>/monexus.db`. Machine records and events are persisted
+there; after a restart the event sequence continues and `subscribe --since 0`
+replays the recent machine events.
 
-Smoke test (builds, starts a host, checks status/subscribe/lock/401):
+### Machine registry
 
 ```bash
-scripts/host_smoke.sh
+HOST=_build/native/debug/build/monexus/host/host.exe
+
+# Explicit target; --use-ssh-config false pins to -F /dev/null.
+$HOST machine add --name box --host 127.0.0.1 --port 2222 \
+  --user me --identity /path/to/key --use-ssh-config false \
+  --host-key-policy accept-new --known-hosts-file /tmp/monexus_known_hosts
+
+$HOST machine list
+$HOST machine probe --id mch_... --timeout-seconds 10
+$HOST machine remove --id mch_...
 ```
+
+`add` and `probe` record the effective `ssh -G` values (hostname/user/port/
+identityfile/...). When `--use-ssh-config` is on, values inherited from
+`~/.ssh/config` are reflected in the record; with it off the explicit record
+is the only source of truth. Probe failures come back as `Unauthorized`,
+`Timeout`, `NotFound`, `Unreachable`, `HostKeyRejected` or `RemoteError` with
+a readable reason and the first stderr line.
+
+Smoke tests:
+
+```bash
+scripts/host_smoke.sh       # M1 host regression
+scripts/machine_smoke.sh    # machine add/list/probe/remove, events, restart
+```
+
+`machine_smoke.sh` starts an ephemeral non-root sshd on a random loopback
+port and injects a fake `ssh` for error classification. Every `add` passes an
+explicit temporary known-hosts file; the script snapshots the real `~/.ssh`
+before and after and asserts it was not modified. It never contacts an
+external machine.
 
 ## Run the desktop shell
 
@@ -90,6 +123,14 @@ Start the host first (or let the shell show `offline` and retry). The window
 shows five switchable pages — Home, Machines, Tasks, Search, Settings — and a
 live host status (`connecting` / `online` / `offline`) with an event counter
 and a 1.5 s reconnect backoff.
+
+The Machines page is functional: fill host/port/user/identity, choose whether
+to use `~/.ssh/config`, cycle the host-key policy, then Add. Cards show
+online/offline/degraded, the resolved target and profile summary, the last
+error, and Probe/Remove buttons. Machine commands use a separate short-lived
+connection (a queue worker beside the event subscription) so notifications
+are not dropped while a request is in flight; after a reconnect the page
+refreshes the machine list.
 
 With no display server the native entry panics at window creation; this is a
 MoUI Linux backend limitation, not a MoNexus error. Use the headless
@@ -112,6 +153,9 @@ LIBRARY_PATH="$PWD/linux_skia/third_party/vulkan" \
   moui screenshot --app app --out /tmp/monexus-home.png --width 920 --height 560
 LIBRARY_PATH="$PWD/linux_skia/third_party/vulkan" MONEXUS_SCENE_PAGE=Machines \
   moui screenshot --app app --out /tmp/monexus-machines.png
+LIBRARY_PATH="$PWD/linux_skia/third_party/vulkan" MONEXUS_SCENE_PAGE=Machines \
+  MONEXUS_SCENE_MACHINES=demo MONEXUS_SCENE_HOST=online \
+  moui screenshot --app app --out /tmp/monexus-machines-demo.png
 LIBRARY_PATH="$PWD/linux_skia/third_party/vulkan" MONEXUS_SCENE_HOST=online \
   moui screenshot --app app --out /tmp/monexus-online.png
 LIBRARY_PATH="$PWD/linux_skia/third_party/vulkan" MONEXUS_SCENE_HOST=offline \
@@ -123,25 +167,46 @@ display. It also links `-lvulkan` without the package's `cc-link-flags`, so
 point `LIBRARY_PATH` at the repo-local shim directory as shown; the Vulkan
 runtime `libvulkan.so.1` must still be installed.)
 
-## Protocol (M1)
+## Protocol (M2)
 
 - Transport: WebSocket JSON-RPC 2.0 at `ws://127.0.0.1:<random>/ws`,
   `Authorization: Bearer <token>` during the HTTP upgrade; wrong or missing
   token returns `401`.
-- Requests: `host.status`, `events.subscribe`. Every request must carry a
-  non-empty `params.client_request_id`; the host caches the response and
-  returns it again for a retry with the same key.
+- Requests: `host.status`, `events.subscribe`, `machine.add`, `machine.list`,
+  `machine.probe`, `machine.remove`. Every request must carry a non-empty
+  `params.client_request_id`; the host caches the response and returns it
+  again for a retry with the same key.
 - Notifications: `events.event` with `params.event` set to the ADR 0002 event
   envelope. `host.heartbeat` is emitted every second (configurable with
-  `--heartbeat-ms`) and kept in a 256-event in-memory ring for replay via
-  `since`.
-- Errors: JSON-RPC codes `-32700`, `-32600`, `-32601`, `-32602`, `-32603`.
+  `--heartbeat-ms`). Machine events are `machine.registered`,
+  `machine.connected`, `machine.probed`, `machine.disconnected` and the
+  `machine.removed` tombstone; each carries the full machine snapshot so the
+  desktop can upsert without another request.
+- Persistence: machine events and the machine projection live in SQLite
+  (`<state_dir>/monexus.db`, WAL). `meta.last_seq` keeps the event sequence
+  monotonic across restarts, and startup replays `machine.*` events to
+  reconcile the projection. The last 256 events are cached in memory for
+  `events.subscribe --since` replay.
+- Errors: JSON-RPC codes `-32700`, `-32600`, `-32601`, `-32602`, `-32603`;
+  machine failures use the host error code with `data.kind` =
+  `unauthorized|timeout|not_found|unreachable|host_key|remote|invalid|internal`
+  and a message prefixed by a readable label (`Unauthorized: ...`).
 
-## Known M1 limitations
+## Known M2 limitations
 
-- The host event log is an **in-memory ring**; restarting the host loses
-  history and sequence numbers restart at 1.
-- The client allows **one request in flight** per connection.
+- Probing is **manual**: there is no background heartbeat/probe loop yet
+  (that belongs to M3 scheduling).
+- `events.subscribe --since` replays from the 256-event in-memory ring, which
+  is seeded from SQLite on startup. Older events remain in the `events` table
+  but there is no full-cursor RPC yet.
+- The response idempotency cache is in memory; a retry with the same
+  `client_request_id` after a host restart may execute again. The desktop
+  uses fresh ids per command.
+- OpenSSH resolves `~` in `ssh -G` via the passwd home, not `$HOME`; pass an
+  explicit `known_hosts_file`/identity path when the state must stay
+  independent of the user's `~/.ssh`.
+- The client allows **one request in flight** per connection; the desktop
+  therefore uses a separate command connection for machine RPCs.
 - `HostStatus.pid` / `HostInfo.pid` are `0`: MoonBit's async runtime exposes
   no portable `getpid` in the pinned version.
 - On SIGINT/SIGTERM the process exits through async cancellation; the stale
@@ -149,7 +214,7 @@ runtime `libvulkan.so.1` must still be installed.)
   released by the OS).
 - MoUI Linux entry requires Node at build time and a display at run time; use
   tests/screenshots on headless machines.
-- No web/wasm desktop target in M1.
+- No web/wasm desktop target yet.
 
 ## Licenses
 
@@ -157,4 +222,6 @@ MoNexus code in this worktree is Apache-2.0. MoUI (`wzzc-dev/moui`) and
 `wzzc-dev/moui_skia_renderer` are Apache-2.0 dependencies fetched at build
 time; they are **not vendored**. The MoNexus shell uses their public TEA/View
 API; no MoUI example source was copied. M0 spike code and the refactored
-providers are MoNexus originals.
+providers are MoNexus originals. SQLite is used through
+`moonbit-community/sqlite3` (which bundles SQLite 3.49.1, public domain) and
+is likewise fetched, not vendored.

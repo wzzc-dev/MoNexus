@@ -63,11 +63,23 @@ pub async fn host_link_loop(state_dir : String) -> Unit {
         event_seq: status.event_seq,
       }),
     )
+    // Reconnect implies the projection may have changed while the desktop was
+    // away (or the host restarted); pull the machine list once.
+    enqueue_machine_command(RefreshMachines)
     let mut connected = true
     while connected {
       match client.wait_event() {
-        Ok(event) =>
+        Ok(event) => {
           dispatch(EventArrived(event.event_type, event.seq))
+          match @contracts.machine_event_removed_id(event) {
+            Some(machine_id) => dispatch(MachineRemoved(machine_id))
+            None =>
+              match @contracts.machine_event_record(event) {
+                Some(record) => dispatch(MachineUpserted(record))
+                None => ()
+              }
+          }
+        }
         Err(message) => {
           dispatch(LinkOffline(message))
           connected = false

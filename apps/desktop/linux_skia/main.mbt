@@ -18,11 +18,19 @@ async fn main {
   let worker_task : async () -> Unit = async fn() {
     @app.host_link_loop(@client.default_state_dir())
   }
+  let machine_task : async () -> Unit = async fn() {
+    @app.machine_command_loop(@client.default_state_dir())
+  }
   @async.with_task_group(async fn(group) {
     group.spawn_bg(
       no_wait=true,
       allow_failure=true,
       worker_task,
+    )
+    group.spawn_bg(
+      no_wait=true,
+      allow_failure=true,
+      machine_task,
     )
     window_task()
   })

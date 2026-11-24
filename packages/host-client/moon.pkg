@@ -1,6 +1,5 @@
 import {
   "monexus/contracts" @contracts,
-  "moonbitlang/async",
   "moonbitlang/async/fs",
   "moonbitlang/async/http",
   "moonbitlang/async/websocket",

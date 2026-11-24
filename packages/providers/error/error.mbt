@@ -6,6 +6,8 @@ pub(all) enum ProviderErrorKind {
   AuthFailed
   ConnectTimeout
   Transport
+  HostKey
+  NotFound
   RemoteExit
   NotConfigured
   SpawnFailed
@@ -20,6 +22,8 @@ pub fn ProviderErrorKind::label(self : ProviderErrorKind) -> String {
     AuthFailed => "auth_failed"
     ConnectTimeout => "connect_timeout"
     Transport => "transport"
+    HostKey => "host_key"
+    NotFound => "not_found"
     RemoteExit => "remote_exit"
     NotConfigured => "not_configured"
     SpawnFailed => "spawn_failed"

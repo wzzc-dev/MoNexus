@@ -156,6 +156,128 @@ pub async fn RpcClient::subscribe(
 }
 
 ///|
+/// Send a machine RPC and decode its result. Machine errors carry a readable
+/// `kind`/`reason` payload, so callers get `Unauthorized: ...`-style text
+/// instead of the numeric JSON-RPC envelope.
+async fn RpcClient::machine_call(
+  self : RpcClient,
+  client_request_id : String,
+  method : String,
+  params : Map[String, @json.Json],
+) -> Result[@json.Json, String] {
+  let response = match self.request(client_request_id, method, params) {
+    Ok(value) => value
+    Err(message) => return Err(message)
+  }
+  match response.error {
+    Some(error) => return Err(@contracts.machine_error_text(error))
+    None => ()
+  }
+  match response.result {
+    Some(value) => Ok(value)
+    None => Err(method + " returned no result")
+  }
+}
+
+///|
+/// Register an SSH machine. The host stores the explicit target and records
+/// the effective `ssh -G` view before answering.
+pub async fn RpcClient::call_machine_add(
+  self : RpcClient,
+  client_request_id : String,
+  name~ : String,
+  host~ : String,
+  port~ : Int = 22,
+  user~ : String = "",
+  identity~ : String = "",
+  use_ssh_config~ : Bool = true,
+  host_key_policy~ : String = @contracts.MACHINE_HOST_KEY_POLICY_ACCEPT_NEW,
+  known_hosts_file~ : String = "",
+) -> Result[@contracts.MachineRecord, String] {
+  let result = match self.machine_call(
+    client_request_id,
+    @contracts.METHOD_MACHINE_ADD,
+    @contracts.machine_add_params(
+      client_request_id,
+      name~,
+      host~,
+      port~,
+      user~,
+      identity~,
+      use_ssh_config~,
+      host_key_policy~,
+      known_hosts_file~,
+    ),
+  ) {
+    Ok(value) => value
+    Err(message) => return Err(message)
+  }
+  @contracts.machine_record_from_json(result)
+}
+
+///|
+pub async fn RpcClient::call_machine_list(
+  self : RpcClient,
+  client_request_id : String,
+) -> Result[Array[@contracts.MachineRecord], String] {
+  let result = match self.machine_call(
+    client_request_id,
+    @contracts.METHOD_MACHINE_LIST,
+    @contracts.machine_list_params(client_request_id),
+  ) {
+    Ok(value) => value
+    Err(message) => return Err(message)
+  }
+  @contracts.machine_list_from_json(result)
+}
+
+///|
+pub async fn RpcClient::call_machine_probe(
+  self : RpcClient,
+  client_request_id : String,
+  machine_id : String,
+  timeout_seconds~ : Int = 10,
+) -> Result[@contracts.MachineProbeView, String] {
+  let result = match self.machine_call(
+    client_request_id,
+    @contracts.METHOD_MACHINE_PROBE,
+    @contracts.machine_probe_params(
+      client_request_id,
+      machine_id,
+      timeout_seconds~,
+    ),
+  ) {
+    Ok(value) => value
+    Err(message) => return Err(message)
+  }
+  @contracts.machine_probe_from_json(result)
+}
+
+///|
+pub async fn RpcClient::call_machine_remove(
+  self : RpcClient,
+  client_request_id : String,
+  machine_id : String,
+) -> Result[String, String] {
+  let result = match self.machine_call(
+    client_request_id,
+    @contracts.METHOD_MACHINE_REMOVE,
+    @contracts.machine_remove_params(client_request_id, machine_id),
+  ) {
+    Ok(value) => value
+    Err(message) => return Err(message)
+  }
+  let object = match @contracts.as_object(result) {
+    Some(value) => value
+    None => return Err("machine.remove returned a malformed result")
+  }
+  match @contracts.string_field(object, "machine_id") {
+    Some(value) => Ok(value)
+    None => Err("machine.remove returned no machine_id")
+  }
+}
+
+///|
 /// Block until the next `events.event` notification and decode its envelope.
 pub async fn RpcClient::wait_event(
   self : RpcClient,

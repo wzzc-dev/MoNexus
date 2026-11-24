@@ -2,6 +2,7 @@
 members = [
   "./spikes/m0",
   "./packages/contracts",
+  "./packages/machines",
   "./packages/providers",
   "./packages/host-client",
   "./services/host",
