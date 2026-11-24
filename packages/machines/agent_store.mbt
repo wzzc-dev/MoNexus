@@ -61,6 +61,7 @@ fn agent_store_migrate(
     "CREATE TABLE IF NOT EXISTS artifacts (" +
     "id TEXT PRIMARY KEY, " +
     "session_id TEXT NOT NULL, " +
+    "run_id TEXT NOT NULL DEFAULT '', " +
     "kind TEXT NOT NULL, " +
     "uri TEXT NOT NULL, " +
     "digest TEXT NOT NULL, " +
@@ -72,6 +73,20 @@ fn agent_store_migrate(
   exec_raise(
     conn,
     "CREATE INDEX IF NOT EXISTS artifacts_session_idx ON artifacts(session_id)",
+  )
+  // Older M4 databases lack the run link; ADD COLUMN is a no-op error when
+  // the column already exists, which is safe to swallow here.
+  let _ = try {
+    exec_raise(
+      conn,
+      "ALTER TABLE artifacts ADD COLUMN run_id TEXT NOT NULL DEFAULT ''",
+    )
+  } catch {
+    _ => ()
+  }
+  exec_raise(
+    conn,
+    "CREATE INDEX IF NOT EXISTS artifacts_run_idx ON artifacts(run_id)",
   )
 }
 
@@ -135,21 +150,22 @@ fn put_artifact_raw(
   record : @contracts.ArtifactRecord,
 ) -> Unit raise @sqlite3.SqliteError {
   let stmt = conn.prepare(
-    "INSERT INTO artifacts (id,session_id,kind,uri,digest,size,created_at," +
-    "record_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) " +
+    "INSERT INTO artifacts (id,session_id,run_id,kind,uri,digest,size," +
+    "created_at,record_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) " +
     "ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id," +
-    "kind=excluded.kind,uri=excluded.uri,digest=excluded.digest," +
-    "size=excluded.size,created_at=excluded.created_at," +
-    "record_json=excluded.record_json",
+    "run_id=excluded.run_id,kind=excluded.kind,uri=excluded.uri," +
+    "digest=excluded.digest,size=excluded.size," +
+    "created_at=excluded.created_at,record_json=excluded.record_json",
   )
   stmt.bind(index=1, record.id)
   stmt.bind(index=2, record.session_id)
-  stmt.bind(index=3, record.kind)
-  stmt.bind(index=4, record.uri)
-  stmt.bind(index=5, record.digest)
-  stmt.bind(index=6, record.size.to_int64())
-  stmt.bind(index=7, record.created_at)
-  stmt.bind(index=8, record.to_json().stringify())
+  stmt.bind(index=3, record.run_id)
+  stmt.bind(index=4, record.kind)
+  stmt.bind(index=5, record.uri)
+  stmt.bind(index=6, record.digest)
+  stmt.bind(index=7, record.size.to_int64())
+  stmt.bind(index=8, record.created_at)
+  stmt.bind(index=9, record.to_json().stringify())
   let _ = stmt.step()
   stmt.finalize()
 }
@@ -402,5 +418,47 @@ pub fn MachineStore::list_artifacts(
     Ok(out)
   } catch {
     error => Err(sqlite_text(error))
+  }
+}
+
+///|
+pub fn MachineStore::list_run_artifacts(
+  self : MachineStore,
+  run_id : String,
+) -> Result[Array[@contracts.ArtifactRecord], String] {
+  let out : Array[@contracts.ArtifactRecord] = []
+  try {
+    let stmt = self.conn.prepare(
+      "SELECT record_json FROM artifacts WHERE run_id=?1 " +
+      "ORDER BY created_at ASC, id ASC",
+    )
+    stmt.bind(index=1, run_id)
+    while stmt.step() {
+      let text : String = stmt.column(index=0)
+      let parsed = @json.parse(text) catch { _ => continue }
+      match @contracts.artifact_from_json(parsed) {
+        Some(record) => out.push(record)
+        None => ()
+      }
+    }
+    stmt.finalize()
+  } catch {
+    error => return Err(sqlite_text(error))
+  }
+  Ok(out)
+}
+
+///|
+pub fn MachineStore::get_artifact(
+  self : MachineStore,
+  artifact_id : String,
+) -> Result[@contracts.ArtifactRecord?, String] {
+  match self.get_record_json("artifacts", "id", artifact_id) {
+    Ok(Some(text)) => {
+      let parsed = @json.parse(text) catch { _ => return Ok(None) }
+      Ok(@contracts.artifact_from_json(parsed))
+    }
+    Ok(None) => Ok(None)
+    Err(message) => Err(message)
   }
 }

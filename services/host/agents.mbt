@@ -415,6 +415,14 @@ async fn finalize_agent_session(
   if state.agent_transcripts.size() < 64 {
     state.agent_transcripts.set(runtime.id, runtime.transcript.val)
   }
+  let _ = state.store.search_index(
+    "session/" + runtime.id,
+    "session",
+    runtime.id,
+    "session " + runtime.agent_id,
+    runtime.transcript.val.text,
+    timestamp,
+  )
   state.agent_sessions.remove(runtime.id)
   state.mutex.release()
 }
@@ -1945,6 +1953,20 @@ async fn handle_decision_respond(
       request,
       client_request_id,
       agent_conflict("decision is already " + record.status),
+    )
+    return
+  }
+  if record.kind == @contracts.DECISION_KIND_VERIFY {
+    state.mutex.release()
+    handle_verify_decision_respond(
+      state,
+      sink,
+      request,
+      client_request_id,
+      record,
+      option_id,
+      answer_text,
+      answered_by,
     )
     return
   }

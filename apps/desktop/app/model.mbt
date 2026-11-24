@@ -215,6 +215,65 @@ pub fn InboxState::new() -> InboxState {
 }
 
 ///|
+/// M5 Tasks board: the ready-to-dispatch create form, the task list, the
+/// selected task's runs, one open Run detail (evidence, artifacts, diff) and
+/// the tail of the host event stream.
+pub(all) struct TaskState {
+  title : String
+  goal : String
+  verify_text : String
+  command : String
+  workspace_id : String
+  machine_id : String
+  tasks : Array[@contracts.TaskRecord]
+  selected_task : String
+  runs : Array[@contracts.RunRecord]
+  selected_run : String
+  detail : @contracts.RunDetail?
+  artifact_name : String
+  artifact_text : String
+  events : Array[@contracts.EventEnvelope]
+  event_seq : Int64
+  message : String
+}
+
+///|
+pub fn TaskState::new() -> TaskState {
+  {
+    title: "",
+    goal: "",
+    verify_text: "",
+    command: "moon test --target native",
+    workspace_id: "",
+    machine_id: "",
+    tasks: [],
+    selected_task: "",
+    runs: [],
+    selected_run: "",
+    detail: None,
+    artifact_name: "",
+    artifact_text: "",
+    events: [],
+    event_seq: 0L,
+    message: "",
+  }
+}
+
+///|
+/// M5 Search page: one query over session and decision text.
+pub(all) struct SearchState {
+  query : String
+  hits : Array[@contracts.SearchHit]
+  backend : String
+  message : String
+}
+
+///|
+pub fn SearchState::new() -> SearchState {
+  { query: "", hits: [], backend: "", message: "" }
+}
+
+///|
 pub struct Model {
   page : Page
   host : HostProjection
@@ -226,6 +285,8 @@ pub struct Model {
   project : ProjectState
   agent : AgentState
   inbox : InboxState
+  task : TaskState
+  search : SearchState
 }
 
 ///|
@@ -302,6 +363,8 @@ pub fn Model::new() -> Model {
     project: ProjectState::new(),
     agent: AgentState::new(),
     inbox: InboxState::new(),
+    task: TaskState::new(),
+    search: SearchState::new(),
   }
 }
 
@@ -436,6 +499,32 @@ pub(all) enum Msg {
   InboxText(String)
   InboxAnswer(String, String)
   InboxSubmitText(String)
+  // M5 Tasks board / Run detail / Activity.
+  TaskTitle(String)
+  TaskGoal(String)
+  TaskVerify(String)
+  TaskCommand(String)
+  TaskWorkspace(String)
+  TaskMachine(String)
+  TaskCreateSubmit
+  TasksRefresh
+  TasksLoaded(Array[@contracts.TaskRecord])
+  TaskSelect(String)
+  TaskCancelNow(String)
+  RunsLoaded(Array[@contracts.RunRecord])
+  RunDispatch
+  RunSelect(String)
+  RunCancelNow(String)
+  RunDetailLoaded(@contracts.RunDetail)
+  ArtifactReadNow(String)
+  ArtifactLoaded(String, String)
+  EventsLoaded(Array[@contracts.EventEnvelope], Int64)
+  TaskNotice(String)
+  TaskError(String)
+  // M5 Search.
+  SearchQuery(String)
+  SearchSubmit
+  SearchLoaded(Array[@contracts.SearchHit], String)
 }
 
 ///|
@@ -470,6 +559,16 @@ pub(all) enum MachineCommand {
   AgentList
   DecisionList(String)
   DecisionRespond(String, String, String, String)
+  // M5 Tasks board, Run detail and Activity event cursor.
+  TaskRefresh(Int64)
+  TaskCreate(String, String, String, String)
+  RunCreate(String, String, String, String)
+  TaskCancel(String)
+  RunList(String)
+  RunGet(String)
+  RunCancel(String)
+  ArtifactRead(String)
+  SearchSessions(String)
 }
 
 ///|
@@ -624,6 +723,7 @@ pub fn update_full(
       match page {
         Agents => [AgentList]
         Inbox => [DecisionList(@contracts.DECISION_STATUS_PENDING)]
+        Tasks => [TaskRefresh(model.task.event_seq)]
         _ => none
       },
     )
@@ -662,7 +762,20 @@ pub fn update_full(
         event_count: model.host.event_count + 1,
         last_event: event_type,
       }
-      ({ ..model, host }, none)
+      // Task/Run/Artifact/Decision events keep the board and the Activity
+      // list live; heartbeats and terminal chatter do not wake the worker.
+      let relevant = event_type.has_prefix("task.") ||
+        event_type.has_prefix("run.") ||
+        event_type.has_prefix("artifact.") ||
+        event_type.has_prefix("decision.") ||
+        event_type.has_prefix("project.")
+      let commands = if relevant {
+        let since = if seq > 1L { seq - 1L } else { 0L }
+        [TaskRefresh(since)]
+      } else {
+        none
+      }
+      ({ ..model, host }, commands)
     }
     MachinesLoaded(records) => {
       let machines : Array[@contracts.MachineRecord] = []
@@ -1367,6 +1480,372 @@ pub fn update_full(
         DecisionRespond(decision_id, "", model.inbox.text, "owner"),
         DecisionList(@contracts.DECISION_STATUS_PENDING),
       ],
+    )
+    TaskTitle(value) => (
+      { ..model, task: { ..model.task, title: value } },
+      none,
+    )
+    TaskGoal(value) => (
+      { ..model, task: { ..model.task, goal: value } },
+      none,
+    )
+    TaskVerify(value) => (
+      { ..model, task: { ..model.task, verify_text: value } },
+      none,
+    )
+    TaskCommand(value) => (
+      { ..model, task: { ..model.task, command: value } },
+      none,
+    )
+    TaskWorkspace(value) => (
+      { ..model, task: { ..model.task, workspace_id: value } },
+      none,
+    )
+    TaskMachine(value) => (
+      { ..model, task: { ..model.task, machine_id: value } },
+      none,
+    )
+    TaskCreateSubmit => {
+      let state = model.task
+      let title = state.title.trim().to_owned()
+      let workspace_id = if state.workspace_id.trim() == "" {
+        match model.project.workspace {
+          Some(record) => record.id
+          None => ""
+        }
+      } else {
+        state.workspace_id
+      }
+      if title == "" {
+        (
+          {
+            ..model,
+            task: {
+              ..model.task,
+              message: "create failed: title is required",
+            },
+          },
+          none,
+        )
+      } else if workspace_id.trim() == "" {
+        (
+          {
+            ..model,
+            task: {
+              ..model.task,
+              workspace_id,
+              message: "create failed: open a Project or paste a workspace id",
+            },
+          },
+          none,
+        )
+      } else {
+        (
+          {
+            ..model,
+            task: {
+              ..model.task,
+              workspace_id,
+              message: "creating " + title + "...",
+            },
+          },
+          [TaskCreate(title, state.goal, workspace_id, state.verify_text)],
+        )
+      }
+    }
+    TasksRefresh => (model, [TaskRefresh(model.task.event_seq)])
+    TasksLoaded(records) => {
+      let mut selected = ""
+      for record in records {
+        if record.id == model.task.selected_task {
+          selected = record.id
+        }
+      }
+      let commands = if selected == "" {
+        none
+      } else {
+        [RunList(selected)]
+      }
+      (
+        {
+          ..model,
+          task: {
+            ..model.task,
+            tasks: records,
+            selected_task: selected,
+            runs: if selected == "" { [] } else { model.task.runs },
+            selected_run: if selected == "" {
+              ""
+            } else {
+              model.task.selected_run
+            },
+            detail: if selected == "" { None } else { model.task.detail },
+          },
+        },
+        commands,
+      )
+    }
+    TaskSelect(task_id) => (
+      {
+        ..model,
+        task: {
+          ..model.task,
+          selected_task: task_id,
+          runs: [],
+          selected_run: "",
+          detail: None,
+          artifact_name: "",
+          artifact_text: "",
+          message: "selected " + task_id,
+        },
+      },
+      [RunList(task_id)],
+    )
+    TaskCancelNow(task_id) => (
+      {
+        ..model,
+        task: {
+          ..model.task,
+          message: "cancelling " + task_id + "...",
+        },
+      },
+      [TaskCancel(task_id)],
+    )
+    RunsLoaded(records) => {
+      let mut selected_run = ""
+      for record in records {
+        if record.id == model.task.selected_run {
+          selected_run = record.id
+        }
+      }
+      let commands : Array[MachineCommand] = []
+      if selected_run != "" {
+        commands.push(RunGet(selected_run))
+      }
+      (
+        {
+          ..model,
+          task: {
+            ..model.task,
+            runs: records,
+            selected_run,
+            detail: if selected_run == "" { None } else { model.task.detail },
+          },
+        },
+        commands,
+      )
+    }
+    RunDispatch => {
+      let state = model.task
+      let mut workspace_id = state.workspace_id
+      let mut found = false
+      for record in state.tasks {
+        if record.id == state.selected_task {
+          found = true
+          if record.workspace_id != "" {
+            workspace_id = record.workspace_id
+          }
+        }
+      }
+      if !found {
+        (
+          {
+            ..model,
+            task: { ..model.task, message: "dispatch failed: select a task" },
+          },
+          none,
+        )
+      } else if state.command.trim() == "" {
+        (
+          {
+            ..model,
+            task: { ..model.task, message: "dispatch failed: command is empty" },
+          },
+          none,
+        )
+      } else if workspace_id.trim() == "" {
+        (
+          {
+            ..model,
+            task: {
+              ..model.task,
+              message: "dispatch failed: task has no workspace",
+            },
+          },
+          none,
+        )
+      } else {
+        (
+          {
+            ..model,
+            task: {
+              ..model.task,
+              message: "dispatching on " +
+                (if state.machine_id == "" {
+                  "local"
+                } else {
+                  state.machine_id
+                }) +
+                "...",
+            },
+          },
+          [
+            RunCreate(
+              state.selected_task,
+              state.command,
+              state.machine_id,
+              workspace_id,
+            ),
+          ],
+        )
+      }
+    }
+    RunSelect(run_id) => (
+      {
+        ..model,
+        task: {
+          ..model.task,
+          selected_run: run_id,
+          detail: None,
+          artifact_name: "",
+          artifact_text: "",
+          message: "opening " + run_id + "...",
+        },
+      },
+      [RunGet(run_id)],
+    )
+    RunCancelNow(run_id) => (
+      {
+        ..model,
+        task: { ..model.task, message: "cancelling " + run_id + "..." },
+      },
+      [RunCancel(run_id)],
+    )
+    RunDetailLoaded(detail) => (
+      {
+        ..model,
+        task: {
+          ..model.task,
+          detail: Some(detail),
+          message:
+            "run " +
+            detail.run.id +
+            " · " +
+            detail.run.status +
+            " · evidence " +
+            detail.evidence.length().to_string() +
+            " · artifacts " +
+            detail.artifacts.length().to_string(),
+        },
+      },
+      none,
+    )
+    ArtifactReadNow(artifact_id) => (
+      {
+        ..model,
+        task: { ..model.task, message: "reading artifact " + artifact_id + "..." },
+      },
+      [ArtifactRead(artifact_id)],
+    )
+    ArtifactLoaded(name, text) => (
+      {
+        ..model,
+        task: {
+          ..model.task,
+          artifact_name: name,
+          artifact_text: text,
+          message: "artifact loaded: " + name,
+        },
+      },
+      none,
+    )
+    EventsLoaded(new_events, next_seq) => {
+      let merged : Array[@contracts.EventEnvelope] = []
+      let mut last : Int64 = 0L
+      for event in model.task.events {
+        merged.push(event)
+        if event.seq > last {
+          last = event.seq
+        }
+      }
+      for event in new_events {
+        if event.seq > last {
+          merged.push(event)
+          last = event.seq
+        }
+      }
+      let trimmed : Array[@contracts.EventEnvelope] = []
+      let skip = if merged.length() > 200 {
+        merged.length() - 200
+      } else {
+        0
+      }
+      let mut index = 0
+      for event in merged {
+        if index >= skip {
+          trimmed.push(event)
+        }
+        index = index + 1
+      }
+      let cursor = if next_seq > model.task.event_seq {
+        next_seq
+      } else {
+        model.task.event_seq
+      }
+      (
+        { ..model, task: { ..model.task, events: trimmed, event_seq: cursor } },
+        none,
+      )
+    }
+    TaskNotice(text) => (
+      { ..model, task: { ..model.task, message: text } },
+      none,
+    )
+    TaskError(text) => (
+      { ..model, task: { ..model.task, message: text } },
+      none,
+    )
+    SearchQuery(value) => (
+      { ..model, search: { ..model.search, query: value } },
+      none,
+    )
+    SearchSubmit => {
+      let query = model.search.query.trim().to_owned()
+      if query == "" {
+        (
+          {
+            ..model,
+            search: { ..model.search, message: "type a query first" },
+          },
+          none,
+        )
+      } else {
+        (
+          {
+            ..model,
+            search: {
+              ..model.search,
+              message: "searching for " + query + "...",
+            },
+          },
+          [SearchSessions(query)],
+        )
+      }
+    }
+    SearchLoaded(hits, backend) => (
+      {
+        ..model,
+        search: {
+          ..model.search,
+          hits,
+          backend,
+          message:
+            "hits: " +
+            hits.length().to_string() +
+            (if backend == "" { "" } else { " · backend " + backend }),
+        },
+      },
+      none,
     )
   }
 }

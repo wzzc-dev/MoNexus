@@ -210,6 +210,58 @@ async fn handle_request(
       state.mutex.release()
       handle_decision_respond(state, sink, request, client_request_id)
     }
+    @contracts.METHOD_PROJECT_CREATE => {
+      state.mutex.release()
+      handle_project_create(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_PROJECT_LIST => {
+      state.mutex.release()
+      handle_project_list(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_TASK_CREATE => {
+      state.mutex.release()
+      handle_task_create(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_TASK_LIST => {
+      state.mutex.release()
+      handle_task_list(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_TASK_GET => {
+      state.mutex.release()
+      handle_task_get(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_TASK_CANCEL => {
+      state.mutex.release()
+      handle_task_cancel(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_RUN_CREATE => {
+      state.mutex.release()
+      handle_run_create(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_RUN_LIST => {
+      state.mutex.release()
+      handle_run_list(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_RUN_GET => {
+      state.mutex.release()
+      handle_run_get(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_RUN_CANCEL => {
+      state.mutex.release()
+      handle_run_cancel(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_ARTIFACT_READ => {
+      state.mutex.release()
+      handle_artifact_read(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_EVENTS_LIST => {
+      state.mutex.release()
+      handle_events_list(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SEARCH_SESSIONS => {
+      state.mutex.release()
+      handle_search_sessions(state, sink, request, client_request_id)
+    }
     @contracts.METHOD_EVENTS_SUBSCRIBE => {
       let since = @contracts.subscribe_since(request.params)
       let replay = match since {

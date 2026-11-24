@@ -98,6 +98,25 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
       return Err("cannot rebuild workspace projection: " + message)
     }
   }
+  // Task / Run projections are rebuilt from the same append-only log, so a
+  // crash between the event write and the projection write is repaired here.
+  match store.reconcile_task_projection() {
+    Ok((projects, tasks, runs)) =>
+      println(
+        "monexus-host: task projection rebuilt from events (projects=" +
+        projects.to_string() +
+        " tasks=" +
+        tasks.to_string() +
+        " runs=" +
+        runs.to_string() +
+        ")",
+      )
+    Err(message) => {
+      store.close()
+      lock.close()
+      return Err("cannot rebuild task projection: " + message)
+    }
+  }
   let addr = @socket.Addr::parse(
     "127.0.0.1:" + options.port.to_string(),
   ) catch {

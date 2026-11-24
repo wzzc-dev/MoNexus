@@ -26,9 +26,13 @@ test "all eight pages can be switched by tapping navigation" {
   harness.tap_text("Inbox")
   assert_true(harness.has_text("No pending decisions."))
   harness.tap_text("Tasks")
-  assert_true(harness.has_text("Tasks page"))
+  assert_true(harness.has_text("Board"))
   harness.tap_text("Search")
-  assert_true(harness.has_text("Search page"))
+  assert_true(
+    harness.has_text(
+      "Search session transcripts and decision text recorded by the host.",
+    ),
+  )
   harness.tap_text("Settings")
   assert_true(harness.has_text("Settings page"))
   harness.tap_text("Home")
@@ -314,4 +318,130 @@ test "worktree create validates branch and path" {
     }
     _ => fail("expected ProjectCreateWorktree")
   }
+}
+
+///|
+fn task_test_record(id : String, title : String) -> @contracts.TaskRecord {
+  @contracts.TaskRecord::new(
+    id~,
+    title~,
+    goal="ship M5",
+    parent_id="",
+    project_id="",
+    agent_id="",
+    workspace_id="wsp_1",
+    verify=["moon test"],
+    created_at="2026-01-01T00:00:00Z",
+  )
+}
+
+///|
+test "task create picks the open project workspace and emits TaskCreate" {
+  let record : @contracts.WorkspaceRecord = {
+    id: "wsp_1",
+    machine_id: "",
+    kind: "local",
+    root: "/tmp/demo",
+    name: "demo",
+    git_root: "/tmp/demo",
+    is_git: true,
+    state: "open",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  }
+  let model = update(Model::new(), ProjectOpened(record))
+  let (missing, none) = update_full(model, TaskCreateSubmit)
+  assert_eq(none.length(), 0)
+  assert_true(missing.task.message.contains("title is required"))
+  let titled = update(model, TaskTitle("ship M5"))
+  let verified = update(titled, TaskVerify("moon test\nmoon build"))
+  let (next, commands) = update_full(verified, TaskCreateSubmit)
+  assert_eq(commands.length(), 1)
+  match commands[0] {
+    TaskCreate(title, _, workspace_id, verify) => {
+      assert_eq(title, "ship M5")
+      assert_eq(workspace_id, "wsp_1")
+      assert_eq(verify, "moon test\nmoon build")
+    }
+    _ => fail("expected TaskCreate")
+  }
+  assert_eq(next.task.workspace_id, "wsp_1")
+}
+
+///|
+test "selecting a task refreshes runs and dispatch uses its workspace" {
+  let task = task_test_record("tsk_1", "ship M5")
+  let model = update(Model::new(), TasksLoaded([task]))
+  let (selected, commands) = update_full(model, TaskSelect("tsk_1"))
+  assert_eq(commands.length(), 1)
+  match commands[0] {
+    RunList(task_id) => assert_eq(task_id, "tsk_1")
+    _ => fail("expected RunList")
+  }
+  let loaded = update(selected, EventsLoaded([], 0L))
+  let (_, reload) = update_full(
+    update(loaded, TaskCommand("moon test")),
+    RunDispatch,
+  )
+  assert_eq(reload.length(), 1)
+  match reload[0] {
+    RunCreate(task_id, command, machine_id, workspace_id) => {
+      assert_eq(task_id, "tsk_1")
+      assert_eq(command, "moon test")
+      assert_eq(machine_id, "")
+      assert_eq(workspace_id, "wsp_1")
+    }
+    _ => fail("expected RunCreate")
+  }
+}
+
+///|
+test "event batches dedupe on seq and advance the cursor" {
+  let first = @contracts.EventEnvelope::new(
+    id="evt_1",
+    org_id=@contracts.ORG_LOCAL,
+    event_type=@contracts.EVENT_TASK_CREATED,
+    ts="2026-01-01T00:00:00Z",
+    subject="task/tsk_1",
+    seq=1L,
+    payload=@json.Json::empty_object(),
+  )
+  let second = @contracts.EventEnvelope::new(
+    id="evt_2",
+    org_id=@contracts.ORG_LOCAL,
+    event_type=@contracts.EVENT_RUN_QUEUED,
+    ts="2026-01-01T00:00:01Z",
+    subject="run/run_1",
+    seq=2L,
+    payload=@json.Json::empty_object(),
+  )
+  let model = update(Model::new(), EventsLoaded([first, second], 2L))
+  assert_eq(model.task.events.length(), 2)
+  assert_eq(model.task.event_seq, 2L)
+  let again = update(model, EventsLoaded([second], 2L))
+  assert_eq(again.task.events.length(), 2)
+  // A gap-free cursor is never moved backwards by a stale projection read.
+  let stale = update(again, EventsLoaded([], 1L))
+  assert_eq(stale.task.event_seq, 2L)
+}
+
+///|
+test "search submit trims the query and stores hits with the backend" {
+  let (empty, none) = update_full(Model::new(), SearchSubmit)
+  assert_eq(none.length(), 0)
+  assert_true(empty.search.message.contains("type a query"))
+  let model = update(update(Model::new(), SearchQuery("  verify failed  ")), SearchSubmit)
+  let (searching, commands) = update_full(model, SearchSubmit)
+  assert_eq(commands.length(), 1)
+  match commands[0] {
+    SearchSessions(query) => assert_eq(query, "verify failed")
+    _ => fail("expected SearchSessions")
+  }
+  assert_true(searching.search.message.contains("verify failed"))
+  let hits : Array[@contracts.SearchHit] = [
+    { kind: "decision", ref_id: "dec_1", title: "verify", ts: "t1", snippet: "waived" },
+  ]
+  let loaded = update(searching, SearchLoaded(hits, "like"))
+  assert_eq(loaded.search.hits.length(), 1)
+  assert_eq(loaded.search.backend, "like")
 }
