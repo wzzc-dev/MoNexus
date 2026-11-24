@@ -12,3 +12,4 @@
 | [0006](0006-permission-model.md) | 权限模型与审批 | Accepted |
 | [0007](0007-ui-and-moui.md) | UI 与 MoUI 边界（vendor 流程） | Accepted |
 | [0008](0008-ssh-access.md) | SSH 接入与远端执行 | Accepted |
+| [0009](0009-ops-agent.md) | 机管 Agent（`ops`）作为 V0.1 种子角色 | Accepted |
