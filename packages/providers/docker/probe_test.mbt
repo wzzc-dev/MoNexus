@@ -1,22 +1,9 @@
 ///|
-/// Capability-probe tests. The daemon is never touched: parsing is tested
-/// directly, and probe behaviour is exercised with fake `docker` scripts in a
-/// temp directory so missing/timeout/non-zero paths are deterministic.
-
-///|
-async fn test_cleanup(path : String) -> Unit {
-  @fs.rmdir(path, recursive=true) catch { _ => () }
-}
-
-///|
-async fn write_script(dir : String, name : String, body : String) -> String raise {
-  let path = dir + "/" + name
-  @fs.write_file(path, body, permission=0o755) catch {
-    _ => fail("cannot write fake docker script")
-  }
-  @fs.chmod(path, 0o755) catch { _ => fail("cannot chmod fake docker script") }
-  path
-}
+/// Capability-probe parsing tests. Process-level probe paths are exercised in
+/// `probe_wbtest.mbt` through a deterministic `/bin/sh` runner; nothing here
+/// depends on a host `docker` installation.
+///
+/// These tests parse `docker info` shapes directly and do not touch a daemon.
 
 ///|
 fn docker_info_json(version : String, rootless : Bool) -> String {
@@ -120,95 +107,16 @@ test "required flags are derived from the server version" {
 }
 
 ///|
-async test "probe reports a reachable daemon and its capabilities" {
-  let dir = @fs.tmpdir(prefix="docker-probe-ok") catch {
-    _ => fail("cannot create temp directory")
-  }
-  defer @async.protect_from_cancel(async fn() { test_cleanup(dir) })
-  let info = docker_info_json("27.1.1", false)
-  let tool = write_script(
-    dir,
-    "docker-ok",
-    "#!/bin/sh\ncat <<'EOF'\n" + info + "\nEOF\n",
-  )
-  let probe = @docker.probe_docker(tool=tool, timeout_ms=2_000)
-  inspect(probe.available, content="true")
-  inspect(probe.schedulable, content="true")
-  inspect(probe.is_usable(), content="true")
-  match probe.reason() {
-    None => ()
-    Some(value) => fail("usable probe reported a failure: " + value)
-  }
-  match probe.capabilities {
-    Some(value) =>
-      inspect(value.server_version.text(), content="27.1.1")
-    None => fail("probe lost its capabilities")
-  }
-}
-
-///|
-async test "probe treats a non-zero exit as unavailable" {
-  let dir = @fs.tmpdir(prefix="docker-probe-fail") catch {
-    _ => fail("cannot create temp directory")
-  }
-  defer @async.protect_from_cancel(async fn() { test_cleanup(dir) })
-  let tool = write_script(dir, "docker-fail", "#!/bin/sh\nexit 3\n")
-  let probe = @docker.probe_docker(tool=tool, timeout_ms=2_000)
-  inspect(probe.available, content="false")
-  inspect(probe.schedulable, content="false")
-  match probe.reason() {
-    Some(value) => inspect(value, content="docker_unavailable")
-    None => fail("non-zero exit must have a reason")
-  }
-}
-
-///|
-async test "probe times out without pretending to be available" {
-  let dir = @fs.tmpdir(prefix="docker-probe-timeout") catch {
-    _ => fail("cannot create temp directory")
-  }
-  defer @async.protect_from_cancel(async fn() { test_cleanup(dir) })
-  let tool = write_script(dir, "docker-slow", "#!/bin/sh\nsleep 2\n")
-  let probe = @docker.probe_docker(tool=tool, timeout_ms=150)
-  inspect(probe.available, content="false")
-  inspect(probe.schedulable, content="false")
-  match probe.reason() {
-    Some(value) => inspect(value, content="docker_probe_timeout")
-    None => fail("timeout must have a reason")
-  }
-}
-
-///|
 async test "probe fails closed when the executable is missing" {
-  let dir = @fs.tmpdir(prefix="docker-probe-missing") catch {
-    _ => fail("cannot create temp directory")
-  }
-  defer @async.protect_from_cancel(async fn() { test_cleanup(dir) })
-  let probe = @docker.probe_docker(tool=dir + "/no-such-docker", timeout_ms=500)
+  // An absolute path that cannot exist on the test host: no PATH lookup and
+  // no dependency on whether the runner has docker installed.
+  let probe = @docker.probe_docker(
+    tool="/nonexistent/monexus-docker-probe",
+    timeout_ms=500,
+  )
   inspect(probe.available, content="false")
   match probe.reason() {
     Some(value) => inspect(value, content="docker_missing")
     None => fail("missing tool must have a reason")
-  }
-}
-
-///|
-async test "an old daemon is reachable but not schedulable" {
-  let dir = @fs.tmpdir(prefix="docker-probe-old") catch {
-    _ => fail("cannot create temp directory")
-  }
-  defer @async.protect_from_cancel(async fn() { test_cleanup(dir) })
-  let info = docker_info_json("19.03.15", false)
-  let tool = write_script(
-    dir,
-    "docker-old",
-    "#!/bin/sh\ncat <<'EOF'\n" + info + "\nEOF\n",
-  )
-  let probe = @docker.probe_docker(tool=tool, timeout_ms=2_000)
-  inspect(probe.available, content="true")
-  inspect(probe.schedulable, content="false")
-  match probe.reason() {
-    Some(value) => inspect(value, content="docker_version_unsupported")
-    None => fail("old daemon must have a reason")
   }
 }

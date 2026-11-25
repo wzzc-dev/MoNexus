@@ -459,6 +459,19 @@ pub async fn probe_docker(
   tool~ : String = "docker",
   timeout_ms~ : Int = DEFAULT_DOCKER_PROBE_TIMEOUT_MS,
 ) -> DockerProbe {
+  probe_docker_argv(tool, ["info", "--format", "{{json .}}"], timeout_ms)
+}
+
+///|
+/// Internal probe entry point with the docker argv injectable. Whitebox tests
+/// use `/bin/sh -c` so every outcome is driven by a deterministic runner and
+/// never depends on a host `docker` installation or an executable temp file.
+/// Production goes through `probe_docker`, which fixes the argv above.
+async fn probe_docker_argv(
+  tool : String,
+  info_argv : Array[String],
+  timeout_ms : Int,
+) -> DockerProbe {
   if tool == "" {
     return probe_failure(
       tool,
@@ -469,10 +482,7 @@ pub async fn probe_docker(
   }
   let budget = if timeout_ms < 50 { 50 } else { timeout_ms }
   let collected = @async.with_timeout_opt(budget, async fn() {
-    let result = @process.collect_output(
-      tool,
-      ["info", "--format", "{{json .}}"],
-    ) catch {
+    let result = @process.collect_output(tool, info_argv) catch {
       _ => return None
     }
     Some(result)
