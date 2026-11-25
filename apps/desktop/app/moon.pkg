@@ -7,6 +7,7 @@ import {
   "monexus/host-client" @client,
   "moonbitlang/async",
   "moonbitlang/async/aqueue",
+  "moonbitlang/async/fs",
   "moonbitlang/core/env",
   "moonbitlang/core/json" @json,
   "moonbitlang/core/string",
@@ -14,6 +15,11 @@ import {
 
 import {
   "wzzc-dev/moui/runtime/test_support",
+  "moonbitlang/async/process",
 } for "test"
+
+// The theme preference tests point MONEXUS_CONFIG_DIR/XDG_CONFIG_HOME at
+// temporary directories; process-wide env vars need serial test blocks.
+max_concurrent_tests = 1
 
 supported_targets = "native"

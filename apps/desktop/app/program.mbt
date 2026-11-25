@@ -13,11 +13,19 @@ pub fn dispatch_ready() -> Bool {
 }
 
 ///|
+/// Program built from `MONEXUS_THEME` only. Tests and screenshot scenes use
+/// this; the desktop entry point uses `program_with_startup` with the resolved
+/// saved preference.
 pub fn program() -> @moui.Program[Model, Msg] {
+  program_with_startup(startup_theme_from_env())
+}
+
+///|
+pub fn program_with_startup(startup : StartupTheme) -> @moui.Program[Model, Msg] {
   @moui.Program::new(
     init=() => {
       (
-        Model::new(),
+        Model::new_with_startup(startup),
         @moui.Effect::run(
           key="host-link-dispatch",
           kind="host-link",
@@ -28,19 +36,39 @@ pub fn program() -> @moui.Program[Model, Msg] {
     },
     update=(model, msg) => {
       let (next, commands) = update_full(model, msg)
-      let effect = if commands.is_empty() {
-        @moui.Effect::none()
-      } else {
-        @moui.Effect::run(
-          key="machine-commands",
-          kind="machine-command",
-          label="Queue machine command",
-          run= _dispatch => {
-            for command in commands {
-              enqueue_machine_command(command)
-            }
-          },
+      let effects : Array[@moui.Effect[Msg]] = []
+      if !commands.is_empty() {
+        effects.push(
+          @moui.Effect::run(
+            key="machine-commands",
+            kind="machine-command",
+            label="Queue machine command",
+            run= _dispatch => {
+              for command in commands {
+                enqueue_machine_command(command)
+              }
+            },
+          ),
         )
+      }
+      match msg {
+        SetTheme(mode) =>
+          effects.push(
+            @moui.Effect::run(
+              key="theme-preference",
+              kind="theme-preference",
+              label="Persist appearance choice",
+              run= _dispatch => enqueue_theme_choice(mode),
+            ),
+          )
+        _ => ()
+      }
+      let effect = if effects.is_empty() {
+        @moui.Effect::none()
+      } else if effects.length() == 1 {
+        effects[0]
+      } else {
+        @moui.Effect::batch(effects)
       }
       (next, effect)
     },

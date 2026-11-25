@@ -11,8 +11,9 @@
 /// same tables.
 
 ///|
-/// Appearance mode. Dark is the product default; `MONEXUS_THEME` picks the
-/// startup mode and the Settings page can flip it at runtime.
+/// Appearance mode. Dark is the product default; a saved Settings choice
+/// decides the startup mode when present, and `MONEXUS_THEME` decides it
+/// before any choice has been saved. The Settings page can flip it at runtime.
 #derive(Eq)
 pub(all) enum ThemeMode {
   Dark
@@ -28,17 +29,23 @@ pub fn ThemeMode::label(self : ThemeMode) -> String {
 }
 
 ///|
-/// `MONEXUS_THEME=light|dark` decides the startup appearance. A missing or
-/// illegal value lands on dark.
-pub fn theme_mode_from_env() -> ThemeMode {
-  match @env.get_env_var("MONEXUS_THEME") {
-    Some(value) =>
-      if value.to_lower() == "light" {
-        Light
-      } else {
-        Dark
-      }
-    None => Dark
+/// Stable lowercase form used by the preference file and by `MONEXUS_THEME`.
+pub fn ThemeMode::pref_value(self : ThemeMode) -> String {
+  match self {
+    Dark => "dark"
+    Light => "light"
+  }
+}
+
+///|
+/// Parse one appearance value. Only `light` and `dark` are legal, matched
+/// case-insensitively; anything else returns `None` so callers can fall back
+/// deterministically.
+pub fn theme_mode_from_value(value : String) -> ThemeMode? {
+  match value.to_lower() {
+    "light" => Some(Light)
+    "dark" => Some(Dark)
+    _ => None
   }
 }
 

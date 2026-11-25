@@ -1482,8 +1482,22 @@ fn settings_page(model : Model) -> @moui.View[Msg] {
       ui_segment("Dark", Dark, model.theme_mode),
       spacer(weight=1.0),
     ], spacing=8.0, align=@style.CrossAlign::Center),
-    ui_meta("Applies immediately. Not persisted; MONEXUS_THEME picks the startup mode."),
+    ui_meta(
+      "Applies immediately and is saved for future launches; MONEXUS_THEME picks the startup mode only until you choose one.",
+    ),
   ]
+  // A corrupt preference file or a failed write is reported here rather than
+  // silently changing the user's choice.
+  if model.theme_note != "" {
+    appearance.push(
+      text(
+        model.theme_note,
+        width=960.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(11.0, 400)).foreground(ui_danger()),
+    )
+  }
   let local_host : Array[@moui.View[Msg]] = [
     ui_section("Local host"),
     ui_muted_wrapped(

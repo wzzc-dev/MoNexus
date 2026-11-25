@@ -309,8 +309,12 @@ pub struct Model {
   inbox : InboxState
   task : TaskState
   search : SearchState
-  /// Appearance mode; starts from MONEXUS_THEME, flipped by the Settings page.
+  /// Appearance mode; seeded at startup from the saved choice, else
+  /// MONEXUS_THEME, and flipped by the Settings page.
   theme_mode : ThemeMode
+  /// Diagnostic from startup preference loading or the last save attempt;
+  /// empty when nothing needs reporting.
+  theme_note : String
   /// Key of the nav/row currently hovered, for hover washes on hand-painted
   /// rows (buttons carry their own hover styles).
   hover_row : String
@@ -319,7 +323,16 @@ pub struct Model {
 }
 
 ///|
+/// Environment-only constructor used by tests, screenshot scenes and callers
+/// that do not have async file access. The desktop entry point builds the
+/// model with `new_with_startup(startup_theme())` so a saved Settings choice
+/// wins over `MONEXUS_THEME`.
 pub fn Model::new() -> Model {
+  Model::new_with_startup(startup_theme_from_env())
+}
+
+///|
+pub fn Model::new_with_startup(startup : StartupTheme) -> Model {
   let state_dir = @client.default_state_dir()
   let page = match @env.get_env_var("MONEXUS_SCENE_PAGE") {
     Some(value) => Page::from_label(value)
@@ -395,7 +408,8 @@ pub fn Model::new() -> Model {
     inbox: InboxState::new(),
     task: TaskState::new(),
     search: SearchState::new(),
-    theme_mode: theme_mode_from_env(),
+    theme_mode: startup.mode,
+    theme_note: startup.note,
     hover_row: "",
     scroll_epoch: 0,
   }
@@ -460,8 +474,12 @@ pub(all) struct HostStatusSnapshot {
 ///|
 pub(all) enum Msg {
   SelectPage(Page)
-  /// Appearance flip from the Settings segmented control; repaints only.
+  /// Appearance flip from the Settings segmented control; repaints and asks
+  /// the preference worker to persist the explicit choice.
   SetTheme(ThemeMode)
+  /// Result of persisting an explicit choice, shown on the Settings page when
+  /// the write failed.
+  ThemeChoiceStored(ThemeSaveStatus)
   /// Hover bookkeeping for hand-painted nav/list rows.
   HoverRow(String, Bool)
   LinkConnecting
@@ -823,6 +841,16 @@ pub fn update_full(
       },
     )
     SetTheme(mode) => ({ ..model, theme_mode: mode }, none)
+    ThemeChoiceStored(status) => (
+      {
+        ..model,
+        theme_note: match status {
+          ThemeSaveOk => ""
+          ThemeSaveFailed(message) => "Appearance not saved: " + message
+        },
+      },
+      none,
+    )
     HoverRow(key, hovered) => (
       {
         ..model,

@@ -49,9 +49,25 @@ transcript/command well.
 | `info` | `#60A5FA` | `#2B66D2` | running / queued |
 | `code_bg` | `#121212` | `#FAF8F2` | Transcript, command and answer wells |
 
-`MONEXUS_THEME=light|dark` chooses the startup mode; a missing or illegal value
-falls back to dark. The appearance is **not persisted** — restarting without
-the variable returns to dark.
+Startup appearance precedence, highest first:
+
+1. the explicit choice saved from the Settings page;
+2. a legal `MONEXUS_THEME=light|dark`;
+3. dark, the product default.
+
+The saved choice lives outside the workspace and the host event log, in one
+small JSON file under the user's config directory:
+
+- `$MONEXUS_CONFIG_DIR/theme.json` when that variable is set;
+- else `$XDG_CONFIG_HOME/monexus/theme.json`;
+- else `$HOME/.config/monexus/theme.json`;
+- else `.config/monexus/theme.json`.
+
+The file is `{"schema_version":1,"theme":"light"|"dark"}` and is written
+atomically (temporary file plus rename) with mode 0600; it contains no secrets.
+A missing file is silent. An unreadable, corrupt or unknown-valued file is
+ignored, falls through to the next precedence rule and is reported as a
+diagnostic on the Settings page; reading never rewrites it.
 
 ### Status tone mapping
 
@@ -162,8 +178,12 @@ island.
 
 `view` calls `apply_theme_mode(model.theme_mode)` before building the tree, so
 the palette swap and the repaint happen on the same frame. The Settings
-segments dispatch `SetTheme(mode)`; the update is pure (no reconnect, no
-refetch). MoUI's theme is rebuilt from the active palette and seeded with
+segments dispatch `SetTheme(mode)`; the model update stays pure (no reconnect,
+no refetch) and the explicit choice is queued to the preference worker, which
+atomically rewrites `theme.json` (0600) and reports a failed write back to the
+Settings page. A fresh launch seeds `Model` from the saved choice through
+`startup_theme()` before the first frame, so the window opens in the user's
+mode. MoUI's theme is rebuilt from the active palette and seeded with
 `ColorPalette::from_seed` (accent primary, `frame` background, `surface`,
 `surface_alt`, `border` outline, semantic status colours, accent focus) with a
 radius scale of 6/7/10/pill and control height 30.
@@ -174,15 +194,16 @@ radius scale of 6/7/10/pill and control height 30.
   `folder-git-2`; pages map to the closest shipped glyph: Home `house`,
   Machines `server`, Projects `folder`, Agents `message-circle`, Inbox `mail`,
   Tasks `list`, Search `search`, Settings `settings`.
-- There is no segmented-control widget in MoUI 0.9.1, so the Light/Dark control
-  is composed from two tappable containers; the focus ring is the framework's
-  accent-tinted token rather than a custom ring.
-- No MoUI package changes were made for this redesign, and no persistence was
-  added for the appearance mode.
+- MoUI 0.9.2 ships `segmented_control`, but the shell keeps its hand-painted
+  Light/Dark pair (`ui_segment`): two tappable containers whose active segment
+  is accent-tinted, so the control matches the surrounding cards rather than
+  importing another control style.
+- No MoUI package changes were made for this redesign. Appearance persistence
+  is desktop-local (`theme.json`, see above), not a MoUI feature.
 
 ## Verification
 
-`moon build --target native`, `moon test --target native` (88/88) and
+`moon build --target native`, `moon test --target native` (108/108) and
 `scripts/acceptance.sh` (69 PASS / 0 FAIL) cover the build and M1–M7 behaviour;
 the redesign touched only `apps/desktop` presentation. Review screenshots were
 taken from a real host under Xvfb at 1360×900 with the window at 1280×800:
