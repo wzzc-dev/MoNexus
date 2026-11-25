@@ -1889,9 +1889,55 @@ async fn handle_decision_list(
 ) -> Unit {
   let status = @contracts.decision_status_param(request.params)
   let session_id = @contracts.decision_session_param(request.params)
+  let bucket = @contracts.decision_bucket_param(request.params)
   state.mutex.acquire()
   let result = match state.store.list_decisions(status, session_id) {
-    Ok(records) => Ok(@contracts.decision_list_result(records))
+    Ok(records) => {
+      // Inbox placement is computed by the host from one shared rule:
+      // pending -> Needs you, an answered retry/approval whose Run is still
+      // active -> waiting, anything else -> handled.
+      let enriched : Array[@contracts.DecisionRecord] = []
+      for record in records {
+        let run_status = if record.run_id == "" {
+          ""
+        } else {
+          match state.store.get_run(record.run_id) {
+            Ok(Some(run)) => {
+              let mut effective = run.status
+              // An owner retry answers the Decision on the *old* Run; the
+              // Inbox should follow the retry attempt, not the lost original.
+              if record.option_id == "retry" {
+                match state.store.list_runs(run.task_id, "") {
+                  Ok(runs) =>
+                    for attempt_run in runs {
+                      if attempt_run.retried_from == record.run_id {
+                        effective = attempt_run.status
+                      }
+                    }
+                  Err(_) => ()
+                }
+              }
+              effective
+            }
+            _ => ""
+          }
+        }
+        let item = {
+          ..record,
+          inbox: @contracts.decision_inbox_bucket(
+            record.status,
+            record.kind,
+            record.option_id,
+            run_status,
+          ),
+          run_status: run_status,
+        }
+        if bucket == "" || item.inbox == bucket {
+          enriched.push(item)
+        }
+      }
+      Ok(@contracts.decision_list_result(enriched))
+    }
     Err(message) => Err(agent_internal("cannot list decisions: " + message))
   }
   state.mutex.release()
@@ -2086,6 +2132,35 @@ async fn handle_decision_respond(
   state.mutex.release()
   match persisted {
     Ok(_) => {
+      // Every answer is auditable, including permission and readiness
+      // answers that do not own a Run.
+      audit(
+        state,
+        "decision.respond",
+        if answered_by == "" { "owner" } else { answered_by },
+        "decision/" + decision_id,
+        "answered",
+        target=record.run_id,
+        policy=record.kind,
+        detail="option " + option_id + "\n" + answer_text,
+        decision_id~,
+        run_id=record.run_id,
+      )
+      if record.kind == @contracts.DECISION_KIND_APPROVAL {
+        handle_approval_decision_respond(
+          state,
+          record.run_id,
+          option_id,
+          if answered_by == "" { "owner" } else { answered_by },
+        )
+      } else if record.kind == @contracts.DECISION_KIND_RECOVERY {
+        handle_recovery_decision_respond(
+          state,
+          record.run_id,
+          option_id,
+          if answered_by == "" { "owner" } else { answered_by },
+        )
+      }
       if delivered || record.kind != @contracts.DECISION_KIND_PERMISSION {
         send_machine_result(
           state,

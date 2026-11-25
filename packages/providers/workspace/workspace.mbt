@@ -1473,3 +1473,229 @@ pub async fn WorkspaceProvider::exec(
       }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Durable (tmux-backed) execution — M6 recovery
+// ---------------------------------------------------------------------------
+
+///|
+/// Where a durable run lives. `durable=false` means tmux was unavailable and
+/// the caller must fall back to a plain `exec` (that run is then not
+/// recoverable after a host restart, which recovery records as unverifiable).
+pub(all) struct DurableHandle {
+  durable : Bool
+  session : String
+  log_path : String
+  exit_path : String
+}
+
+///|
+/// One poll of a durable run. `alive` means the tmux session still exists;
+/// `exited` means the exit marker exists and `exit_code` is authoritative.
+pub(all) struct DurablePoll {
+  alive : Bool
+  exited : Bool
+  exit_code : Int
+  output : String
+  error : String
+}
+
+///|
+const DURABLE_TAIL_BYTES : Int = 65_536
+
+///|
+fn durable_poll_script(
+  session : String,
+  log_path : String,
+  exit_path : String,
+) -> String {
+  let q = @ssh.shell_quote
+  [
+    "if command -v tmux >/dev/null 2>&1; then",
+    "  if tmux has-session -t " + q(session) + " 2>/dev/null; then printf '__ALIVE__\\n'; fi",
+    "fi",
+    "if [ -f " + q(exit_path) + " ]; then",
+    "  printf '__EXIT__%s\\n' \"$(cat " + q(exit_path) + ")\"",
+    "fi",
+    "if [ -f " + q(log_path) + " ]; then",
+    "  printf '__LOG__\\n'",
+    "  tail -c " + DURABLE_TAIL_BYTES.to_string() + " " + q(log_path) + " 2>/dev/null",
+    "fi",
+  ].join("\n")
+}
+
+///|
+fn parse_durable_poll(text : String) -> DurablePoll {
+  let mut alive = false
+  let mut exited = false
+  let mut exit_code = -1
+  let mut output = ""
+  let mut in_log = false
+  for raw in text.split("\n") {
+    let line = raw.to_owned()
+    if line == "__ALIVE__" {
+      alive = true
+    } else if line.has_prefix("__EXIT__") {
+      exited = true
+      let code = @string.parse_int(line.substring(start=8).trim()) catch {
+        _ => -1
+      }
+      exit_code = code
+    } else if line == "__LOG__" {
+      in_log = true
+    } else if in_log {
+      output = output + line + "\n"
+    }
+  }
+  { alive, exited, exit_code, output, error: "" }
+}
+
+///|
+fn replace_home_prefix(path : String, home : String) -> String {
+  if path.has_prefix("$HOME") {
+    home + path.substring(start=5)
+  } else {
+    path
+  }
+}
+
+///|
+/// Start `command` in a new tmux session so it survives a host exit. The
+/// command writes stdout/stderr to `log_path` and its exit code to
+/// `exit_path`; both are polled by `durable_poll`. Local runs keep their log
+/// under the host state dir; SSH runs use `$HOME/.monexus/logs/<session>` on
+/// the target machine (architecture §12).
+pub async fn WorkspaceProvider::durable_start(
+  self : WorkspaceProvider,
+  session~ : String,
+  command~ : String,
+  cwd~ : String,
+  local_dir~ : String,
+) -> Result[DurableHandle, @error.ProviderError] {
+  let q = @ssh.shell_quote
+  let (log_path, exit_path, start_script) = match self {
+    Local(_) => {
+      let log_path = local_dir + "/run.log"
+      let exit_path = local_dir + "/run.exit"
+      let script = [
+        "mkdir -p " + q(local_dir),
+        "rm -f " + q(exit_path),
+        "if ! command -v tmux >/dev/null 2>&1; then printf '__MONEXUS_NO_TMUX__\\n'; exit 0; fi",
+        "tmux new-session -d -s " + q(session) + " -c " + q(cwd) +
+        " sh -c 'sh -c \"$1\" > \"$2\" 2>&1; printf \"%s\" \"$?\" > \"$3\"' monexus-run " +
+        q(command) + " " + q(log_path) + " " + q(exit_path),
+        "printf '__MONEXUS_STARTED__\\n'",
+      ].join("\n")
+      (log_path, exit_path, script)
+    }
+    Ssh(_) => {
+      let log_path = "$HOME/.monexus/logs/" + session + ".log"
+      let exit_path = "$HOME/.monexus/logs/" + session + ".exit"
+      let script = [
+        "dir=\"$HOME/.monexus/logs\"; mkdir -p \"$dir\"",
+        "printf '__HOME__%s\\n' \"$HOME\"",
+        "log=\"$dir/" + session + ".log\"; exitf=\"$dir/" + session + ".exit\"",
+        "rm -f \"$exitf\"",
+        "if ! command -v tmux >/dev/null 2>&1; then printf '__MONEXUS_NO_TMUX__\\n'; exit 0; fi",
+        "tmux new-session -d -s " + q(session) + " -c " + q(cwd) +
+        " sh -c 'sh -c \"$1\" > \"$2\" 2>&1; printf \"%s\" \"$?\" > \"$3\"' monexus-run " +
+        q(command) + " \"$log\" \"$exitf\"",
+        "printf '__MONEXUS_STARTED__\\n'",
+      ].join("\n")
+      (log_path, exit_path, script)
+    }
+  }
+  let result = match self.exec(start_script, cwd~, timeout_seconds=30) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  if result.timed_out || result.exit_code != 0 {
+    return Err(
+      @error.ProviderError::new(
+        @error.ProviderErrorKind::RemoteExit,
+        "durable start failed",
+      ).with_detail(result.stderr),
+    )
+  }
+  let durable = result.stdout.contains("__MONEXUS_STARTED__")
+  // SSH paths were built with a literal `$HOME`; resolve it from the start
+  // script so later polls can `test -f` the real absolute path.
+  let mut resolved_log = log_path
+  let mut resolved_exit = exit_path
+  for line in result.stdout.split("\n") {
+    let line = line.to_string()
+    if line.has_prefix("__HOME__") {
+      let home = line.substring(start=8).trim_end(chars="\r").to_owned()
+      if home != "" && home != "~" {
+        resolved_log = replace_home_prefix(log_path, home)
+        resolved_exit = replace_home_prefix(exit_path, home)
+      }
+    }
+  }
+  Ok({
+    durable,
+    session,
+    log_path: resolved_log,
+    exit_path: resolved_exit,
+  })
+}
+
+///|
+/// Poll one durable run. A transport failure is returned as `error` with
+/// `alive=false, exited=false`; callers treat that as "cannot observe", never
+/// as "the command exited".
+pub async fn WorkspaceProvider::durable_poll(
+  self : WorkspaceProvider,
+  handle : DurableHandle,
+) -> DurablePoll {
+  if !handle.durable {
+    return {
+      alive: false,
+      exited: false,
+      exit_code: -1,
+      output: "",
+      error: "run is not durable (tmux unavailable)",
+    }
+  }
+  let script = durable_poll_script(
+    handle.session,
+    handle.log_path,
+    handle.exit_path,
+  )
+  let result = match self.exec(script, cwd="/", timeout_seconds=15) {
+    Ok(value) => value
+    Err(error) =>
+      return {
+        alive: false,
+        exited: false,
+        exit_code: -1,
+        output: "",
+        error: error.to_string(),
+      }
+  }
+  if result.exit_code == 255 {
+    return {
+      alive: false,
+      exited: false,
+      exit_code: -1,
+      output: "",
+      error: "transport unavailable: " + result.stderr,
+    }
+  }
+  parse_durable_poll(result.stdout)
+}
+
+///|
+/// Best-effort teardown of a durable session (cancel or retry).
+pub async fn WorkspaceProvider::durable_stop(
+  self : WorkspaceProvider,
+  handle : DurableHandle,
+) -> Unit {
+  if !handle.durable {
+    return
+  }
+  let q = @ssh.shell_quote
+  let script = "if command -v tmux >/dev/null 2>&1; then tmux kill-session -t " +
+    q(handle.session) + " 2>/dev/null || true; fi"
+  let _ = self.exec(script, cwd="/", timeout_seconds=10)
+}

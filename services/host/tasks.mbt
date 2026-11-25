@@ -157,6 +157,18 @@ async fn transition_run(
   let now = @async.now()
   let timestamp = @contracts.format_rfc3339(now)
   let terminal = @contracts.run_status_is_terminal(to)
+  // Summaries and errors are shown in the Inbox and written to events; a
+  // credential echoed by a command must be redacted first (ADR-0006 §5).
+  let safe_summary = if summary == "" {
+    current.output_summary
+  } else {
+    @contracts.redact_secrets(summary)
+  }
+  let safe_error = if error_text == "" {
+    current.last_error
+  } else {
+    @contracts.redact_secrets(error_text)
+  }
   let updated = {
     ..current,
     status: to,
@@ -165,12 +177,8 @@ async fn transition_run(
     } else {
       stop_reason
     },
-    output_summary: if summary == "" {
-      current.output_summary
-    } else {
-      summary
-    },
-    last_error: if error_text == "" { current.last_error } else { error_text },
+    output_summary: safe_summary,
+    last_error: safe_error,
     session_id: if session_id == "" { current.session_id } else { session_id },
     worktree_id: if worktree_id == "" { current.worktree_id } else { worktree_id },
     started_at: if to == @contracts.RUN_STATUS_RUNNING &&
@@ -624,22 +632,18 @@ async fn execute_run_body(
   if current.status != @contracts.RUN_STATUS_RUNNING {
     return Ok(())
   }
-  // Main step.
+  // Main step. Command runs go through the durable (tmux) path so a host
+  // restart can reattach; recovery settles a failed/lost command itself.
   let step = if current.mode == @contracts.RUN_MODE_AGENT {
     match run_agent_step(state, current, cwd) {
-      Ok(session_id) => Ok(("agent", session_id))
+      Ok(session_id) => Ok(Completed("agent session " + session_id + " completed"))
       Err(message) => Err(message)
     }
   } else {
-    run_command_step(state, current, cwd)
+    execute_command_run(state, current, cwd)
   }
   match step {
-    Ok((kind, detail)) => {
-      let summary = if kind == "agent" {
-        "agent session " + detail + " completed"
-      } else {
-        detail
-      }
+    Ok(Completed(summary)) => {
       let _ = transition_run(
         state,
         run_id,
@@ -647,6 +651,10 @@ async fn execute_run_body(
         summary~,
       )
       run_verification(state, run_id, cwd)
+    }
+    Ok(Recovered(reason)) => {
+      // Recovery already settled or escalated this Run. Do not settle again.
+      recovery_event(state, run_id, "run.recovery.handled", reason)
     }
     Err(message) => {
       let _ = transition_run(
@@ -1228,6 +1236,18 @@ async fn handle_verify_decision_respond(
       return
     }
   }
+  audit(
+    state,
+    "decision.respond",
+    if answered.answered_by == "" { "owner" } else { answered.answered_by },
+    "decision/" + answered.id,
+    "answered",
+    target=run_id,
+    policy=answered.kind,
+    detail="option " + chosen + "\n" + answer_text,
+    decision_id=answered.id,
+    run_id=run_id,
+  )
   match chosen {
     "waive" => {
       waive_failed_evidence(state, run_id)
@@ -1369,6 +1389,9 @@ async fn write_run_artifact(
     _ => ()
   }
   let path = dir + "/" + name
+  // Artifacts are owner-readable logs: redact credential-looking values
+  // before the bytes reach disk or an event payload.
+  let text = @contracts.redact_secrets(text)
   let written = @fs.write_file(path, text, permission=0o600) catch {
     error => {
       println("monexus-host: cannot write run artifact: " + error.to_string())
@@ -1563,6 +1586,18 @@ async fn expire_run_decisions(state : HostState, run_id : String) -> Unit {
       expired,
     )
     state.mutex.release()
+    audit(
+      state,
+      "decision.expire",
+      "host",
+      "decision/" + expired.id,
+      "expired",
+      target=run_id,
+      policy=expired.kind,
+      detail="run was cancelled before the decision was answered",
+      decision_id=expired.id,
+      run_id~,
+    )
   }
 }
 
@@ -2048,28 +2083,7 @@ async fn handle_run_create(
       return
     }
   }
-  if @contracts.task_status_is_terminal(task.status) {
-    task_io_error(
-      state,
-      sink,
-      request,
-      client_request_id,
-      task_conflict("task is already " + task.status),
-    )
-    return
-  }
-  if task.status == @contracts.TASK_STATUS_DRAFT ||
-    task.status == @contracts.TASK_STATUS_PLANNED {
-    task_io_error(
-      state,
-      sink,
-      request,
-      client_request_id,
-      task_conflict("task must be ready before dispatch (status=" + task.status + ")"),
-    )
-    return
-  }
-  let idempotency_key = @contracts.string_field_or(
+    let idempotency_key = @contracts.string_field_or(
     request.params,
     "idempotency_key",
     "",
@@ -2094,6 +2108,27 @@ async fn handle_run_create(
       }
       None => ()
     }
+  }
+if @contracts.task_status_is_terminal(task.status) {
+    task_io_error(
+      state,
+      sink,
+      request,
+      client_request_id,
+      task_conflict("task is already " + task.status),
+    )
+    return
+  }
+  if task.status == @contracts.TASK_STATUS_DRAFT ||
+    task.status == @contracts.TASK_STATUS_PLANNED {
+    task_io_error(
+      state,
+      sink,
+      request,
+      client_request_id,
+      task_conflict("task must be ready before dispatch (status=" + task.status + ")"),
+    )
+    return
   }
   let workspace_id = match @contracts.string_field(request.params, "workspace_id") {
     Some(value) if value.trim() != "" => value
@@ -2159,6 +2194,50 @@ async fn handle_run_create(
     )
     return
   }
+  // Risk policy. A denied command never becomes a Run. A high-risk command
+  // becomes an approval Decision: the Run is created in `waiting_approval`
+  // and only returns to the queue when the owner approves it.
+  let policy = if mode == @contracts.RUN_MODE_COMMAND {
+    @contracts.evaluate_command_policy(command)
+  } else {
+    {
+      risk: @contracts.RISK_LOW,
+      action: @contracts.POLICY_ALLOW,
+      reason: "agent tool calls are governed by the ACP permission model",
+    }
+  }
+  if policy.action == @contracts.POLICY_DENY {
+    audit(
+      state,
+      "policy.deny",
+      "host",
+      "run/pending",
+      "denied",
+      target=task_id,
+      policy=@contracts.POLICY_DENY,
+      risk=policy.risk,
+      detail=policy.reason + "\ncommand: " + command,
+    )
+    task_io_error(
+      state,
+      sink,
+      request,
+      client_request_id,
+      task_conflict("command denied by policy: " + policy.reason),
+    )
+    return
+  }
+  audit(
+    state,
+    "policy.verdict",
+    "host",
+    "run/pending",
+    policy.action,
+    target=task_id,
+    policy=policy.action,
+    risk=policy.risk,
+    detail=policy.reason + "\ncommand: " + command,
+  )
   // Placement: explicit machine, or capability match over local + registered
   // machines. Requirements come from the optional `requires` object.
   let requires = match request.params.get("requires") {
@@ -2264,7 +2343,18 @@ async fn handle_run_create(
     }
   }
   let now = @async.now()
-  let record = @contracts.RunRecord::new(
+  // Credentials must not be persisted with the Run (ADR-0006 §5). Secret-
+  // looking env names are replaced with a marker; the agent account on the
+  // machine holds the real credential.
+  let raw_env = @contracts.agent_env_from_object(request.params, "agent_env")
+  let agent_env : Map[String, String] = Map([])
+  for name, value in raw_env {
+    agent_env.set(
+      name,
+      if @contracts.is_secret_key_name(name) { "[redacted]" } else { value },
+    )
+  }
+  let created = @contracts.RunRecord::new(
     id=@contracts.new_id("run", now),
     task_id~,
     agent_id~,
@@ -2278,11 +2368,20 @@ async fn handle_run_create(
     created_at=@contracts.format_rfc3339(now),
     agent_command=@contracts.string_field_or(request.params, "agent_command", ""),
     agent_args=@contracts.string_array_field(request.params, "agent_args"),
-    agent_env=@contracts.agent_env_from_object(request.params, "agent_env"),
+    agent_env~,
   )
+  let record = if policy.action == @contracts.POLICY_ASK {
+    {
+      ..created,
+      status: @contracts.RUN_STATUS_WAITING_APPROVAL,
+      stop_reason: "policy_approval",
+    }
+  } else {
+    created
+  }
   state.mutex.acquire()
   let appended = state.append_run_event(
-    @contracts.EVENT_RUN_QUEUED,
+    run_event_for_status(record.status),
     record.id,
     record.to_json(),
     record,
@@ -2300,6 +2399,9 @@ async fn handle_run_create(
       )
       return
     }
+  }
+  if policy.action == @contracts.POLICY_ASK {
+    request_approval_decision(state, record.id, policy.risk, policy.reason)
   }
   match
     transition_task(

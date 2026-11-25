@@ -499,6 +499,9 @@ pub(all) struct DecisionRecord {
   delivery_error : String
   created_at : String
   answered_at : String
+  // Derived Inbox fields. Set when the host lists decisions; empty when stored.
+  inbox : String
+  run_status : String
 }
 
 ///|
@@ -529,6 +532,8 @@ pub fn DecisionRecord::new(
     delivery_error: "",
     created_at,
     answered_at: "",
+    inbox: "",
+    run_status: "",
   }
 }
 
@@ -553,6 +558,8 @@ pub fn DecisionRecord::to_json(self : DecisionRecord) -> @json.Json {
     ("delivery_error", json_string(self.delivery_error)),
     ("created_at", json_string(self.created_at)),
     ("answered_at", json_string(self.answered_at)),
+    ("inbox", json_string(self.inbox)),
+    ("run_status", json_string(self.run_status)),
   ])
 }
 
@@ -594,6 +601,8 @@ pub fn decision_from_json(json : @json.Json) -> DecisionRecord? {
     delivery_error: string_field_or(object, "delivery_error", ""),
     created_at: string_field_or(object, "created_at", ""),
     answered_at: string_field_or(object, "answered_at", ""),
+    inbox: string_field_or(object, "inbox", ""),
+    run_status: string_field_or(object, "run_status", ""),
   })
 }
 
@@ -1030,6 +1039,11 @@ pub fn agent_memory_content_param(params : Map[String, @json.Json] ) -> String {
 pub fn agent_actor_param(params : Map[String, @json.Json]) -> String {
   let actor = string_field_or(params, "actor", "")
   if actor == "" { "host" } else { actor }
+}
+
+///|
+pub fn decision_bucket_param(params : Map[String, @json.Json]) -> String {
+  string_field_or(params, "bucket", "")
 }
 
 ///|

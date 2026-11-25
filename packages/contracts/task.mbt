@@ -167,6 +167,7 @@ pub fn run_transition_allowed(from : String, to : String) -> Bool {
       to == RUN_STATUS_FAILED ||
       to == RUN_STATUS_LOST
     "waiting_approval" =>
+      to == RUN_STATUS_QUEUED ||
       to == RUN_STATUS_RUNNING ||
       to == RUN_STATUS_VERIFYING ||
       to == RUN_STATUS_SUCCEEDED ||
@@ -353,6 +354,12 @@ pub(all) struct RunRecord {
   stop_reason : String
   idempotency_key : String
   attempt : Int
+  tmux_session : String
+  log_path : String
+  exit_path : String
+  durable : String
+  exit_code : Int
+  retried_from : String
   output_summary : String
   last_error : String
   created_at : String
@@ -396,6 +403,12 @@ pub fn RunRecord::new(
     stop_reason: "",
     idempotency_key,
     attempt: 1,
+    tmux_session: "",
+    log_path: "",
+    exit_path: "",
+    durable: "",
+    exit_code: -1,
+    retried_from: "",
     output_summary: "",
     last_error: "",
     created_at,
@@ -425,6 +438,12 @@ pub fn RunRecord::to_json(self : RunRecord) -> @json.Json {
     ("stop_reason", json_string(self.stop_reason)),
     ("idempotency_key", json_string(self.idempotency_key)),
     ("attempt", json_int(self.attempt)),
+    ("tmux_session", json_string(self.tmux_session)),
+    ("log_path", json_string(self.log_path)),
+    ("exit_path", json_string(self.exit_path)),
+    ("durable", json_string(self.durable)),
+    ("exit_code", json_int(self.exit_code)),
+    ("retried_from", json_string(self.retried_from)),
     ("output_summary", json_string(self.output_summary)),
     ("last_error", json_string(self.last_error)),
     ("created_at", json_string(self.created_at)),
@@ -462,6 +481,12 @@ pub fn run_from_json(json : @json.Json) -> RunRecord? {
     stop_reason: string_field_or(object, "stop_reason", ""),
     idempotency_key: string_field_or(object, "idempotency_key", ""),
     attempt: int_field_or(object, "attempt", 1),
+    tmux_session: string_field_or(object, "tmux_session", ""),
+    log_path: string_field_or(object, "log_path", ""),
+    exit_path: string_field_or(object, "exit_path", ""),
+    durable: string_field_or(object, "durable", ""),
+    exit_code: int_field_or(object, "exit_code", -1),
+    retried_from: string_field_or(object, "retried_from", ""),
     output_summary: string_field_or(object, "output_summary", ""),
     last_error: string_field_or(object, "last_error", ""),
     created_at: string_field_or(object, "created_at", ""),
@@ -476,6 +501,32 @@ pub const RUN_MODE_COMMAND : String = "command"
 
 ///|
 pub const RUN_MODE_AGENT : String = "agent"
+
+///|
+/// Stop reasons shared by recovery and the evidence gate (architecture §13).
+/// `lost` = the durable session is gone and the exit is unknowable; the host
+/// retries once. `exited` = the process exited and its code is known; retry
+/// once. `unverifiable` = the host cannot observe the process at all; never
+/// retried automatically, always escalated to an owner Decision.
+pub const STOP_REASON_EXITED : String = "exited"
+
+///|
+pub const STOP_REASON_LOST : String = "lost"
+
+///|
+pub const STOP_REASON_UNVERIFIABLE : String = "unverifiable"
+
+///|
+pub const STOP_REASON_HOST_RESTARTED : String = "host_restarted"
+
+///|
+pub const STOP_REASON_VERIFIED : String = "verified"
+
+///|
+pub const STOP_REASON_POLICY_DENIED : String = "policy_denied"
+
+///|
+pub const STOP_REASON_APPROVAL_DENIED : String = "approval_denied"
 
 ///|
 pub(all) struct EvidenceRecord {
@@ -648,11 +699,33 @@ pub const EVENT_RUN_CANCELLED : String = "run.cancelled"
 
 pub const EVENT_RUN_LOST : String = "run.lost"
 
+///|
+/// A recovery action ran for a Run (reattach, retry, escalated to a Decision,
+/// failed). The audit payload carries the detail; this event wakes the UI.
+pub const EVENT_RUN_RECOVERED : String = "run.recovered"
+
 pub const EVENT_RUN_WAITING_APPROVAL : String = "run.waiting_approval"
 
 pub const EVENT_ARTIFACT_CREATED : String = "artifact.created"
 
 pub const DECISION_KIND_VERIFY : String = "verify"
+
+///|
+/// Policy approval: a high-risk command waits for an owner Decision before it
+/// is queued (same queue as verify, permission and recovery Decisions).
+pub const DECISION_KIND_APPROVAL : String = "approval"
+
+///|
+/// Recovery: a run stopped in a state the host cannot settle alone. Options
+/// are `retry` (explicit owner retry), `fail` and `waive` for partial
+/// artifacts where applicable.
+pub const DECISION_KIND_RECOVERY : String = "recovery"
+
+///|
+pub const DECISION_OPTION_APPROVE : String = "approve"
+
+///|
+pub const DECISION_OPTION_DENY : String = "deny"
 
 pub const DECISION_OPTION_WAIVE : String = "waive"
 
