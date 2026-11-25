@@ -48,6 +48,7 @@ fn usage_text() -> String {
     "usage:",
     "  monexus-host version | --version",
     "  monexus-host serve [--state-dir DIR] [--heartbeat-ms N] [--port N]",
+    "      [--trigger-enabled true|false]  (default: $MONEXUS_TRIGGER_ENABLED, off)",
     "  monexus-host status [--state-dir DIR]",
     "  monexus-host subscribe [--state-dir DIR] [--since SEQ]",
     "      [--timeout-ms N] [--max-events N]",
@@ -165,10 +166,21 @@ fn request_id(prefix : String) -> String {
 ///|
 async fn serve_command(args : Array[String]) -> (Int32, String) {
   let (pairs, _) = parse_pairs(args)
+  // A3.0 is off by default (ADR-0014 §7). The environment variable is only a
+  // default; an explicit `--trigger-enabled` wins.
+  let env_default = match @env.get_env_var("MONEXUS_TRIGGER_ENABLED") {
+    Some(value) =>
+      match value.to_lower() {
+        "true" | "1" | "yes" | "on" => true
+        _ => false
+      }
+    None => false
+  }
   let options = HostOptions::new(
     state_dir=pair_last(pairs, "--state-dir", @client.default_state_dir()),
     heartbeat_ms=pair_int(pairs, "--heartbeat-ms", 1_000),
     port=pair_int(pairs, "--port", 0),
+    trigger_enabled=pair_bool(pairs, "--trigger-enabled", env_default),
   )
   @signal.set_global_cancellation_signals(
     [@signal.SIGINT, @signal.SIGTERM],
