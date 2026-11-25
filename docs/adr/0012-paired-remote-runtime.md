@@ -1,9 +1,9 @@
 # ADR-0012：配对远端 runtime（A1）——控制面留在主控，执行面下沉
 
-- 状态：Proposed（待 owner 定稿 D8 后转 Accepted；未定稿前只做 spike，不改变 V0.1 行为）
+- 状态：Accepted（owner 于 2026-11-25 按条件通过 D8，并批准开工 A1.0 设计验证）
 - 日期：2026-11-25
 - 依据：`docs/architecture.md` §6、§7、§8、§11、§18/D8；ADR-0003（MachineProvider）、ADR-0008（SSH 接入）、ADR-0011（Agent over SSH PoC）；`docs/v0.2-plan.md` A1
-- 关系：本 ADR 细化 D8 的 A1 边界；D8 未定稿前，V0.1 的 SSH 直连路径保持不变。
+- 关系：本 ADR 细化 D8 的 A1 边界；V0.1 的 SSH 直连路径保持为基线、引导与回退通道。
 
 ## 背景
 

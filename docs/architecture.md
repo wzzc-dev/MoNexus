@@ -2,7 +2,7 @@
 
 - 版本：0.1（r5）
 - 日期：2026-11-25
-- 状态：D1–D7 已定；D8/D9 与 r5 参考修订待评审；待 M0 spike
+- 状态：D1–D9 已定；r5 参考修订已纳入；V0.2 A1.0 设计验证进行中
 - 依据：《MoNexus（墨枢）产品与技术建设总计划》；2026-11-24 本机调研（MoUI 0.9.1 框架、orca-moui、MoUI `examples/mo_workbench`、`examples/terminal/pty_host`、MoSpace `services/remote`）。
 
 ## 0. 摘要
@@ -522,10 +522,10 @@ MoNexus/
 | D5 | 首个打包/主控平台 | **Linux 开发机先行，macOS 随后** | 影响 CI 与签名/分发 |
 | D6 | 仓库初始化 | **`git init` + 私有远端**；远端地址待 owner 提供 | M0 前完成 |
 | D7 | 机管 Agent 的范围 | **V0.1 种子角色 `ops`**：只读诊断 + 写操作需审批；完整巡检/自愈放 V0.2（见 §9.1） | 若推迟到 V0.2，V0.1 只留 UI/API，不加人日 |
-| D8 | 远程执行演进 | **V0.1 SSH 直连；V0.2 配对 runtime + 环境配方**；Provider 预留 `kind=runtime` 与 recipe 生命周期 | 弱网/NAT 与一次性环境在 V0.2 解决 |
-| D9 | Agent 记忆 | **V0.1 每 Agent 独立 home + AGENTS.md/MEMORY.md 摘要注入**（有体积上限、快照可审计）；技能包 V0.2 | 影响上下文成本、隐私与审计 |
+| D8 | 远程执行演进 | **V0.1 SSH 直连；V0.2 配对 runtime + 环境配方**；Provider 预留 `kind=runtime` 与 recipe 生命周期（2026-11-25 有条件通过，边界见 ADR-0012） | 弱网/NAT 与一次性环境在 V0.2 解决 |
+| D9 | Agent 记忆 | **V0.1 每 Agent 独立 home + AGENTS.md/MEMORY.md 摘要注入**（有体积上限、快照可审计）；技能包 V0.2（2026-11-25 通过，护栏见 `docs/v0.2-plan.md` §1.2） | 影响上下文成本、隐私与审计 |
 
-已确认（2026-11-25）：V0.1 不接 RISC-V；不引入外部组织/机器控制面（组织、任务、审批、机器连接由 MoNexus 自研）；MoUI 缺能力时使用官方 vendor 流程（见 §15，`vendor/` 不入库、改动必须有上游 PR）。
+已确认（2026-11-25）：V0.1 不接 RISC-V；不引入外部组织/机器控制面（组织、任务、审批、机器连接由 MoNexus 自研）；MoUI 缺能力时使用官方 vendor 流程（见 §15，`vendor/` 不入库、改动必须有上游 PR）。D8/D9 同日按条件通过：D8 的配对远端 runtime 边界见 ADR-0012，D9 的护栏见 `docs/v0.2-plan.md` §1.2；V0.2 A1.0 设计验证已开工。
 
 这也意味着 V0.2/V0.3 不能再按「接外部组织层/节点网络」来排：组织与任务层自研做到多深、是否自建常驻节点，都在 V0.1 结束后重新规划。
 
