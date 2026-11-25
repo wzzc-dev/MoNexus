@@ -326,6 +326,53 @@ FINAL_READ="$(rpc agent.read "$(read_params "$SID")")"
 not_contains 'cancelled transcript still has no stderr markers' 'MOCK-CANCEL-RECEIVED' "$FINAL_READ"
 
 # ---------------------------------------------------------------------------
+printf '\n== 4b. bounded stderr log + multi-line private-key redaction ==\n'
+# ---------------------------------------------------------------------------
+BOUND_PARAMS="$(jq -n --arg aid 'mock-ssh-bounded' --arg cmd "$NODE_BIN" \
+  --arg script "$MOCK_ACP" --arg ws "$WS_ID" \
+  '{agent_id:$aid,mode:"acp",command:$cmd,args:[$script,"--stderr","--stderr-flood","--stderr-key"],cwd:"",workspace_id:$ws,prompt:"bounded stderr",memory_limit:0,env:{}}')"
+rpc_call agent.start "$BOUND_PARAMS"
+SID_B="$(printf '%s' "$RPC_OUT" | jq -r '.session.id // empty')"
+[ -n "$SID_B" ] && pass "bounded-stderr agent.start returned $SID_B" || fail 'bounded-stderr agent.start' "$RPC_OUT"
+BOUND_LOG="$STATE/logs/agent-$SID_B.stderr.log"
+if poll_file "$BOUND_LOG" 'MOCK-STDERR-FLOOD-END'; then
+  pass 'the stderr flood reached the bounded log'
+else
+  fail 'the stderr flood reached the bounded log' "$(cat "$BOUND_LOG" 2>/dev/null || true)"
+fi
+if poll_file "$BOUND_LOG" '-----BEGIN PRIVATE KEY-----[redacted]'; then
+  pass 'the multi-line private-key block is redacted to a marker'
+else
+  fail 'the multi-line private-key block is redacted' "$(cat "$BOUND_LOG" 2>/dev/null || true)"
+fi
+BOUND_BYTES="$(stat -c %s "$BOUND_LOG" 2>/dev/null || echo 0)"
+if [ "$BOUND_BYTES" -ge 1 ] && [ "$BOUND_BYTES" -le 2048 ]; then
+  pass "stderr log stays within AGENT_STDERR_CAP ($BOUND_BYTES <= 2048 bytes)"
+else
+  fail "stderr log stays within AGENT_STDERR_CAP (got $BOUND_BYTES bytes)"
+fi
+not_contains 'old stderr lines were dropped by the bound' 'MOCK-STDERR-READY' "$(cat "$BOUND_LOG" 2>/dev/null || true)"
+not_contains 'no private-key body line in the bounded log' 'FAKE-KEY-BODY' "$(cat "$BOUND_LOG" 2>/dev/null || true)"
+BOUND_TRANSCRIPT="$(rpc agent.read "$(read_params "$SID_B")")"
+not_contains 'no private-key body line in the ACP transcript' 'FAKE-KEY-BODY' "$BOUND_TRANSCRIPT"
+
+rpc_call agent.stop "$(jq -n --arg id "$SID_B" '{session_id:$id}')"
+contains 'the bounded-stderr session stops cleanly' '"ok":true' "$RPC_OUT"
+BOUND_SESSIONS="$(rpc agent.list '{"agent_id":"mock-ssh-bounded"}')"
+BOUND_REC="$(printf '%s' "$BOUND_SESSIONS" | jq -c --arg id "$SID_B" '(.sessions // []) | map(select(.id==$id)) | .[0]')"
+BOUND_TAIL="$(printf '%s' "$BOUND_REC" | jq -r '.stderr_tail // empty')"
+contains 'stderr_tail keeps the most recent marker' 'MOCK-STDERR-FLOOD-END' "$BOUND_TAIL"
+contains 'stderr_tail keeps the private-key marker' '-----BEGIN PRIVATE KEY-----[redacted]' "$BOUND_TAIL"
+not_contains 'stderr_tail has no private-key body line' 'FAKE-KEY-BODY' "$BOUND_TAIL"
+not_contains 'stderr_tail dropped the oldest lines with the bound' 'MOCK-STDERR-READY' "$BOUND_TAIL"
+TAIL_BYTES="$(printf '%s' "$BOUND_TAIL" | wc -c)"
+if [ "$TAIL_BYTES" -le 2048 ]; then
+  pass "stderr_tail stays within AGENT_STDERR_CAP ($TAIL_BYTES <= 2048 bytes)"
+else
+  fail "stderr_tail stays within AGENT_STDERR_CAP (got $TAIL_BYTES bytes)"
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n== 5. transport evidence + local agent unchanged ==\n'
 # ---------------------------------------------------------------------------
 if grep -Fq "Accepted publickey for $REAL_USER" "$SSH_TMP/sshd.log" 2>/dev/null; then

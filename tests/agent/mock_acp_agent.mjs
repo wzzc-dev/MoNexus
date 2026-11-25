@@ -18,6 +18,9 @@
 // unchanged, so the existing smokes see the same bytes):
 //   * --stderr writes MOCK-STDERR-READY at startup and
 //     MOCK-CANCEL-RECEIVED on session/cancel to stderr only;
+//   * --stderr-flood writes enough stderr lines to exceed the host's 2 KB
+//     diagnostic window, ending with MOCK-STDERR-FLOOD-END;
+//   * --stderr-key writes a fake multi-line private key block to stderr;
 //   * --cwd streams a `CWD=<process.cwd()>` chunk in the first prompt.
 //
 // Kept in JavaScript on purpose: test-only, never linked into monexus-host.
@@ -29,6 +32,8 @@ const advertiseLoad = process.env.MOCK_ACP_LOAD !== "0";
 const sessionId = process.env.MOCK_ACP_SESSION_ID || "mock-session-1";
 const flags = new Set(process.argv.slice(2));
 const stderrEnabled = flags.has("--stderr");
+const floodEnabled = flags.has("--stderr-flood");
+const keyEnabled = flags.has("--stderr-key");
 const cwdEnabled = flags.has("--cwd");
 
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
@@ -41,6 +46,17 @@ stderrLine("MOCK-STDERR-READY cwd=" + process.cwd());
 // Credential-looking value used by the SSH smoke to prove the host redacts
 // stderr before it reaches the log or the session record.
 stderrLine("MOCK-AUTH api_key=VALUE-987654321");
+if (floodEnabled) {
+  for (let i = 0; i < 240; i += 1) {
+    stderrLine("MOCK-FLOOD-" + String(i).padStart(3, "0") + " " + "x".repeat(48));
+  }
+  stderrLine("MOCK-STDERR-FLOOD-END");
+}
+if (keyEnabled) {
+  stderrLine("-----BEGIN OPENSSH PRIVATE KEY-----");
+  stderrLine("FAKE-KEY-BODY-0123456789");
+  stderrLine("-----END OPENSSH PRIVATE KEY-----");
+}
 
 const pendingReplies = new Map();
 let promptCount = 0;

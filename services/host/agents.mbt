@@ -944,29 +944,56 @@ async fn open_agent_stderr_log(state : HostState, session_id : String) -> Unit {
 }
 
 ///|
-/// Record one stderr line. It never enters the ACP transcript: it is redacted,
-/// kept in the capped `stderr_tail` on the session record, and appended to
-/// `logs/agent-<id>.stderr.log` (architecture §6.1: stderr is diagnostics, not
-/// protocol data).
+/// Record one stderr line. It never enters the ACP transcript: it is kept in a
+/// raw window of the most recent `AGENT_STDERR_CAP` bytes, and the whole
+/// window is redacted in one `redact_secrets` call so multi-line private-key
+/// blocks are recognized. The redacted window is both the session record's
+/// `stderr_tail` and the complete contents of
+/// `logs/agent-<id>.stderr.log` (rewritten with CreateOrTruncate, so the file
+/// cannot grow past the cap). Mode stays 0600.
+///
+/// Private-key body lines are dropped from the raw window while a block is
+/// open, so a body line cannot survive even after the BEGIN line has scrolled
+/// out of the bounded window.
 async fn record_agent_stderr(
   state : HostState,
   session_id : String,
+  raw_tail : Ref[String],
+  in_private_key : Ref[Bool],
   stderr_tail : Ref[String],
   line : String,
 ) -> Unit {
-  let redacted = @contracts.redact_secrets(line)
-  let combined = stderr_tail.val + redacted + "\n"
-  stderr_tail.val = if combined.length() > AGENT_STDERR_CAP {
-    combined.substring(start=combined.length() - AGENT_STDERR_CAP)
-  } else {
-    combined
+  let lower = line.to_lower()
+  let begins = lower.contains("-----begin") && lower.contains("private key")
+  let ends = lower.contains("-----end") && lower.contains("private key")
+  // Keep the BEGIN and END markers; drop body lines while the block is open.
+  let keep = !in_private_key.val || ends
+  if begins {
+    in_private_key.val = true
   }
+  if ends {
+    in_private_key.val = false
+  }
+  if keep {
+    let combined = raw_tail.val + line + "\n"
+    raw_tail.val = if combined.length() > AGENT_STDERR_CAP {
+      combined.substring(start=combined.length() - AGENT_STDERR_CAP)
+    } else {
+      combined
+    }
+  }
+  let redacted = @contracts.redact_secrets(raw_tail.val)
+  let bounded = if redacted.length() > AGENT_STDERR_CAP {
+    redacted.substring(start=redacted.length() - AGENT_STDERR_CAP)
+  } else {
+    redacted
+  }
+  stderr_tail.val = bounded
   @fs.write_file(
     state.state_dir + "/logs/agent-" + session_id + ".stderr.log",
-    redacted + "\n",
-    create_mode=@fs.CreateMode::OpenOrCreate,
+    bounded,
+    create_mode=@fs.CreateMode::CreateOrTruncate,
     permission=0o600,
-    append=true,
   ) catch {
     _ => ()
   }
@@ -1083,14 +1110,23 @@ async fn handle_agent_start(
     env=@contracts.agent_env_from_json(request.params),
   )
   let stderr_tail : Ref[String] = Ref("")
+  let stderr_raw : Ref[String] = Ref("")
+  let stderr_in_key : Ref[Bool] = Ref(false)
   // stderr is drained on its own pipe: never mixed into the ACP stdout
-  // transcript, redacted, capped on the record and appended to the log file.
+  // transcript, redacted, bounded on the record and in its own log file.
   let process = match
     @agent.spawn_agent(
       group,
       spec,
       async fn(line) {
-        record_agent_stderr(state, session_id, stderr_tail, line)
+        record_agent_stderr(
+          state,
+          session_id,
+          stderr_raw,
+          stderr_in_key,
+          stderr_tail,
+          line,
+        )
       },
       launcher=launcher,
     ) {
@@ -1759,12 +1795,21 @@ async fn handle_agent_resume(
     env=Map([]),
   )
   let stderr_tail : Ref[String] = Ref("")
+  let stderr_raw : Ref[String] = Ref("")
+  let stderr_in_key : Ref[Bool] = Ref(false)
   // PoC round 1 resumes local sessions only: the session record carries no
   // machine id, so the launcher cannot be reconstructed here. A remote session
   // record whose command is not present locally fails cleanly at spawn.
   let process = match
     @agent.spawn_agent(group, spec, async fn(line) {
-      record_agent_stderr(state, session_id, stderr_tail, line)
+      record_agent_stderr(
+        state,
+        session_id,
+        stderr_raw,
+        stderr_in_key,
+        stderr_tail,
+        line,
+      )
     }) {
     Ok(value) => value
     Err(message) => {

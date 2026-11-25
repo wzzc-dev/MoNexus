@@ -177,7 +177,9 @@ Remote agent PoC (round 1, not full remote-agent support):
   never interpolated into shell text. The remote machine uses its own
   login/runtime; the host does not copy model credentials or keys.
 - stderr is captured separately in `<state>/logs/agent-<session>.stderr.log`
-  (redacted, mode 0600) and in the session record's `stderr_tail`. It never
+  (redacted, mode 0600) and in the session record's `stderr_tail`. Both keep
+  only the most recent 2 KB, and multi-line private-key blocks are collapsed
+  to a `[redacted]` marker, so neither can hold key body lines. stderr never
   reaches the ACP stdout transcript.
 - Still missing for real remote agents: `agent.probe` is local-only,
   `agent.resume` does not reconstruct an SSH launch, and `env` from
