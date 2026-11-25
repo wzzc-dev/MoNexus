@@ -5,6 +5,9 @@ pub(all) struct HostOptions {
   heartbeat_ms : Int
   port : Int
   version : String
+  /// A3.0 feature flag (ADR-0014 §7). Default off: every `trigger.*` method
+  /// answers `unsupported` and no dispatcher is started.
+  trigger_enabled : Bool
 }
 
 ///|
@@ -13,8 +16,9 @@ pub fn HostOptions::new(
   heartbeat_ms~ : Int = 1_000,
   port~ : Int = 0,
   version~ : String = HOST_VERSION,
+  trigger_enabled~ : Bool = false,
 ) -> HostOptions {
-  { state_dir, heartbeat_ms: heartbeat_ms.max(50), port, version, }
+  { state_dir, heartbeat_ms: heartbeat_ms.max(50), port, version, trigger_enabled, }
 }
 
 ///|
@@ -48,6 +52,8 @@ pub struct HostState {
   agent_sessions : Map[String, AgentSessionRuntime]
   agent_transcripts : Map[String, AgentTranscript]
   dispatching : Ref[Bool]
+  trigger_enabled : Bool
+  trigger_buckets : Map[String, @contracts.TriggerRateBucket]
 }
 
 ///|
@@ -157,6 +163,8 @@ fn HostState::new(
     agent_sessions: Map([]),
     agent_transcripts: Map([]),
     dispatching: Ref(false),
+    trigger_enabled: options.trigger_enabled,
+    trigger_buckets: Map([]),
   }
 }
 

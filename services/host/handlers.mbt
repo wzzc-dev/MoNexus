@@ -297,6 +297,19 @@ async fn handle_request(
       }
       state.mutex.release()
     }
+    // Registered unconditionally so a flag-off host answers `unsupported`
+    // rather than `method_not_found` (ADR-0014 §8 gap note).
+    @contracts.METHOD_TRIGGER_CREATE
+    | @contracts.METHOD_TRIGGER_LIST
+    | @contracts.METHOD_TRIGGER_GET
+    | @contracts.METHOD_TRIGGER_UPDATE
+    | @contracts.METHOD_TRIGGER_DISABLE
+    | @contracts.METHOD_TRIGGER_FIRE
+    | @contracts.METHOD_TRIGGER_SOURCE_ADD
+    | @contracts.METHOD_TRIGGER_SOURCE_REVOKE => {
+      state.mutex.release()
+      handle_trigger_rpc(state, sink, request, client_request_id)
+    }
     _ => {
       let text = error_response_text(
         request.id,

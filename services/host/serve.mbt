@@ -218,6 +218,49 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
   }
   let server = @http.Server::Server(addr, reuse_addr=false)
   let state = HostState::new(options, server.addr().port(), store)
+  if options.trigger_enabled {
+    match state.store.reconcile_trigger_projection() {
+      Ok(count) =>
+        println(
+          "monexus-host: trigger projection rebuilt from events (triggers=" +
+          count.to_string() + ")",
+        )
+      Err(message) => {
+        state.store.close()
+        lock.close()
+        return Err("cannot rebuild trigger projection: " + message)
+      }
+    }
+    // First run with A3 enabled: start the dispatcher at the current head so
+    // pre-existing history is not replayed as trigger input. Later restarts
+    // resume from the persisted cursor.
+    match state.store.trigger_event_cursor() {
+      Ok(None) =>
+        match state.store.last_seq() {
+          Ok(seq) => {
+            match state.store.set_trigger_event_cursor(seq) {
+              Ok(_) => ()
+              Err(message) => {
+                state.store.close()
+                lock.close()
+                return Err("cannot initialize trigger cursor: " + message)
+              }
+            }
+          }
+          Err(message) => {
+            state.store.close()
+            lock.close()
+            return Err("cannot read event sequence: " + message)
+          }
+        }
+      Ok(Some(_)) => ()
+      Err(message) => {
+        state.store.close()
+        lock.close()
+        return Err("cannot read trigger cursor: " + message)
+      }
+    }
+  }
   // ACP processes do not survive a host restart (M0), so close every session
   // that was live and expire its pending decisions before serving clients.
   match reconcile_agent_sessions(state) {
@@ -244,6 +287,13 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
       allow_failure=true,
       async fn() { heartbeat_loop(state) },
     )
+    if options.trigger_enabled {
+      group.spawn_bg(
+        no_wait=true,
+        allow_failure=true,
+        async fn() { trigger_loop(state) },
+      )
+    }
     // M6: settle or reattach every Run that survived a restart before any
     // client can observe a stale `running` status.
     reconcile_runs(state)

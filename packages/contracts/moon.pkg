@@ -1,6 +1,8 @@
 import {
   "moonbitlang/core/json",
   "moonbitlang/core/random",
+  "moonbitlang/core/string",
+  "moonbitlang/core/encoding/utf8",
 }
 
 supported_targets = "native"
