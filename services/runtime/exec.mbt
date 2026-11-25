@@ -244,6 +244,19 @@ pub struct RuntimeExecutor {
   runs : Map[String, RunSlot]
   by_request : Map[String, String]
   closed : Ref[Bool]
+  /// PTY sessions are owned by this runtime and live under
+  /// `<state root>/pty/<instance>/`. The runtime is created once per
+  /// executor; sessions are spawned into the caller's long-lived group.
+  pty : @pty_runtime.PtyRuntime
+  pty_limits : @pty_runtime.PtyLimits
+  pty_slots : Map[String, PtySlot]
+  pty_recovered : Map[String, PtyRecovered]
+  pty_recovered_requests : Map[String, String]
+  /// Git is opt-in: `open_git(workspace_root)` binds one rooted GitRuntime to
+  /// this executor. Its operation log lives under `<state root>/git/`.
+  git : Ref[@git_runtime.GitRuntime?]
+  git_root : Ref[String]
+  git_limits : @git_runtime.GitLimits
 }
 
 ///|
@@ -523,12 +536,32 @@ async fn RuntimeExecutor::recover(
 }
 
 ///|
-/// Open the runtime execution core at `state_root`. Any run that was left
-/// "running" by a crash is durably finalized as `lost` before this call
-/// returns, so a restarted runtime never pretends a run is still alive.
+/// Open the runtime execution core at `state_root`. Any run (exec or PTY)
+/// that was left "running" by a crash is durably finalized as `lost` before
+/// this call returns, so a restarted runtime never pretends a run is still
+/// alive.
 pub async fn RuntimeExecutor::open(
   state_root : String,
   runtime_id : String,
+) -> Result[RuntimeExecutor, String] {
+  RuntimeExecutor::open_with_limits(
+    state_root,
+    runtime_id,
+    pty_limits=@pty_runtime.PtyLimits::new(),
+    git_limits=@git_runtime.GitLimits::new(),
+  )
+}
+
+///|
+/// Open with explicit PTY and git limits. Defaults are
+/// `PtyLimits::new()` (4 KiB events, 256-event / 256 KiB ring, 4 MiB
+/// transcript) and `GitLimits::new()` (256 KiB / 4096 lines per stream,
+/// 60 s timeout, 1 MiB op log).
+pub async fn RuntimeExecutor::open_with_limits(
+  state_root : String,
+  runtime_id : String,
+  pty_limits~ : @pty_runtime.PtyLimits,
+  git_limits~ : @git_runtime.GitLimits,
 ) -> Result[RuntimeExecutor, String] {
   let state = match RuntimeState::open(state_root) {
     Ok(value) => value
@@ -538,6 +571,14 @@ pub async fn RuntimeExecutor::open(
     Ok(value) => value
     Err(message) => return Err(message)
   }
+  let pty = match
+    @pty_runtime.PtyRuntime::new_with_limits(state.root(), pty_limits) {
+    Ok(value) => value
+    Err(error) => {
+      outbox.close()
+      return Err("cannot create PTY runtime: " + error.message)
+    }
+  }
   let executor = {
     state,
     outbox,
@@ -546,8 +587,23 @@ pub async fn RuntimeExecutor::open(
     runs: Map([]),
     by_request: Map([]),
     closed: Ref(false),
+    pty,
+    pty_limits,
+    pty_slots: Map([]),
+    pty_recovered: Map([]),
+    pty_recovered_requests: Map([]),
+    git: Ref(None),
+    git_root: Ref(""),
+    git_limits,
   }
   match executor.recover(events) {
+    Ok(_) => ()
+    Err(message) => {
+      executor.outbox.close()
+      return Err(message)
+    }
+  }
+  match executor.recover_pty(events) {
     Ok(_) => ()
     Err(message) => {
       executor.outbox.close()
@@ -1456,9 +1512,16 @@ pub async fn RuntimeExecutor::wait_for_terminal(
 }
 
 ///|
-/// Close the outbox. Active runs should be cancelled first; the task group
-/// that owns them also kills their process trees when it is cancelled.
+/// Close the outbox and the git operation log. Active runs and PTY sessions
+/// should be cancelled/closed first; the task group that owns them also
+/// kills their process trees when it is cancelled. Call `pty_close_all()`
+/// before cancelling that group so every PTY session gets a durable terminal
+/// event; `close()` itself is synchronous and cannot terminate a PTY.
 pub fn RuntimeExecutor::close(self : RuntimeExecutor) -> Unit {
   self.closed.val = true
+  match self.git.val {
+    Some(git) => git.close()
+    None => ()
+  }
   self.outbox.close()
 }
