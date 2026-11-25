@@ -369,6 +369,16 @@ scripts/task_smoke.sh       # M5 tasks/runs/evidence/search, temp sshd
 scripts/recovery_smoke.sh   # M6 recovery matrix, fake ssh faults
 ```
 
+## CI
+
+`.github/workflows/ci.yml` (workflow **CI**) runs on pull requests, pushes to
+`main` and manual dispatch. On `ubuntu-latest` it runs `moon build --target
+native`, `moon test --target native`, the loopback-sshd smokes (`machine`,
+`workspace`, `task`, `agent_ssh`), the headless `agent_smoke.sh`, and
+`scripts/acceptance.sh` — all under throwaway `HOME`/state dirs, with no real
+remote or credential. The job/check is **`build-test-acceptance`** (timeout
+60 minutes); require it for merges to `main`.
+
 ## Layout
 
 ```
