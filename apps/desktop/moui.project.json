@@ -3,7 +3,7 @@
   "id": "monexus-desktop",
   "title": "MoNexus",
   "module": "monexus/desktop",
-  "mouiVersion": "0.9.1",
+  "mouiVersion": "0.9.2",
   "platforms": [
     "linux"
   ]
