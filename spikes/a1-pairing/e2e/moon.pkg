@@ -1,0 +1,11 @@
+import {
+  "monexus/contracts" @contracts,
+  "monexus/a1-pairing/protocol" @protocol,
+  "monexus/a1-pairing/transport" @transport,
+  "moonbitlang/async" @async,
+  "moonbitlang/async/socket" @socket,
+  "moonbitlang/async/tls" @tls,
+  "moonbitlang/core/json",
+}
+
+supported_targets = "native"

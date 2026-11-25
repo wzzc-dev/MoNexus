@@ -1,6 +1,7 @@
 // MoNexus workspace manifest.
 members = [
   "./spikes/m0",
+  "./spikes/a1-pairing",
   "./packages/contracts",
   "./packages/machines",
   "./packages/providers",
