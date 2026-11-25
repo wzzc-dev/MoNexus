@@ -2,8 +2,8 @@
 test "the shell renders the header and the Home page" {
   let harness = @test_support.WidgetHarness::from_program(
     program=program(),
-    width=920.0,
-    height=560.0,
+    width=1280.0,
+    height=800.0,
   )
   assert_true(harness.has_text("MoNexus"))
   assert_true(harness.has_text("Welcome to MoNexus"))
@@ -14,8 +14,8 @@ test "the shell renders the header and the Home page" {
 test "all eight pages can be switched by tapping navigation" {
   let harness = @test_support.WidgetHarness::from_program(
     program=program(),
-    width=920.0,
-    height=560.0,
+    width=1280.0,
+    height=800.0,
   )
   harness.tap_text("Machines")
   assert_true(harness.has_text("Add machine"))
@@ -224,12 +224,13 @@ test "host key policy cycles through all four values" {
 test "projects page opens and drives the workspace command surface" {
   let harness = @test_support.WidgetHarness::from_program(
     program=program(),
-    width=920.0,
-    height=560.0,
+    width=1280.0,
+    height=800.0,
   )
   harness.tap_text("Projects")
   assert_true(harness.has_text("Open project"))
-  assert_true(harness.has_text("No project open yet."))
+  assert_true(harness.has_text("Open workspaces"))
+  assert_true(harness.has_text("loading workspaces from the host..."))
 }
 
 ///|
@@ -249,6 +250,71 @@ test "project open requires a root and emits OpenProject" {
     _ => fail("expected OpenProject")
   }
   assert_true(opened.project.busy)
+}
+
+///|
+test "rpc params carry the mandatory client_request_id" {
+  let params = @app.rpc_params(
+    "cmd_test", Map([("limit", @contracts.json_int(5))]),
+  )
+  assert_eq(@contracts.string_field_or(params, "id", ""), "cmd_test")
+  assert_eq(@contracts.client_request_id(params), Some("cmd_test"))
+  assert_eq(@contracts.int_field(params, "limit"), Some(5))
+}
+
+///|
+test "selecting Projects asks the worker for the open workspace list" {
+  let (_, commands) = update_full(Model::new(), SelectPage(Projects))
+  assert_eq(commands.length(), 1)
+  match commands[0] {
+    ProjectList => ()
+    _ => fail("expected ProjectList")
+  }
+}
+
+///|
+test "open workspace list sorts and restores a workspace by id" {
+  let first : @contracts.WorkspaceRecord = {
+    id: "wsp_1",
+    machine_id: "",
+    kind: "local",
+    root: "/tmp/one",
+    name: "one",
+    git_root: "/tmp/one",
+    is_git: true,
+    state: "open",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  }
+  let second : @contracts.WorkspaceRecord = {
+    id: "wsp_2",
+    machine_id: "mch_1",
+    kind: "ssh",
+    root: "/tmp/two",
+    name: "two",
+    git_root: "",
+    is_git: false,
+    state: "open",
+    created_at: "2026-01-02T00:00:00Z",
+    updated_at: "2026-01-02T00:00:00Z",
+  }
+  let model = update(Model::new(), ProjectWorkspaces([second, first]))
+  assert_true(model.project.workspaces_loaded)
+  assert_eq(model.project.workspaces[0].id, "wsp_1")
+  assert_eq(model.project.workspaces[1].id, "wsp_2")
+  let (restored, commands) = update_full(model, ProjectSelectWorkspace("wsp_2"))
+  assert_eq(restored.project.root, "/tmp/two")
+  assert_eq(restored.project.machine_id, "mch_1")
+  assert_eq(commands.length(), 1)
+  match commands[0] {
+    OpenProject(machine_id, root) => {
+      assert_eq(machine_id, "mch_1")
+      assert_eq(root, "/tmp/two")
+    }
+    _ => fail("expected OpenProject")
+  }
+  let (_, missing) = update_full(model, ProjectSelectWorkspace("wsp_gone"))
+  assert_eq(missing.length(), 0)
 }
 
 ///|

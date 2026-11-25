@@ -47,10 +47,12 @@ async fn main {
     )
     @env.exit(3)
   }
+  // 1280x800 keeps the Tasks/Inbox/Agents bodies and buttons on screen; long
+  // pages scroll inside the shell viewport (see app/view.mbt).
   let runtime = @runtime.new_program_with_dimensions(
     program=@app.program(),
-    width=920.0,
-    height=560.0,
+    width=1280.0,
+    height=800.0,
   )
   let window_task : async () -> Unit = async fn() {
     @apphost.run_app("MoNexus", runtime)

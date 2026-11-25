@@ -123,6 +123,8 @@ pub(all) struct ProjectState {
   machine_id : String
   root : String
   workspace : @contracts.WorkspaceRecord?
+  workspaces : Array[@contracts.WorkspaceRecord]
+  workspaces_loaded : Bool
   entries : Array[@contracts.WorkspaceEntry]
   selected : String
   content : String
@@ -146,6 +148,8 @@ pub fn ProjectState::new() -> ProjectState {
     machine_id: "",
     root: "",
     workspace: None,
+    workspaces: [],
+    workspaces_loaded: false,
     entries: [],
     selected: "",
     content: "",
@@ -474,6 +478,8 @@ pub(all) enum Msg {
   ProjectRoot(String)
   ProjectMachine(String)
   ProjectOpened(@contracts.WorkspaceRecord)
+  ProjectWorkspaces(Array[@contracts.WorkspaceRecord])
+  ProjectSelectWorkspace(String)
   ProjectEntries(Array[@contracts.WorkspaceEntry])
   ProjectFile(String, String)
   ProjectStatus(String)
@@ -560,6 +566,7 @@ pub(all) enum MachineCommand {
   // Projects: open/list/read/write/diff/terminal/worktree all go through the
   // same host RPC surface, so the worker stays local/remote agnostic.
   OpenProject(String, String)
+  ProjectList
   ProjectListFiles(String, String)
   ProjectReadFile(String, String)
   ProjectWriteFile(String, String, String)
@@ -731,6 +738,53 @@ pub fn sort_entries(
 }
 
 ///|
+fn workspace_before(
+  left : @contracts.WorkspaceRecord,
+  right : @contracts.WorkspaceRecord,
+) -> Bool {
+  if left.created_at != right.created_at {
+    left.created_at < right.created_at
+  } else {
+    left.id < right.id
+  }
+}
+
+///|
+fn sort_workspaces(
+  records : Array[@contracts.WorkspaceRecord],
+) -> Array[@contracts.WorkspaceRecord] {
+  let out : Array[@contracts.WorkspaceRecord] = []
+  for record in records {
+    out.push(record)
+  }
+  let mut index = 1
+  while index < out.length() {
+    let current = out[index]
+    let mut position = index
+    while position > 0 && workspace_before(current, out[position - 1]) {
+      out[position] = out[position - 1]
+      position = position - 1
+    }
+    out[position] = current
+    index = index + 1
+  }
+  out
+}
+
+///|
+fn workspace_by_id(
+  records : Array[@contracts.WorkspaceRecord],
+  workspace_id : String,
+) -> @contracts.WorkspaceRecord? {
+  for record in records {
+    if record.id == workspace_id {
+      return Some(record)
+    }
+  }
+  None
+}
+
+///|
 /// Pure update: returns the next model plus the commands the command worker
 /// should run. `update` below is the model-only view used by tests.
 pub fn update_full(
@@ -744,6 +798,7 @@ pub fn update_full(
       match page {
         Agents => [AgentList]
         Inbox => [DecisionList("")]
+        Projects => [ProjectList]
         Tasks => [TaskRefresh(model.task.event_seq)]
         _ => none
       },
@@ -965,27 +1020,81 @@ pub fn update_full(
       { ..model, project: { ..model.project, machine_id: value } },
       none,
     )
-    ProjectOpened(record) => (
+    ProjectOpened(record) => {
+      let workspaces : Array[@contracts.WorkspaceRecord] = []
+      let mut replaced = false
+      for existing in model.project.workspaces {
+        if existing.id == record.id {
+          workspaces.push(record)
+          replaced = true
+        } else {
+          workspaces.push(existing)
+        }
+      }
+      if !replaced {
+        workspaces.push(record)
+      }
+      (
+        {
+          ..model,
+          project: {
+            ..model.project,
+            workspace: Some(record),
+            workspaces: sort_workspaces(workspaces),
+            workspaces_loaded: true,
+            entries: [],
+            selected: "",
+            content: "",
+            dirty: false,
+            status_text: "",
+            diff_text: "",
+            terminal_id: "",
+            terminal_text: "",
+            terminal_cursor: 0L,
+            busy: false,
+            message: "opened " + record.root,
+          },
+        },
+        none,
+      )
+    }
+    ProjectWorkspaces(records) => (
       {
         ..model,
         project: {
           ..model.project,
-          workspace: Some(record),
-          entries: [],
-          selected: "",
-          content: "",
-          dirty: false,
-          status_text: "",
-          diff_text: "",
-          terminal_id: "",
-          terminal_text: "",
-          terminal_cursor: 0L,
-          busy: false,
-          message: "opened " + record.root,
+          workspaces: sort_workspaces(records),
+          workspaces_loaded: true,
         },
       },
       none,
     )
+    ProjectSelectWorkspace(workspace_id) =>
+      match workspace_by_id(model.project.workspaces, workspace_id) {
+        Some(record) => (
+          {
+            ..model,
+            project: {
+              ..model.project,
+              machine_id: record.machine_id,
+              root: record.root,
+              busy: true,
+              message: "restoring " + record.root + "...",
+            },
+          },
+          [OpenProject(record.machine_id, record.root)],
+        )
+        None => (
+          {
+            ..model,
+            project: {
+              ..model.project,
+              message: "workspace " + workspace_id + " is no longer open",
+            },
+          },
+          none,
+        )
+      }
     ProjectEntries(entries) => (
       {
         ..model,
@@ -1123,14 +1232,18 @@ pub fn update_full(
             project: { ..model.project, busy: true, message: "refreshing..." },
           },
           [
+            ProjectList,
             ProjectListFiles(record.id, ""),
             ProjectGitStatus(record.id),
             ProjectListWorktrees(record.id),
           ],
         )
         None => (
-          { ..model, project: { ..model.project, message: "open a project first" } },
-          none,
+          {
+            ..model,
+            project: { ..model.project, message: "refreshing projects..." },
+          },
+          [ProjectList],
         )
       }
     ProjectRefreshDiff =>

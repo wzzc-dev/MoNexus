@@ -6,6 +6,7 @@ using @views {
   checkbox,
   column,
   row,
+  scroll_view,
   spacer,
   tag,
   text,
@@ -115,6 +116,7 @@ fn machines_page(model : Model) -> @moui.View[Msg] {
     ], spacing=8.0),
     text(
       "Explicit host/port/user/identity. Turn config off to pin the target and ignore ~/.ssh/config.",
+      wrap=true,
     ).caption(),
     row([
       text_field(
@@ -215,6 +217,26 @@ fn entry_row(model : Model, entry : @contracts.WorkspaceEntry) -> @moui.View[Msg
 }
 
 ///|
+fn workspace_row(model : Model, record : @contracts.WorkspaceRecord) -> @moui.View[Msg] {
+  let selected = match model.project.workspace {
+    Some(current) => current.id == record.id
+    None => false
+  }
+  let line = row([
+    text(record.name + " · " + record.root).mono(),
+    tag(if record.is_git { "git" } else { "exclusive" }),
+    spacer(weight=1.0),
+    text(record.id).caption(),
+    button("restore", on_click=ProjectSelectWorkspace(record.id)),
+  ], spacing=8.0)
+  if selected {
+    line.title()
+  } else {
+    line
+  }
+}
+
+///|
 fn project_page(model : Model) -> @moui.View[Msg] {
   let project = model.project
   let lines : Array[@moui.View[Msg]] = [
@@ -225,6 +247,7 @@ fn project_page(model : Model) -> @moui.View[Msg] {
     ], spacing=8.0),
     text(
       "Open a local or SSH project by machine id + absolute root. Both use the same workspace RPC surface.",
+      wrap=true,
     ).caption(),
     row([
       text_field(
@@ -244,6 +267,22 @@ fn project_page(model : Model) -> @moui.View[Msg] {
   ]
   if project.message != "" {
     lines.push(text(project.message).caption())
+  }
+  lines.push(text("Open workspaces").title())
+  if project.workspaces.is_empty() {
+    lines.push(
+      text(
+        if project.workspaces_loaded {
+          "no open workspaces yet"
+        } else {
+          "loading workspaces from the host..."
+        },
+      ).caption(),
+    )
+  } else {
+    for record in project.workspaces {
+      lines.push(workspace_row(model, record))
+    }
   }
   match project.workspace {
     Some(record) => {
@@ -354,7 +393,12 @@ fn project_page(model : Model) -> @moui.View[Msg] {
         lines.push(text(project.worktree_message).caption())
       }
     }
-    None => lines.push(text("No project open yet.").caption())
+    None =>
+      lines.push(
+        text(
+          "No project selected. Pick an open workspace in the list above or open a root.",
+        ).caption(),
+      )
   }
   column(lines, spacing=8.0)
 }
@@ -371,6 +415,7 @@ fn agents_page(model : Model) -> @moui.View[Msg] {
     ], spacing=8.0),
     text(
       "Starts a local ACP adapter (default: npx @zed-industries/claude-code-acp). The adapter needs a logged-in agent account.",
+      wrap=true,
     ).caption(),
     row([
       text_field(
@@ -580,6 +625,7 @@ fn inbox_page(model : Model) -> @moui.View[Msg] {
     ], spacing=8.0),
     text(
       "Approvals, Agent permissions, evidence-gate waivers and recovery retries all wait in this one queue. An answer is recorded as an event and an audit record; nothing is auto-approved.",
+      wrap=true,
     ).caption(),
   ]
   if inbox.message != "" {
@@ -818,6 +864,7 @@ fn tasks_page(model : Model) -> @moui.View[Msg] {
     ], spacing=8.0),
     text(
       "Create a ready task, then dispatch command runs to local or SSH machines. Runs pass through verifying: every verify[] command must pass or be explicitly waived.",
+      wrap=true,
     ).caption(),
     row([
       text_field(
@@ -909,6 +956,7 @@ fn search_page(model : Model) -> @moui.View[Msg] {
     ], spacing=8.0),
     text(
       "Search session transcripts and decision text recorded by the host.",
+      wrap=true,
     ).caption(),
     row([
       text_field(
@@ -980,6 +1028,7 @@ fn settings_page(model : Model) -> @moui.View[Msg] {
     text(
       "Start or reuse the host and open this window with `monexus`. " +
       "Headless machines: `monexus start --headless`.",
+      wrap=true,
     ).caption(),
   ]
   if host.last_error != "" {
@@ -1024,11 +1073,22 @@ pub fn view(model : Model) -> @moui.View[Msg] {
           text("host " + model.host.link.label()),
         ], spacing=16.0),
         row(nav, spacing=8.0),
-        card(page_body(model)),
+        // Long pages (Tasks, Inbox, Agents) scroll inside a fixed viewport so
+        // content and action buttons are reachable instead of clipped. The
+        // scroll container measures its child under unbounded constraints, so
+        // pin the body width: rows with weighted spacers and wrapped text need
+        // a finite width to lay out (otherwise their right-hand actions are
+        // pushed off-screen).
+        scroll_view(
+          page_body(model).frame(width=1180.0),
+          width=1180.0,
+          height=600.0,
+          shows_indicator=true,
+        ),
       ], spacing=16.0),
       padding=20.0,
     ),
-    width=920.0,
-    height=560.0,
+    width=1280.0,
+    height=800.0,
   )
 }

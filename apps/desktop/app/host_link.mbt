@@ -88,6 +88,9 @@ pub async fn host_link_loop(state_dir : String) -> Unit {
     enqueue_machine_command(RefreshMachines)
     enqueue_machine_command(AgentList)
     enqueue_machine_command(DecisionList(@contracts.DECISION_STATUS_PENDING))
+    // The Projects page lists every open workspace, not just the one this
+    // window last selected; load it on every (re)connect.
+    enqueue_machine_command(ProjectList)
     // Tasks board and Activity replay after a reconnect; EventsLoaded dedupes
     // on seq so a stale cursor is safe.
     enqueue_machine_command(TaskRefresh(0L))

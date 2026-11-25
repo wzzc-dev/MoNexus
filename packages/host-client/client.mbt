@@ -165,6 +165,10 @@ pub async fn RpcClient::call_json(
   method : String,
   params : Map[String, @json.Json],
 ) -> Result[@json.Json, String] {
+  // Every request must carry the host's mandatory idempotency key. Injecting it
+  // here keeps callers from building a params map that fails with
+  // "missing client_request_id" (as events.list did).
+  let params = @contracts.with_client_request_id(params, client_request_id)
   let response = match self.request(client_request_id, method, params) {
     Ok(value) => value
     Err(message) => return Err(message)

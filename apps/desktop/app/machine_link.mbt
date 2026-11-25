@@ -22,6 +22,7 @@ fn machine_notice(command : MachineCommand, detail : String) -> String {
     RemoveMachine(_) => "removed: " + detail
     RefreshMachines => detail
     OpenProject(_, _) => "project: " + detail
+    ProjectList => detail
     ProjectListFiles(_, _) => detail
     ProjectReadFile(_, path) => "read: " + path
     ProjectWriteFile(_, path, _) => "saved: " + path
@@ -80,6 +81,37 @@ fn git_status_text(status : @contracts.GitStatus) -> String {
 }
 
 ///|
+/// Params for the hand-written RPC maps in this worker. `id` doubles as the
+/// idempotency key: the host rejects requests without `client_request_id`, and
+/// a retry with the same id returns the first result instead of duplicating
+/// work. Named builders in `@contracts` follow the same rule.
+pub fn rpc_params(
+  id : String,
+  fields : Map[String, @json.Json],
+) -> Map[String, @json.Json] {
+  fields.set("id", @contracts.json_string(id))
+  @contracts.with_client_request_id(fields, id)
+}
+
+///|
+async fn dispatch_project_workspaces(client : @client.RpcClient) -> Unit {
+  let id = request_id("cmd")
+  match
+    client.call_json(
+      id,
+      @contracts.METHOD_WORKSPACE_LIST,
+      rpc_params(id, Map([])),
+    ) {
+    Ok(json) =>
+      match @contracts.workspace_list_from_json(json) {
+        Ok(records) => dispatch(ProjectWorkspaces(records))
+        Err(message) => dispatch(ProjectError("workspace.list: " + message))
+      }
+    Err(message) => dispatch(ProjectError("workspace.list: " + message))
+  }
+}
+
+///|
 async fn dispatch_task_list(
   client : @client.RpcClient,
   since : Int64,
@@ -89,7 +121,7 @@ async fn dispatch_task_list(
     client.call_json(
       id,
       @contracts.METHOD_TASK_LIST,
-      Map([("id", @contracts.json_string(id))]),
+      rpc_params(id, Map([])),
     ) {
     Ok(json) =>
       match @contracts.parse_task_list(json) {
@@ -103,11 +135,10 @@ async fn dispatch_task_list(
     client.call_json(
       events_id,
       @contracts.METHOD_EVENTS_LIST,
-      Map([
-        ("id", @contracts.json_string(events_id)),
+      rpc_params(events_id, Map([
         ("since", @contracts.json_int64(since)),
         ("limit", @contracts.json_int(200)),
-      ]),
+      ])),
     ) {
     Ok(json) => {
       let object = match @contracts.as_object(json) {
@@ -317,6 +348,7 @@ async fn execute_machine_command(
           match @contracts.workspace_result_record(json) {
             Ok(record) => {
               dispatch(ProjectOpened(record))
+              dispatch_project_workspaces(client)
               dispatch_project_entries(client, record.id, "")
               dispatch_project_status(client, record.id)
               let trees_id = request_id("cmd")
@@ -339,6 +371,7 @@ async fn execute_machine_command(
         Err(message) => dispatch(ProjectError("open: " + message))
       }
     }
+    ProjectList => dispatch_project_workspaces(client)
     ProjectListFiles(workspace_id, path) =>
       dispatch_project_entries(client, workspace_id, path)
     ProjectReadFile(workspace_id, path) => {
@@ -671,8 +704,7 @@ async fn execute_machine_command(
         client.call_json(
           id,
           @contracts.METHOD_TASK_CREATE,
-          Map([
-            ("id", @contracts.json_string(id)),
+          rpc_params(id, Map([
             ("title", @contracts.json_string(title)),
             ("goal", @contracts.json_string(goal)),
             (
@@ -681,7 +713,7 @@ async fn execute_machine_command(
             ),
             ("workspace_id", @contracts.json_string(workspace_id)),
             ("verify", @contracts.json_string(verify_text)),
-          ]),
+          ])),
         ) {
         Ok(json) => {
           let object = match @contracts.as_object(json) {
@@ -714,14 +746,13 @@ async fn execute_machine_command(
         client.call_json(
           id,
           @contracts.METHOD_RUN_CREATE,
-          Map([
-            ("id", @contracts.json_string(id)),
+          rpc_params(id, Map([
             ("task_id", @contracts.json_string(task_id)),
             ("workspace_id", @contracts.json_string(workspace_id)),
             ("mode", @contracts.json_string(@contracts.RUN_MODE_COMMAND)),
             ("command", @contracts.json_string(command)),
             ("machine_id", @contracts.json_string(machine_id)),
-          ]),
+          ])),
         ) {
         Ok(json) => {
           let object = match @contracts.as_object(json) {
@@ -755,10 +786,9 @@ async fn execute_machine_command(
         client.call_json(
           id,
           @contracts.METHOD_TASK_CANCEL,
-          Map([
-            ("id", @contracts.json_string(id)),
+          rpc_params(id, Map([
             ("task_id", @contracts.json_string(task_id)),
-          ]),
+          ])),
         ) {
         Ok(_) => {
           dispatch(TaskNotice("task cancelled: " + task_id))
@@ -773,10 +803,9 @@ async fn execute_machine_command(
         client.call_json(
           id,
           @contracts.METHOD_RUN_LIST,
-          Map([
-            ("id", @contracts.json_string(id)),
+          rpc_params(id, Map([
             ("task_id", @contracts.json_string(task_id)),
-          ]),
+          ])),
         ) {
         Ok(json) =>
           match @contracts.parse_run_list(json) {
@@ -792,10 +821,9 @@ async fn execute_machine_command(
         client.call_json(
           id,
           @contracts.METHOD_RUN_GET,
-          Map([
-            ("id", @contracts.json_string(id)),
+          rpc_params(id, Map([
             ("run_id", @contracts.json_string(run_id)),
-          ]),
+          ])),
         ) {
         Ok(json) =>
           match @contracts.parse_run_detail(json) {
@@ -811,10 +839,9 @@ async fn execute_machine_command(
         client.call_json(
           id,
           @contracts.METHOD_RUN_CANCEL,
-          Map([
-            ("id", @contracts.json_string(id)),
+          rpc_params(id, Map([
             ("run_id", @contracts.json_string(run_id)),
-          ]),
+          ])),
         ) {
         Ok(_) => {
           dispatch(TaskNotice("run cancelled: " + run_id))
@@ -829,10 +856,9 @@ async fn execute_machine_command(
         client.call_json(
           id,
           @contracts.METHOD_ARTIFACT_READ,
-          Map([
-            ("id", @contracts.json_string(id)),
+          rpc_params(id, Map([
             ("artifact_id", @contracts.json_string(artifact_id)),
-          ]),
+          ])),
         ) {
         Ok(json) => {
           let object = match @contracts.as_object(json) {
@@ -866,11 +892,10 @@ async fn execute_machine_command(
         client.call_json(
           id,
           @contracts.METHOD_SEARCH_SESSIONS,
-          Map([
-            ("id", @contracts.json_string(id)),
+          rpc_params(id, Map([
             ("query", @contracts.json_string(query)),
             ("limit", @contracts.json_int(20)),
-          ]),
+          ])),
         ) {
         Ok(json) => {
           let hits = match @contracts.parse_search_hits(json) {
