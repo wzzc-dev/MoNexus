@@ -5,13 +5,38 @@ using @views {
   center,
   checkbox,
   column,
+  container,
   row,
   scroll_view,
   spacer,
-  tag,
   text,
   text_area,
   text_field,
+}
+
+///|
+/// Content-sized status tag. MoUI `tag` pins a 96x28 frame and clips longer
+/// labels (`waiting_approval`, `succeeded`, ...), so the app draws its own
+/// outlined label whose box grows with the measured text instead.
+fn auto_tag(label : String) -> @moui.View[Msg] {
+  let theme = @core.Theme::neutral()
+  container(
+    text(
+      label,
+      role=@style.Control,
+      theme=theme,
+      align=@core.TextAlign::TextStart,
+    ).foreground(theme.palette.foreground),
+    background=theme.palette.surface.multiply_alpha(0.1),
+    corner_radius=14.0,
+    border=Some(
+      @core.BorderStyle::new(
+        brush=@core.Brush::solid(theme.palette.outline),
+        width=1.0,
+      ),
+    ),
+    padding=6.0,
+  )
 }
 
 ///|
@@ -74,7 +99,7 @@ fn machine_card(model : Model, record : @contracts.MachineRecord) -> @moui.View[
     row([
       text(record.name).title(),
       spacer(weight=1.0),
-      tag(machine_status_text(record.status)),
+      auto_tag(machine_status_text(record.status)),
     ], spacing=8.0),
     text(
       record.target_label() +
@@ -224,7 +249,7 @@ fn workspace_row(model : Model, record : @contracts.WorkspaceRecord) -> @moui.Vi
   }
   let line = row([
     text(record.name + " · " + record.root).mono(),
-    tag(if record.is_git { "git" } else { "exclusive" }),
+    auto_tag(if record.is_git { "git" } else { "exclusive" }),
     spacer(weight=1.0),
     text(record.id).caption(),
     button("restore", on_click=ProjectSelectWorkspace(record.id)),
@@ -549,10 +574,15 @@ fn inbox_decision_card(decision : @contracts.DecisionRecord) -> @moui.View[Msg] 
   card(
     column([
       row([
-        text(decision.kind + ": " + decision.title).title(),
+        text(
+          decision.kind + ": " + decision.title,
+          width=900.0,
+          align=@core.TextAlign::TextStart,
+          wrap=true,
+        ).title(),
         spacer(weight=1.0),
-        tag(decision.status),
-        tag(bucket),
+        auto_tag(decision.status),
+        auto_tag(bucket),
       ], spacing=8.0),
       text(
         "session " +
@@ -655,8 +685,13 @@ fn inbox_page(model : Model) -> @moui.View[Msg] {
 fn task_row(model : Model, record : @contracts.TaskRecord) -> @moui.View[Msg] {
   let selected = model.task.selected_task == record.id
   let line = row([
-    text(record.title).title(),
-    tag(record.status),
+    text(
+      record.title,
+      width=520.0,
+      align=@core.TextAlign::TextStart,
+      wrap=true,
+    ).title(),
+    auto_tag(record.status),
     spacer(weight=1.0),
     text(record.id).caption(),
     button("select", on_click=TaskSelect(record.id)),
@@ -681,7 +716,7 @@ fn run_row(model : Model, record : @contracts.RunRecord) -> @moui.View[Msg] {
   let selected = model.task.selected_run == record.id
   let line = row([
     text(record.mode + ": " + record.command).mono(),
-    tag(record.status),
+    auto_tag(record.status),
     spacer(weight=1.0),
     text(
       if record.machine_id == "" {
@@ -714,7 +749,7 @@ fn run_detail_view(model : Model) -> @moui.View[Msg] {
   let lines : Array[@moui.View[Msg]] = [
     row([
       text("Run " + run.id).title(),
-      tag(run.status),
+      auto_tag(run.status),
       spacer(weight=1.0),
       text(
         (if run.machine_id == "" { "local" } else { run.machine_id }) +
@@ -745,7 +780,7 @@ fn run_detail_view(model : Model) -> @moui.View[Msg] {
             row([
               text(evidence.name + " · " + evidence.kind).title(),
               spacer(weight=1.0),
-              tag(
+              auto_tag(
                 if evidence.passed {
                   "passed"
                 } else if evidence.waived {
@@ -979,7 +1014,7 @@ fn search_page(model : Model) -> @moui.View[Msg] {
         card(
           column([
             row([
-              tag(hit.kind),
+              auto_tag(hit.kind),
               text(hit.title).title(),
               spacer(weight=1.0),
               text(hit.ref_id).caption(),
