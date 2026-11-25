@@ -117,11 +117,14 @@ pub(all) enum RuntimeMessage {
 ///|
 /// A spawned ACP/stdout process. The writer is shared with the host's RPC
 /// handlers; `write_lock` keeps two replies from interleaving in one pipe
-/// write. The pump owns `reader`; the host owns the session metadata.
+/// write. The pump owns `reader`; the host owns the session metadata. The
+/// launcher is retained so an EOF can be classified without asking the caller
+/// which transport it used.
 pub struct AgentProcess {
   writer : @process.WriteToProcess
   reader : @process.ReadFromProcess
   process : @process.Process
+  launcher : ProcessLauncher
   write_lock : @async.Mutex
   next_id : Ref[Int]
   closed : Ref[Bool]
@@ -130,6 +133,36 @@ pub struct AgentProcess {
 ///|
 pub fn AgentProcess::pid(self : AgentProcess) -> Int {
   self.process.pid.to_int()
+}
+
+///|
+/// Which transport spawned this process. Used by the session pump to apply the
+/// ADR-0011 remote EOF semantics to SSH launches only; local launches keep
+/// their existing EOF behavior.
+pub fn AgentProcess::is_ssh(self : AgentProcess) -> Bool {
+  match self.launcher {
+    ProcessLauncher::Ssh(_) => true
+    ProcessLauncher::Local => false
+  }
+}
+
+///|
+/// Bounded observation of the child's exit status after EOF. `try_wait` never
+/// blocks; if the status is not ready yet, retry for about 2 s, then report
+/// "unknown" (`None`) so a broken transport can never park the host forever.
+/// A process killed by a signal returns the negative signal number.
+pub async fn AgentProcess::exit_status(self : AgentProcess) -> Int? {
+  let mut attempts = 0
+  while attempts < 40 {
+    let observed = self.process.try_wait() catch { _ => return None }
+    match observed {
+      Some(value) => return Some(value.to_int())
+      None => ()
+    }
+    attempts = attempts + 1
+    @async.sleep(50)
+  }
+  None
 }
 
 ///|
@@ -625,6 +658,7 @@ pub async fn[G] spawn_agent(
     writer,
     reader,
     process,
+    launcher,
     write_lock: @async.Mutex::Mutex(),
     next_id: Ref(0),
     closed: Ref(false),

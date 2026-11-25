@@ -21,10 +21,16 @@
 //   * --stderr-flood writes enough stderr lines to exceed the host's 2 KB
 //     diagnostic window, ending with MOCK-STDERR-FLOOD-END;
 //   * --stderr-key writes a fake multi-line private key block to stderr;
-//   * --cwd streams a `CWD=<process.cwd()>` chunk in the first prompt.
+//   * --cwd streams a `CWD=<process.cwd()>` chunk in the first prompt;
+//   * --hang keeps the first prompt in flight forever (no ACP response),
+//     writes its pid to --pid-file and exits 3 on SIGTERM/SIGINT — used to
+//     prove `lost` (kill local ssh) and `interrupted` (kill this process);
+//   * --exit-after-turn exits 0 shortly after a normal prompt response — used
+//     to prove a clean turn followed by EOF is still `exited`.
 //
 // Kept in JavaScript on purpose: test-only, never linked into monexus-host.
 
+import fs from "node:fs";
 import readline from "node:readline";
 
 const failMode = process.env.MOCK_ACP_FAIL || "";
@@ -35,6 +41,18 @@ const stderrEnabled = flags.has("--stderr");
 const floodEnabled = flags.has("--stderr-flood");
 const keyEnabled = flags.has("--stderr-key");
 const cwdEnabled = flags.has("--cwd");
+const hangEnabled = flags.has("--hang");
+const exitAfterTurn = flags.has("--exit-after-turn");
+
+let pidFile = "";
+for (let i = 0; i < process.argv.length; i += 1) {
+  const arg = process.argv[i];
+  if (arg === "--pid-file" && i + 1 < process.argv.length) {
+    pidFile = process.argv[i + 1];
+  } else if (arg.startsWith("--pid-file=")) {
+    pidFile = arg.slice("--pid-file=".length);
+  }
+}
 
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -46,6 +64,15 @@ stderrLine("MOCK-STDERR-READY cwd=" + process.cwd());
 // Credential-looking value used by the SSH smoke to prove the host redacts
 // stderr before it reaches the log or the session record.
 stderrLine("MOCK-AUTH api_key=VALUE-987654321");
+
+if (hangEnabled) {
+  // The smoke kills this process to simulate a remote agent exiting mid-turn.
+  // Exit with a normal (non-255) status so the local ssh client reports it as
+  // the remote program's exit, not as a transport failure.
+  const exitOnSignal = () => process.exit(3);
+  process.on("SIGTERM", exitOnSignal);
+  process.on("SIGINT", exitOnSignal);
+}
 if (floodEnabled) {
   for (let i = 0; i < 240; i += 1) {
     stderrLine("MOCK-FLOOD-" + String(i).padStart(3, "0") + " " + "x".repeat(48));
@@ -131,6 +158,16 @@ async function handlePrompt(id, params) {
       " CWD=" + process.cwd() + " TTY=" + (process.stdout.isTTY ? "yes" : "no"),
     );
   }
+  if (hangEnabled) {
+    // In-flight turn: publish the pid for the smoke harness and never send the
+    // ACP response. The turn ends only when the transport or this process is
+    // killed.
+    if (pidFile) fs.writeFileSync(pidFile, String(process.pid) + "\n");
+    stderrLine("MOCK-HANG-READY pid=" + process.pid);
+    await sendChunk(" HANG");
+    await new Promise(() => {});
+    return;
+  }
   await sendThought("checking injected context");
   await sendChunk(" CTX");
   if (text.includes("[MoNexus agent context]")) await sendChunk(" BLOCK_SEEN");
@@ -142,6 +179,10 @@ async function handlePrompt(id, params) {
     await sendChunk(" done");
   }
   send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+  if (exitAfterTurn) {
+    await delay(50);
+    process.exit(0);
+  }
 }
 
 const rl = readline.createInterface({

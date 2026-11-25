@@ -248,7 +248,11 @@ readiness Decision. The real adapter was verified on 2026-11-25
 real turn streamed the requested output with `stop_reason=end_turn`. Agent
 sessions are local-workspace only by default in V0.1; a gated round-1 PoC
 (`MONEXUS_AGENT_SSH=1`) can launch an SSH workspace's adapter over `ssh -T` —
-see `docs/usage.md` §4.
+see `docs/usage.md` §4. For that PoC, a turn that loses its transport ends as
+`lost` (stop reason `lost`, event `agent.session.lost`) and a remote agent
+that exits mid-turn ends as `interrupted` (stop reason `interrupted`, event
+`agent.session.interrupted`); neither is a success, and a clean turn followed
+by EOF is still `exited`.
 
 ## Tasks, evidence and approvals
 

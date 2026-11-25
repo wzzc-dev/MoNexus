@@ -18,6 +18,36 @@ pub(all) enum ProcessLauncher {
 }
 
 ///|
+/// ADR-0011 remote EOF semantics for a turn that is still in flight. The
+/// observed code comes from the local `ssh` client, not from the remote
+/// program: 255 is ssh's own connection failure, `None` means the status could
+/// not be observed, and a negative code is a signal death of the local client
+/// (for example the owner/network killing it). All three mean the transport
+/// was lost. Any other exit is the remote agent exiting mid-turn.
+pub fn remote_eof_stop_reason(exit_status : Int?) -> String {
+  match exit_status {
+    Some(code) =>
+      if code == 255 || code < 0 {
+        @contracts.AGENT_STOP_LOST
+      } else {
+        @contracts.AGENT_STOP_INTERRUPTED
+      }
+    None => @contracts.AGENT_STOP_LOST
+  }
+}
+
+///|
+/// Readable `last_error` for a remote EOF classification. Kept free of paths
+/// and credentials so it is safe in records, events and the UI.
+pub fn remote_eof_last_error(stop_reason : String) -> String {
+  match stop_reason {
+    @contracts.AGENT_STOP_LOST => "remote agent connection lost"
+    @contracts.AGENT_STOP_INTERRUPTED => "remote agent exited mid-turn"
+    _ => ""
+  }
+}
+
+///|
 /// Explicit gate for the remote-agent PoC. V0.1 keeps agents local by default;
 /// when this is not `1`, an SSH-backed `agent.start` returns the existing
 /// local-only error instead of silently launching over SSH.

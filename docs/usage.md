@@ -166,7 +166,7 @@ Real ACP adapter:
   (bounded); sessions/decisions/artifacts persist but transcript text does not
   survive a host restart.
 
-Remote agent PoC (round 1, not full remote-agent support):
+Remote agent PoC (rounds 1–2, not full remote-agent support):
 
 - An SSH workspace/worktree still gets the local-only error unless the host
   process is started with `MONEXUS_AGENT_SSH=1`. With the gate on, the agent
@@ -181,6 +181,42 @@ Remote agent PoC (round 1, not full remote-agent support):
   only the most recent 2 KB, and multi-line private-key blocks are collapsed
   to a `[redacted]` marker, so neither can hold key body lines. stderr never
   reaches the ACP stdout transcript.
+- Failure semantics follow [ADR-0011](adr/0011-agent-over-ssh.md). A completed
+  turn is settled by the ACP `stopReason` first; the later clean EOF is the
+  existing `exited` state. If the stream ends while a prompt is still active,
+  the host reads the local `ssh` client's exit status with a bounded wait
+  (`try_wait`, about 2 s, then "unknown"):
+  - `ssh` exit 255, an unobservable status, or a killed local `ssh` client →
+    final state `lost`, stop reason `lost`, event `agent.session.lost`,
+    `last_error` "remote agent connection lost";
+  - any other observed exit (the remote agent exiting mid-turn) → final state
+    `interrupted`, stop reason `interrupted`, event
+    `agent.session.interrupted`, `last_error` "remote agent exited mid-turn".
+  Neither case sets `idle`/`end_turn`, both are terminal, and both expire any
+  pending permission Decision through the normal finalize path. There is no
+  auto-reconnect, auto-restart or cross-connection transcript resume.
+- What the owner should do: `lost` means the transport died before the turn's
+  outcome was known. Check the network/sshd, and clean up a possibly orphaned
+  remote agent process by hand (the ADR does not promise automatic reaping).
+  `interrupted` means the remote agent itself exited mid-turn; check the
+  remote CLI/runtime logs or readiness. In both cases start a new turn or
+  session after the cause is fixed; do not treat the truncated output as a
+  completed result.
+- Local launches are unchanged in this round: their EOF still settles as
+  `exited`.
+- Verified by `scripts/agent_ssh_smoke.sh` with a mock ACP agent over a
+  temporary loopback sshd: killing the local `ssh` client yields
+  `lost`/`lost`/`agent.session.lost`, killing the remote mock yields
+  `interrupted`/`interrupted`/`agent.session.interrupted`, and a clean turn
+  followed by EOF still yields `exited`.
+- Round-2 real-host evidence (Debian 13, remote DSH 0.2.2-rc.5, Node 24.22.3,
+  `@deepseek-ai/dsh/lib/bin.js --profile acp`, model `llm-local` /
+  `DeepSeek-V4.1-Flash-1017-Local-02`): workspace read/write, the permission
+  Decision, cancel, and both the kill-local-ssh (`lost`) and kill-remote-DSH
+  (`interrupted`) scenarios were exercised. The real run exposed this bug —
+  both cases settled as `exited`; this round fixes the mapping and the mock
+  smoke above covers it. The real host was not re-run after the fix, and no
+  Ubuntu/macOS claim is made.
 - Still missing for real remote agents: `agent.probe` is local-only,
   `agent.resume` does not reconstruct an SSH launch, and `env` from
   `agent.start` is not forwarded over SSH.

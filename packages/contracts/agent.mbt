@@ -75,6 +75,16 @@ pub const EVENT_AGENT_SESSION_STOPPED : String = "agent.session.stopped"
 pub const EVENT_AGENT_SESSION_EXITED : String = "agent.session.exited"
 
 ///|
+/// ADR-0011 remote-agent failure: the transport was lost (ssh exit 255, an
+/// unobservable status, or a killed local ssh client), never a success.
+pub const EVENT_AGENT_SESSION_LOST : String = "agent.session.lost"
+
+///|
+/// ADR-0011 remote-agent failure: the remote agent exited mid-turn with a
+/// non-255 status.
+pub const EVENT_AGENT_SESSION_INTERRUPTED : String = "agent.session.interrupted"
+
+///|
 pub const EVENT_AGENT_ARTIFACT_CREATED : String = "agent.artifact.created"
 
 ///|
@@ -171,6 +181,14 @@ pub const AGENT_STATE_EXITED : String = "exited"
 pub const AGENT_STATE_FAILED : String = "failed"
 
 ///|
+/// ADR-0011: the remote transport was lost; the turn's outcome is unknown.
+pub const AGENT_STATE_LOST : String = "lost"
+
+///|
+/// ADR-0011: the remote agent exited mid-turn with a non-255 status.
+pub const AGENT_STATE_INTERRUPTED : String = "interrupted"
+
+///|
 pub fn agent_state_is_active(state : String) -> Bool {
   match state {
     "starting" | "idle" | "running" | "waiting_decision" => true
@@ -192,6 +210,40 @@ pub const AGENT_STOP_EXITED : String = "exited"
 
 ///|
 pub const AGENT_STOP_HOST_RESTART : String = "host_restarted"
+
+///|
+/// ADR-0011: connection/transport lost or the exit status could not be
+/// observed. Never a success.
+pub const AGENT_STOP_LOST : String = "lost"
+
+///|
+/// ADR-0011: the remote agent exited mid-turn with a non-255 status.
+pub const AGENT_STOP_INTERRUPTED : String = "interrupted"
+
+///|
+/// Terminal state for a stop reason. `lost` and `interrupted` stay distinct so
+/// audit, events and the desktop can tell a dead transport from a remote
+/// process that exited mid-turn; a clean turn/EOF is still `exited`.
+pub fn agent_terminal_state(stop_reason : String) -> String {
+  match stop_reason {
+    AGENT_STOP_CANCELLED => AGENT_STATE_STOPPED
+    AGENT_STOP_ERROR => AGENT_STATE_FAILED
+    AGENT_STOP_LOST => AGENT_STATE_LOST
+    AGENT_STOP_INTERRUPTED => AGENT_STATE_INTERRUPTED
+    _ => AGENT_STATE_EXITED
+  }
+}
+
+///|
+/// Session event type for a terminal stop reason.
+pub fn agent_session_end_event(stop_reason : String) -> String {
+  match stop_reason {
+    AGENT_STOP_CANCELLED => EVENT_AGENT_SESSION_STOPPED
+    AGENT_STOP_LOST => EVENT_AGENT_SESSION_LOST
+    AGENT_STOP_INTERRUPTED => EVENT_AGENT_SESSION_INTERRUPTED
+    _ => EVENT_AGENT_SESSION_EXITED
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Records

@@ -531,7 +531,8 @@ fn status_tone(status : String) -> @core.Color {
     "waiting_input" |
     "waiting_decision" |
     "needs_you" |
-    "degraded" =>
+    "degraded" |
+    "interrupted" =>
       ui_warning()
     "succeeded" |
     "verified" |

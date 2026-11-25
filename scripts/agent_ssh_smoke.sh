@@ -52,6 +52,7 @@ PASSED=0
 FAILED=0
 HOST_PID=""
 SSHD_PID=""
+REMOTE_MOCK_PIDS=""
 STATE="$WORK/state"
 RPC_OUT=""
 RPC_CODE=0
@@ -71,12 +72,29 @@ not_contains() { # label needle haystack
 eq() { # label expected actual
   if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected: $2, got: $3)"; fi
 }
+events_have() { # label type subject haystack
+  if printf '%s\n' "$4" | grep -F -- "type=$2" | grep -Fq -- "subject=$3"; then
+    pass "$1"
+  else
+    fail "$1 (missing type=$2 for $3)" "$4"
+  fi
+}
+events_lack() { # label type subject haystack
+  if printf '%s\n' "$4" | grep -F -- "type=$2" | grep -Fq -- "subject=$3"; then
+    fail "$1 (unexpected type=$2 for $3)" "$4"
+  else
+    pass "$1"
+  fi
+}
 
 cleanup() {
   if [ -n "$HOST_PID" ]; then
     kill "$HOST_PID" 2>/dev/null || true
     wait "$HOST_PID" 2>/dev/null || true
   fi
+  for pid in $REMOTE_MOCK_PIDS; do
+    kill -9 "$pid" 2>/dev/null || true
+  done
   if [ -n "$SSHD_PID" ]; then
     kill "$SSHD_PID" 2>/dev/null || true
     wait "$SSHD_PID" 2>/dev/null || true
@@ -179,6 +197,27 @@ poll_file() { # path needle
     if [ -f "$path" ] && grep -Fq -- "$needle" "$path"; then return 0; fi
     tries=$((tries + 1))
     sleep 0.1
+  done
+  return 1
+}
+
+wait_pid_file() { # path
+  local path="$1" tries=0
+  while [ "$tries" -lt 200 ]; do
+    if [ -s "$path" ]; then return 0; fi
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  return 1
+}
+
+local_ssh_pid() { # unique-needle-in-remote-argv
+  local needle="$1" pid
+  for pid in $(pgrep -x -P "$HOST_PID" ssh 2>/dev/null); do
+    if tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -Fq -- "$needle"; then
+      printf '%s' "$pid"
+      return 0
+    fi
   done
   return 1
 }
@@ -371,6 +410,94 @@ if [ "$TAIL_BYTES" -le 2048 ]; then
 else
   fail "stderr_tail stays within AGENT_STDERR_CAP (got $TAIL_BYTES bytes)"
 fi
+
+# ---------------------------------------------------------------------------
+printf '\n== 4c. lost: the local ssh client dies mid-turn ==\n'
+# ---------------------------------------------------------------------------
+# ADR-0011: losing the transport must end the session as `lost`, never as a
+# success. The mock stays in-flight (--hang), the test kills the local ssh
+# child of the host, and the remote mock is reaped by cleanup.
+LOST_PID_FILE="$WORK/mock-hang-lost.pid"
+LOST_PARAMS="$(jq -n --arg aid 'mock-ssh-lost' --arg cmd "$NODE_BIN" \
+  --arg script "$MOCK_ACP" --arg ws "$WS_ID" --arg pidfile "$LOST_PID_FILE" \
+  '{agent_id:$aid,mode:"acp",command:$cmd,args:[$script,"--stderr","--cwd","--hang","--pid-file",$pidfile],cwd:"",workspace_id:$ws,prompt:"hang until the transport dies",memory_limit:0,env:{}}')"
+rpc_call agent.start "$LOST_PARAMS"
+SID_LOST="$(printf '%s' "$RPC_OUT" | jq -r '.session.id // empty')"
+[ -n "$SID_LOST" ] && pass "lost-scenario agent.start returned $SID_LOST" || fail 'lost-scenario agent.start' "$RPC_OUT"
+eq 'the lost-scenario turn starts running' 'running' "$(printf '%s' "$RPC_OUT" | jq -r '.session.state // empty')"
+if wait_pid_file "$LOST_PID_FILE"; then
+  pass 'the remote mock is in flight and published its pid'
+else
+  fail 'the remote mock is in flight and published its pid'
+fi
+LOST_REMOTE_PID="$(tr -dc '0-9' <"$LOST_PID_FILE" 2>/dev/null)"
+REMOTE_MOCK_PIDS="$REMOTE_MOCK_PIDS $LOST_REMOTE_PID"
+LOST_SSH_PID="$(local_ssh_pid "$LOST_PID_FILE")"
+if [ -n "$LOST_SSH_PID" ]; then
+  pass "the local ssh client is a child of the host (pid $LOST_SSH_PID)"
+  kill -9 "$LOST_SSH_PID" 2>/dev/null || true
+else
+  fail 'the local ssh client is a child of the host'
+fi
+if poll_state "$SID_LOST" lost; then pass 'killing the local ssh client reaches lost'; else fail 'killing the local ssh client reaches lost' "$RPC_OUT"; fi
+eq 'lost session stop_reason is lost' 'lost' "$(printf '%s' "$RPC_OUT" | jq -r '.stop_reason // empty')"
+contains 'lost session last_error is readable' 'remote agent connection lost' "$(printf '%s' "$RPC_OUT" | jq -r '.last_error // empty')"
+not_contains 'a lost session is never reported as idle' '"state":"idle"' "$RPC_OUT"
+
+# ---------------------------------------------------------------------------
+printf '\n== 4d. interrupted: the remote agent exits mid-turn ==\n'
+# ---------------------------------------------------------------------------
+# The local ssh client survives; the remote mock exits with a normal non-255
+# status (3), which is exactly the "remote process exited mid-turn" case.
+INT_PID_FILE="$WORK/mock-hang-interrupted.pid"
+INT_PARAMS="$(jq -n --arg aid 'mock-ssh-interrupted' --arg cmd "$NODE_BIN" \
+  --arg script "$MOCK_ACP" --arg ws "$WS_ID" --arg pidfile "$INT_PID_FILE" \
+  '{agent_id:$aid,mode:"acp",command:$cmd,args:[$script,"--stderr","--cwd","--hang","--pid-file",$pidfile],cwd:"",workspace_id:$ws,prompt:"exit mid-turn",memory_limit:0,env:{}}')"
+rpc_call agent.start "$INT_PARAMS"
+SID_INTERRUPTED="$(printf '%s' "$RPC_OUT" | jq -r '.session.id // empty')"
+[ -n "$SID_INTERRUPTED" ] && pass "interrupted-scenario agent.start returned $SID_INTERRUPTED" || fail 'interrupted-scenario agent.start' "$RPC_OUT"
+eq 'the interrupted-scenario turn starts running' 'running' "$(printf '%s' "$RPC_OUT" | jq -r '.session.state // empty')"
+if wait_pid_file "$INT_PID_FILE"; then
+  pass 'the remote mock is in flight and published its pid'
+else
+  fail 'the remote mock is in flight and published its pid'
+fi
+INT_REMOTE_PID="$(tr -dc '0-9' <"$INT_PID_FILE" 2>/dev/null)"
+REMOTE_MOCK_PIDS="$REMOTE_MOCK_PIDS $INT_REMOTE_PID"
+INT_SSH_PID="$(local_ssh_pid "$INT_PID_FILE")"
+if [ -n "$INT_SSH_PID" ]; then
+  pass "the local ssh client is still alive (pid $INT_SSH_PID)"
+else
+  fail 'the local ssh client is still alive'
+fi
+kill -TERM "$INT_REMOTE_PID" 2>/dev/null || true
+if poll_state "$SID_INTERRUPTED" interrupted; then pass 'the remote exit mid-turn reaches interrupted'; else fail 'the remote exit mid-turn reaches interrupted' "$RPC_OUT"; fi
+eq 'interrupted session stop_reason is interrupted' 'interrupted' "$(printf '%s' "$RPC_OUT" | jq -r '.stop_reason // empty')"
+contains 'interrupted session last_error is readable' 'remote agent exited mid-turn' "$(printf '%s' "$RPC_OUT" | jq -r '.last_error // empty')"
+not_contains 'an interrupted session is never reported as idle' '"state":"idle"' "$RPC_OUT"
+
+# ---------------------------------------------------------------------------
+printf '\n== 4e. regression: a clean turn followed by EOF stays exited ==\n'
+# ---------------------------------------------------------------------------
+# The mock answers session/prompt normally and then exits 0; the ACP response
+# settles the turn first, so the later EOF must keep the existing `exited`
+# state rather than being mistaken for a failure.
+CLEAN_PARAMS="$(jq -n --arg aid 'mock-ssh-clean' --arg cmd "$NODE_BIN" \
+  --arg script "$MOCK_ACP" --arg ws "$WS_ID" \
+  '{agent_id:$aid,mode:"acp",command:$cmd,args:[$script,"--exit-after-turn"],cwd:"",workspace_id:$ws,prompt:"clean turn then eof",memory_limit:0,env:{}}')"
+rpc_call agent.start "$CLEAN_PARAMS"
+SID_CLEAN="$(printf '%s' "$RPC_OUT" | jq -r '.session.id // empty')"
+[ -n "$SID_CLEAN" ] && pass "clean-turn agent.start returned $SID_CLEAN" || fail 'clean-turn agent.start' "$RPC_OUT"
+eq 'the clean-turn scenario starts running' 'running' "$(printf '%s' "$RPC_OUT" | jq -r '.session.state // empty')"
+if poll_state "$SID_CLEAN" exited; then pass 'a completed turn followed by EOF stays exited'; else fail 'a completed turn followed by EOF stays exited' "$RPC_OUT"; fi
+eq 'the clean-turn stop_reason is exited' 'exited' "$(printf '%s' "$RPC_OUT" | jq -r '.stop_reason // empty')"
+
+EVENTS="$("$HOST_BIN" subscribe --state-dir "$STATE" --since 0 --max-events 3000 --timeout-ms 6000 2>&1)"
+events_have 'the lost session emitted agent.session.lost' 'agent.session.lost' "$SID_LOST" "$EVENTS"
+events_lack 'the lost session emitted no false exited event' 'agent.session.exited' "$SID_LOST" "$EVENTS"
+events_have 'the interrupted session emitted agent.session.interrupted' 'agent.session.interrupted' "$SID_INTERRUPTED" "$EVENTS"
+events_lack 'the interrupted session emitted no false exited event' 'agent.session.exited' "$SID_INTERRUPTED" "$EVENTS"
+events_have 'the clean turn still emitted agent.session.exited' 'agent.session.exited' "$SID_CLEAN" "$EVENTS"
 
 # ---------------------------------------------------------------------------
 printf '\n== 5. transport evidence + local agent unchanged ==\n'

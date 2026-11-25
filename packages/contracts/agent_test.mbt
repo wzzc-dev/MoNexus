@@ -1,0 +1,61 @@
+///|
+/// ADR-0011 terminal mapping: `lost` and `interrupted` must stay distinct from
+/// the clean `exited` state, and neither is active.
+test "agent terminal state keeps lost and interrupted distinct" {
+  assert_eq(
+    @contracts.agent_terminal_state(@contracts.AGENT_STOP_LOST),
+    @contracts.AGENT_STATE_LOST,
+  )
+  assert_eq(
+    @contracts.agent_terminal_state(@contracts.AGENT_STOP_INTERRUPTED),
+    @contracts.AGENT_STATE_INTERRUPTED,
+  )
+  assert_eq(
+    @contracts.agent_terminal_state(@contracts.AGENT_STOP_EXITED),
+    @contracts.AGENT_STATE_EXITED,
+  )
+  assert_eq(
+    @contracts.agent_terminal_state(@contracts.AGENT_STOP_CANCELLED),
+    @contracts.AGENT_STATE_STOPPED,
+  )
+  assert_eq(
+    @contracts.agent_terminal_state(@contracts.AGENT_STOP_ERROR),
+    @contracts.AGENT_STATE_FAILED,
+  )
+  assert_eq(
+    @contracts.agent_terminal_state(@contracts.AGENT_STOP_END_TURN),
+    @contracts.AGENT_STATE_EXITED,
+  )
+  assert_eq(
+    @contracts.agent_terminal_state(@contracts.AGENT_STOP_HOST_RESTART),
+    @contracts.AGENT_STATE_EXITED,
+  )
+  assert_false(@contracts.agent_state_is_active(@contracts.AGENT_STATE_LOST))
+  assert_false(
+    @contracts.agent_state_is_active(@contracts.AGENT_STATE_INTERRUPTED),
+  )
+}
+
+///|
+test "agent session end event keeps lost and interrupted distinct" {
+  assert_eq(
+    @contracts.agent_session_end_event(@contracts.AGENT_STOP_LOST),
+    @contracts.EVENT_AGENT_SESSION_LOST,
+  )
+  assert_eq(
+    @contracts.agent_session_end_event(@contracts.AGENT_STOP_INTERRUPTED),
+    @contracts.EVENT_AGENT_SESSION_INTERRUPTED,
+  )
+  assert_eq(
+    @contracts.agent_session_end_event(@contracts.AGENT_STOP_CANCELLED),
+    @contracts.EVENT_AGENT_SESSION_STOPPED,
+  )
+  assert_eq(
+    @contracts.agent_session_end_event(@contracts.AGENT_STOP_EXITED),
+    @contracts.EVENT_AGENT_SESSION_EXITED,
+  )
+  assert_eq(
+    @contracts.agent_session_end_event(@contracts.AGENT_STOP_ERROR),
+    @contracts.EVENT_AGENT_SESSION_EXITED,
+  )
+}

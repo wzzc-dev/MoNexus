@@ -308,19 +308,12 @@ async fn write_memory_artifact(
 
 ///|
 fn final_state_for(stop_reason : String) -> String {
-  match stop_reason {
-    @contracts.AGENT_STOP_CANCELLED => @contracts.AGENT_STATE_STOPPED
-    @contracts.AGENT_STOP_ERROR => @contracts.AGENT_STATE_FAILED
-    _ => @contracts.AGENT_STATE_EXITED
-  }
+  @contracts.agent_terminal_state(stop_reason)
 }
 
 ///|
 fn session_event_for(stop_reason : String) -> String {
-  match stop_reason {
-    @contracts.AGENT_STOP_CANCELLED => @contracts.EVENT_AGENT_SESSION_STOPPED
-    _ => @contracts.EVENT_AGENT_SESSION_EXITED
-  }
+  @contracts.agent_session_end_event(stop_reason)
 }
 
 ///|
@@ -721,6 +714,14 @@ async fn handle_agent_message(
 ///|
 /// Read loop for one agent process. EOF finalizes the session; malformed
 /// stdout lines are appended as plain transcript text.
+///
+/// ADR-0011: a completed turn is settled by its ACP response first, so an EOF
+/// with no active prompt keeps the existing clean `exited` state. An EOF while
+/// a prompt is still active is not a success: for an SSH launch the host reads
+/// the local client's bounded exit status and records `lost` (255, an
+/// unobservable status, or a killed local client) or `interrupted` (any other
+/// exit of the remote agent). Local launches keep their existing `exited`
+/// behavior in this round.
 async fn agent_session_pump(
   state : HostState,
   runtime : AgentSessionRuntime,
@@ -728,12 +729,19 @@ async fn agent_session_pump(
   for ;; {
     match runtime.process.next_message() {
       @agent.RuntimeMessage::Eof => {
-        finalize_agent_session(
-          state,
-          runtime,
-          @contracts.AGENT_STOP_EXITED,
-          "",
-        )
+        let mut stop_reason = @contracts.AGENT_STOP_EXITED
+        let mut last_error = ""
+        if runtime.process.is_ssh() {
+          state.mutex.acquire()
+          let turn_in_flight = runtime.active_prompts.size() > 0
+          state.mutex.release()
+          if turn_in_flight {
+            let exit_status = runtime.process.exit_status()
+            stop_reason = @agent.remote_eof_stop_reason(exit_status)
+            last_error = @agent.remote_eof_last_error(stop_reason)
+          }
+        }
+        finalize_agent_session(state, runtime, stop_reason, last_error)
         return
       }
       @agent.RuntimeMessage::Line(text) => {

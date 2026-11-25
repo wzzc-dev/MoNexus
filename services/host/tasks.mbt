@@ -820,7 +820,9 @@ async fn run_agent_step(
         }
         if session.state == @contracts.AGENT_STATE_FAILED ||
           session.state == @contracts.AGENT_STATE_STOPPED ||
-          session.state == @contracts.AGENT_STATE_EXITED {
+          session.state == @contracts.AGENT_STATE_EXITED ||
+          session.state == @contracts.AGENT_STATE_LOST ||
+          session.state == @contracts.AGENT_STATE_INTERRUPTED {
           failure = "agent session ended: " + session.state +
             (if session.last_error == "" {
               ""

@@ -94,6 +94,41 @@ owner 已批准远程 Agent 项目，但只先做 PoC，不直接建完整远程
      ADR 不改变 V0.1 行为：`agent.start` 继续拒绝 SSH 后端，直到 PoC 验收
      通过后另开实现/决策。
 
+## 第 2 轮实现记录（2026-11-25）
+
+本节只记录 PoC 第 2 轮如何落地上面的决策，不改变决策本身。
+
+- **新增常量**：`AGENT_STATE_LOST` / `AGENT_STOP_LOST` /
+  `EVENT_AGENT_SESSION_LOST`（传输丢失）与 `AGENT_STATE_INTERRUPTED` /
+  `AGENT_STOP_INTERRUPTED` / `EVENT_AGENT_SESSION_INTERRUPTED`（远端进程
+  turn 中途退出）。`agent_terminal_state` / `agent_session_end_event` 负责
+  stop reason → 状态/事件的映射；`lost`/`interrupted` 都是非 active 终态。
+- **退出码观察**：`AgentProcess` 保留创建它的 `ProcessLauncher`，并在 EOF
+  后通过 `@process.Process::try_wait()` 做有界观察（每 50 ms 重试，最多约
+  2 s）；拿不到状态时返回 unknown，避免 host 永久阻塞。
+- **EOF 语义**：仅对 SSH launch 生效。`RuntimeMessage::Eof` 时在 host 锁下
+  检查 `runtime.active_prompts`：无 active prompt 保持既有 `exited`；有
+  active prompt 时，255、unknown 或本地 ssh 被信号杀死记为 `lost`，其他
+  非 255 退出码记为 `interrupted`。两种情况都写可读 `last_error`，不设置
+  idle/end_turn，不自动重连或重启。本地 launch 的 EOF 行为本轮不变。
+- **终态消费方**：`services/host/tasks.mbt` 的 Run 等待把 `lost` /
+  `interrupted` 视为会话结束（不再等到 turn 超时）；桌面状态色把
+  `interrupted` 归入警告色，`lost` 归入危险色。pending permission Decision
+  仍由 `finalize_agent_session` 正常过期。
+- **测试**：`scripts/agent_ssh_smoke.sh` 在临时 loopback sshd 上用 mock ACP
+  agent 验证三种情况：杀本地 ssh → `lost`/`lost`/`agent.session.lost`；杀
+  远端 mock（非 255 退出）→ `interrupted`/`interrupted`/
+  `agent.session.interrupted`；正常 turn 后 EOF → `exited`。纯映射函数另有
+  contracts 与 provider 单测。
+- **真实主机证据（Debian 13，非本仓库 CI 环境）**：远端 DSH 0.2.2-rc.5、
+  Node 24.22.3，命令 `@deepseek-ai/dsh/lib/bin.js --profile acp`，真实模型
+  `llm-local` / `DeepSeek-V4.1-Flash-1017-Local-02`；workspace 读写、
+  permission Decision、cancel 均通过。第 2 轮同时执行了 kill 本地 ssh
+  （`lost`）和 kill 远端 DSH（`interrupted`）两个故障用例，当时二者都错误
+  地落到 `exited`——这正是本轮修复的缺陷；修复后的映射由上述 mock smoke
+  覆盖，本环境没有 DSH，未在真实主机上复测，也不对 Ubuntu/macOS 作任何
+  声明。
+
 ## 备选方案
 
 - **PTY（`ssh -tt`）**：拒绝。PTY 会把提示符、控制字符、密码/口令提示和行
