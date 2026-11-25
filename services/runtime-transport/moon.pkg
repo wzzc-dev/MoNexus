@@ -1,0 +1,21 @@
+import {
+  "monexus/contracts",
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "moonbitlang/async/io",
+  "moonbitlang/async/socket",
+  "moonbitlang/async/tls",
+  "moonbitlang/core/encoding/hex",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/env",
+  "moonbitlang/core/json",
+  "moonbitlang/x/crypto",
+}
+
+supported_targets = "native"
+
+options("native-stub": [ "perm_stub.c" ])
+
+import {
+  "moonbitlang/async/process",
+} for "test"
