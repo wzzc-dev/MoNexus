@@ -1,541 +1,834 @@
 ///|
+/// The MoNexus desktop shell and its eight pages.
+///
+/// Layout contract (1280x800): 8pt outer margin, two islands with an 8pt gap.
+/// The 224pt sidebar owns navigation; the 1032pt main island is a 44pt top
+/// bar, a scrolling 992pt body, and a 26pt status bar. Every colour, font and
+/// radius comes from `theme.mbt`/`ui.mbt`; this file only composes.
+
+///|
 using @views {
-  button,
-  card,
-  center,
   checkbox,
   column,
   container,
+  lucide_icon,
+  padding,
+  padding_edges,
+  padding_xy,
   row,
   scroll_view,
   spacer,
   text,
-  text_area,
-  text_field,
 }
 
 ///|
-/// Content-sized status tag. MoUI `tag` pins a 96x28 frame and clips longer
-/// labels (`waiting_approval`, `succeeded`, ...), so the app draws its own
-/// outlined label whose box grows with the measured text instead.
-fn auto_tag(label : String) -> @moui.View[Msg] {
-  let theme = @core.Theme::neutral()
+fn page_icon(page : Page) -> String {
+  match page {
+    Home => "house"
+    Machines => "server"
+    Projects => "folder"
+    Agents => "message-circle"
+    Inbox => "mail"
+    Tasks => "list"
+    Search => "search"
+    Settings => "settings"
+  }
+}
+
+///|
+fn link_tone(link : LinkState) -> @core.Color {
+  match link {
+    Online => ui_success()
+    Connecting => ui_warning()
+    Offline => ui_danger()
+  }
+}
+
+///|
+fn clear_color() -> @core.Color {
+  @core.Color::rgba(r=0.0, g=0.0, b=0.0, a=0.0)
+}
+
+///|
+fn inbox_needs_count(model : Model) -> Int {
+  let mut count = 0
+  for decision in model.inbox.decisions {
+    if inbox_bucket_of(decision) == @contracts.INBOX_NEEDS_YOU {
+      count = count + 1
+    }
+  }
+  count
+}
+
+///|
+/// Left navigation row: 32pt tall, Lucide glyph + label, accent tint when the
+/// page is open and a hover wash otherwise. The Inbox row carries its needs-you
+/// count.
+fn nav_item(model : Model, page : Page) -> @moui.View[Msg] {
+  let label = page.label()
+  let active = model.page.label() == label
+  let hover_key = "nav:" + label
+  let hovered = model.hover_row == hover_key
+  let tone = if active {
+    ui_accent()
+  } else if hovered {
+    ui_text_color()
+  } else {
+    ui_muted()
+  }
+  let background = if active {
+    ui_accent_soft()
+  } else if hovered {
+    ui_hover()
+  } else {
+    clear_color()
+  }
+  let children : Array[@moui.View[Msg]] = [
+    lucide_icon(page_icon(page), size=16.0, color=tone),
+    text(label, align=@core.TextAlign::TextStart).font(ui_font(13.0, if active { 600 } else { 400 }))
+    .foreground(tone),
+    spacer(weight=1.0),
+  ]
+  if label == "Inbox" {
+    let needs = inbox_needs_count(model)
+    if needs > 0 {
+      children.push(ui_pill(needs.to_string(), active))
+    }
+  }
   container(
-    text(
-      label,
-      role=@style.Control,
-      theme=theme,
-      align=@core.TextAlign::TextStart,
-    ).foreground(theme.palette.foreground),
-    background=theme.palette.surface.multiply_alpha(0.1),
-    corner_radius=14.0,
-    border=Some(
-      @core.BorderStyle::new(
-        brush=@core.Brush::solid(theme.palette.outline),
-        width=1.0,
+    padding_xy(
+      row(children, spacing=10.0, align=@style.CrossAlign::Center).frame(
+        width=184.0,
       ),
+      horizontal=10.0,
     ),
-    padding=6.0,
+    height=32.0,
+    background=background,
+    corner_radius=7.0,
+    padding=0.0,
+  ).on_tap(SelectPage(page)).on_hover(
+    fn(over) { HoverRow(hover_key, over) },
+  ).cursor(@core.CursorStyle::Icon(@core.CursorIcon::CursorPointer))
+}
+
+///|
+fn brand_mark() -> @moui.View[Msg] {
+  container(
+    text("M").font(serif_font(15.0)).foreground(ui_on_accent()),
+    width=24.0,
+    height=24.0,
+    background=ui_accent(),
+    corner_radius=7.0,
+    padding=0.0,
   )
 }
 
 ///|
-fn nav_button(page : Page, current : Page) -> @moui.View[Msg] {
-  let label = page.label()
-  let view = button(label, on_click=SelectPage(page))
-  if page.label() == current.label() {
-    view.title()
-  } else {
-    view
+fn sidebar(model : Model) -> @moui.View[Msg] {
+  let items : Array[@moui.View[Msg]] = []
+  for page in [Home, Machines, Projects, Agents, Inbox, Tasks, Search] {
+    items.push(nav_item(model, page))
+  }
+  let content = column([
+    container(
+      padding_edges(
+        row([
+          brand_mark(),
+          text("MoNexus", align=@core.TextAlign::TextStart).font(ui_font(15.0, 600)).foreground(ui_text_color()),
+        ], spacing=9.0, align=@style.CrossAlign::Center).frame(width=196.0),
+        top=0.0,
+        right=14.0,
+        bottom=0.0,
+        left=14.0,
+      ),
+      height=44.0,
+      padding=0.0,
+    ),
+    padding_edges(
+      column(items, spacing=2.0),
+      top=8.0,
+      right=10.0,
+      bottom=0.0,
+      left=10.0,
+    ),
+    spacer(weight=1.0),
+    ui_divider_soft(),
+    padding_edges(
+      column([nav_item(model, Settings)], spacing=0.0),
+      top=10.0,
+      right=10.0,
+      bottom=8.0,
+      left=10.0,
+    ),
+    padding_edges(
+      ui_mono(@contracts.PRODUCT_VERSION, 10.0).frame(width=196.0),
+      top=0.0,
+      right=14.0,
+      bottom=10.0,
+      left=14.0,
+    ),
+  ], spacing=0.0).frame(width=ui_sidebar_width, height=ui_sidebar_height)
+  ui_panel(content, width=ui_sidebar_width, height=ui_sidebar_height)
+}
+
+///|
+fn page_refresh_msg(model : Model) -> Msg? {
+  match model.page {
+    Machines => Some(RefreshMachines)
+    Projects => Some(ProjectRefresh)
+    Agents => Some(AgentRefresh)
+    Inbox => Some(InboxRefresh)
+    Tasks => Some(TasksRefresh)
+    _ => None
   }
 }
 
 ///|
-fn host_summary(host : HostProjection) -> @moui.View[Msg] {
-  let lines : Array[@moui.View[Msg]] = [
-    text("MoNexus host: " + host.link.label()),
-    text(
-      if host.host_id == "" {
-        "host id: (not connected)"
-      } else {
-        "host id: " + host.host_id
-      },
-    ),
+fn top_bar(model : Model) -> @moui.View[Msg] {
+  let children : Array[@moui.View[Msg]] = [
+    ui_page_title(model.page.label()),
+    spacer(weight=1.0),
+    ui_state_pill("host " + model.host.link.label(), link_tone(model.host.link)),
   ]
-  if host.version != "" {
-    lines.push(text("version: " + host.version))
+  match page_refresh_msg(model) {
+    Some(msg) => children.push(ui_ghost_compact("Refresh", msg, 64.0))
+    None => ()
   }
-  if host.ws_url != "" {
-    lines.push(text("endpoint: " + host.ws_url).caption())
+  container(
+    padding_xy(
+      row(children, spacing=10.0, align=@style.CrossAlign::Center).frame(
+        width=992.0,
+      ),
+      horizontal=20.0,
+    ),
+    height=ui_topbar_height,
+    padding=0.0,
+  )
+}
+
+///|
+fn status_bar(model : Model) -> @moui.View[Msg] {
+  let host = model.host
+  let left = if host.host_id == "" { "not connected" } else { host.host_id }
+  let right = if host.event_count > 0 {
+    "events: " +
+    host.event_count.to_string() +
+    " · seq " +
+    host.event_seq.to_string()
+  } else {
+    "MoNexus " + @contracts.PRODUCT_VERSION + " · 8 pages"
   }
-  if host.event_count > 0 {
-    lines.push(
-      text(
-        "events: " +
+  container(
+    padding_xy(
+      row([
+        ui_mono(left, 10.5),
+        spacer(weight=1.0),
+        ui_mono(right, 10.5),
+      ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=992.0),
+      horizontal=20.0,
+    ),
+    height=ui_statusbar_height,
+    padding=0.0,
+  )
+}
+
+///|
+// MARK: - Home
+
+fn home_page(model : Model) -> @moui.View[Msg] {
+  let host = model.host
+  let stats = row([
+    ui_stat_card(
+      "Machines",
+      model.machines.length().to_string(),
+      if model.machines.is_empty() { "none registered" } else { "registered" },
+      322.0,
+    ),
+    ui_stat_card(
+      "Decisions",
+      model.inbox.decisions.length().to_string(),
+      if model.inbox.decisions.is_empty() {
+        "inbox empty"
+      } else {
+        "in the inbox"
+      },
+      322.0,
+    ),
+    ui_stat_card(
+      "Tasks",
+      model.task.tasks.length().to_string(),
+      if model.task.tasks.is_empty() { "board empty" } else { "on the board" },
+      322.0,
+    ),
+  ], spacing=12.0).frame(width=992.0)
+  let connection : Array[@moui.View[Msg]] = [
+    ui_section("Connection"),
+    ui_kv("state", host.link.label(), 960.0),
+    ui_kv(
+      "host id",
+      if host.host_id == "" { "(not connected)" } else { host.host_id },
+      960.0,
+    ),
+    ui_kv(
+      "endpoint",
+      if host.ws_url == "" {
+        "(waiting for host.json)"
+      } else {
+        host.ws_url
+      },
+      960.0,
+    ),
+    ui_kv(
+      "version",
+      if host.version == "" { "(not connected)" } else { host.version },
+      960.0,
+    ),
+    ui_kv(
+      "events",
+      if host.event_count == 0 {
+        "none yet"
+      } else {
         host.event_count.to_string() +
-        " (last " +
+        " · last " +
         host.last_event +
         " @" +
-        host.event_seq.to_string() +
-        ")",
-      ).caption(),
+        host.event_seq.to_string()
+      },
+      960.0,
+    ),
+  ]
+  if host.last_error != "" {
+    connection.push(
+      text("reason: " + host.last_error, width=960.0, align=@core.TextAlign::TextStart, wrap=true)
+      .font(ui_font(11.0, 400))
+      .foreground(ui_danger()),
     )
   }
-  if host.last_error != "" {
-    lines.push(text("reason: " + host.last_error).caption())
-  }
-  column(lines, spacing=6.0)
+  column([
+    ui_hero("Welcome to MoNexus"),
+    ui_muted_wrapped(
+      "A local-first desktop shell for machines, tasks and agent sessions.",
+      620.0,
+    ),
+    stats,
+    ui_card(connection, width=992.0),
+  ], spacing=16.0)
 }
 
 ///|
-fn machine_card(model : Model, record : @contracts.MachineRecord) -> @moui.View[Msg] {
-  let busy = model.machine_busy == record.id
-  let identity = if record.identity == "" {
-    "(default)"
-  } else {
-    record.identity
-  }
-  let lines : Array[@moui.View[Msg]] = [
+// MARK: - Machines
+
+fn machine_card(
+  model : Model,
+  record : @contracts.MachineRecord,
+) -> @moui.View[Msg] {
+  let status = machine_status_text(record.status)
+  let identity = if record.identity == "" { "(default)" } else { record.identity }
+  let children : Array[@moui.View[Msg]] = [
     row([
-      text(record.name).title(),
+      column([
+        ui_row_title(record.name),
+        ui_mono(record.id, 10.5),
+      ], spacing=3.0, align=@style.CrossAlign::Start),
       spacer(weight=1.0),
-      auto_tag(machine_status_text(record.status)),
-    ], spacing=8.0),
-    text(
-      record.target_label() +
-      ":" +
-      record.port.to_string() +
-      " · identity " +
-      identity +
-      " · config " +
-      (if record.use_ssh_config { "on" } else { "off" }),
-    ).caption(),
-    text(
+      ui_tag(status),
+    ], spacing=12.0, align=@style.CrossAlign::Center).frame(width=960.0),
+    row([
+      ui_mono(record.target_label() + ":" + record.port.to_string(), 11.0),
+      ui_meta("identity " + identity),
+      ui_meta("config " + (if record.use_ssh_config { "on" } else { "off" })),
+      spacer(weight=1.0),
+    ], spacing=12.0, align=@style.CrossAlign::Center).frame(width=960.0),
+    ui_meta(
       "host keys " +
       record.host_key_policy +
       " · " +
       machine_profile_summary(record),
-    ).caption(),
+    ),
   ]
   if record.last_error != "" {
-    lines.push(text("reason: " + record.last_error).caption())
+    children.push(
+      text("reason: " + record.last_error, width=900.0, align=@core.TextAlign::TextStart, wrap=true)
+      .font(ui_font(11.0, 400))
+      .foreground(ui_danger()),
+    )
   }
   let actions : Array[@moui.View[Msg]] = [
-    button("Probe", on_click=ProbeMachine(record.id)),
-    button("Remove", on_click=RemoveMachine(record.id)),
+    ui_ghost_small("Probe", ProbeMachine(record.id)),
+    ui_danger_ghost("Remove", RemoveMachine(record.id)),
   ]
-  if busy {
-    actions.push(text("working...").caption())
+  if model.machine_busy == record.id {
+    actions.push(ui_meta("working..."))
   }
-  lines.push(row(actions, spacing=8.0))
-  card(column(lines, spacing=4.0), padding=10.0)
+  children.push(row(actions, spacing=8.0, align=@style.CrossAlign::Center))
+  ui_card(children, width=992.0)
 }
 
 ///|
 fn machines_page(model : Model) -> @moui.View[Msg] {
-  let lines : Array[@moui.View[Msg]] = [
+  let draft = model.draft
+  let form : Array[@moui.View[Msg]] = [
+    ui_section("Add machine"),
     row([
-      text("Machines").title(),
-      spacer(weight=1.0),
-      button("Refresh", on_click=RefreshMachines),
-    ], spacing=8.0),
-    text(
-      "Explicit host/port/user/identity. Turn config off to pin the target and ignore ~/.ssh/config.",
-      wrap=true,
-    ).caption(),
+      ui_field(
+        "Name",
+        draft.name,
+        fn(value) { DraftName(value) },
+        "name",
+        220.0,
+      ),
+      ui_field(
+        "Host",
+        draft.host,
+        fn(value) { DraftHost(value) },
+        "host (required)",
+        280.0,
+      ),
+      ui_field("Port", draft.port, fn(value) { DraftPort(value) }, "port", 90.0),
+      ui_field(
+        "User",
+        draft.user,
+        fn(value) { DraftUser(value) },
+        "user",
+        160.0,
+      ),
+    ], spacing=12.0, align=@style.CrossAlign::End),
     row([
-      text_field(
-        model.draft.name,
-        on_input=fn(value) { DraftName(value) },
-        placeholder="name",
-        width=200.0,
-      ),
-      text_field(
-        model.draft.port,
-        on_input=fn(value) { DraftPort(value) },
-        placeholder="port",
-        width=90.0,
-      ),
-    ], spacing=8.0),
-    row([
-      text_field(
-        model.draft.host,
-        on_input=fn(value) { DraftHost(value) },
-        placeholder="host (required)",
-        width=300.0,
-      ),
-      text_field(
-        model.draft.user,
-        on_input=fn(value) { DraftUser(value) },
-        placeholder="user",
-        width=140.0,
-      ),
-    ], spacing=8.0),
-    row([
-      text_field(
-        model.draft.identity,
-        on_input=fn(value) { DraftIdentity(value) },
-        placeholder="identity file (optional)",
-        width=300.0,
+      ui_field(
+        "Identity file",
+        draft.identity,
+        fn(value) { DraftIdentity(value) },
+        "identity file (optional)",
+        320.0,
       ),
       checkbox(
         "use ~/.ssh/config",
-        checked=model.draft.use_ssh_config,
+        checked=draft.use_ssh_config,
         on_change=fn(value) { DraftUseConfig(value) },
       ),
-    ], spacing=8.0),
-    row([
-      button(
-        "host keys: " + model.draft.host_key_policy,
-        on_click=CycleDraftPolicy,
-      ),
-      button("Add machine", on_click=SubmitMachine),
-    ], spacing=8.0),
+      spacer(weight=1.0),
+      ui_ghost("host keys: " + draft.host_key_policy, CycleDraftPolicy),
+      ui_primary("Add machine", SubmitMachine),
+    ], spacing=12.0, align=@style.CrossAlign::Center).frame(width=960.0),
   ]
   if model.machine_message != "" {
-    lines.push(text(model.machine_message).caption())
+    form.push(ui_muted_wrapped(model.machine_message, 960.0))
   }
-  lines.push(text("Saved machines").title())
+  let saved : Array[@moui.View[Msg]] = [
+    row([
+      ui_section("Saved machines"),
+      spacer(weight=1.0),
+      ui_meta(model.machines.length().to_string() + " registered"),
+    ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
+  ]
   if model.machines.is_empty() {
-    lines.push(
-      text(
+    saved.push(
+      ui_muted_wrapped(
         if model.machines_loaded {
           "no machines registered yet"
         } else {
           "loading machines from the host..."
         },
-      ).caption(),
+        960.0,
+      ),
     )
   } else {
     for record in model.machines {
-      lines.push(machine_card(model, record))
+      saved.push(machine_card(model, record))
     }
   }
-  column(lines, spacing=8.0)
+  column([
+    ui_card(form, width=992.0),
+    column(saved, spacing=10.0),
+  ], spacing=16.0)
 }
 
 ///|
-fn entry_row(model : Model, entry : @contracts.WorkspaceEntry) -> @moui.View[Msg] {
-  let label = if entry.is_dir {
-    "[dir] " + entry.name
-  } else {
-    entry.name
-  }
+// MARK: - Projects
+
+fn entry_row(
+  model : Model,
+  entry : @contracts.WorkspaceEntry,
+) -> @moui.View[Msg] {
   let selected = model.project.selected == entry.path
-  let line = row([
-    text(label).mono(),
-    spacer(weight=1.0),
-    button(
-      if entry.is_dir { "list" } else { "open" },
-      on_click=if entry.is_dir {
-        ProjectOpenDir(entry.path)
-      } else {
-        ProjectOpenFile(entry.path)
-      },
+  let tone = if selected { ui_accent() } else { ui_text_color() }
+  container(
+    padding_xy(
+      row([
+        lucide_icon(
+          if entry.is_dir { "folder" } else { "file" },
+          size=14.0,
+          color=if selected { ui_accent() } else { ui_dim() },
+        ),
+        text(
+          entry.name,
+          width=560.0,
+          align=@core.TextAlign::TextStart,
+          wrap=false,
+        ).font(mono_font(11.0, 400)).foreground(tone),
+        spacer(weight=1.0),
+        ui_ghost_small(
+          if entry.is_dir { "list" } else { "open" },
+          if entry.is_dir {
+            ProjectOpenDir(entry.path)
+          } else {
+            ProjectOpenFile(entry.path)
+          },
+        ),
+      ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=944.0),
+      horizontal=8.0,
     ),
-  ], spacing=8.0)
-  if selected {
-    line.title()
-  } else {
-    line
-  }
+    height=30.0,
+    background=if selected { ui_accent_soft() } else { clear_color() },
+    corner_radius=6.0,
+    padding=0.0,
+  )
 }
 
 ///|
-fn workspace_row(model : Model, record : @contracts.WorkspaceRecord) -> @moui.View[Msg] {
+fn workspace_row(
+  model : Model,
+  record : @contracts.WorkspaceRecord,
+) -> @moui.View[Msg] {
   let selected = match model.project.workspace {
     Some(current) => current.id == record.id
     None => false
   }
-  let line = row([
-    text(record.name + " · " + record.root).mono(),
-    auto_tag(if record.is_git { "git" } else { "exclusive" }),
-    spacer(weight=1.0),
-    text(record.id).caption(),
-    button("restore", on_click=ProjectSelectWorkspace(record.id)),
-  ], spacing=8.0)
-  if selected {
-    line.title()
-  } else {
-    line
-  }
+  let child = column([
+    row([
+      column([
+        ui_row_title(record.name),
+        ui_mono(record.root, 11.0),
+      ], spacing=3.0, align=@style.CrossAlign::Start),
+      spacer(weight=1.0),
+      ui_tag(if record.is_git { "git" } else { "exclusive" }),
+      ui_mono(record.id, 10.5),
+      ui_ghost_small("restore", ProjectSelectWorkspace(record.id)),
+    ], spacing=12.0, align=@style.CrossAlign::Center).frame(width=964.0),
+  ], spacing=6.0).frame(width=964.0)
+  container(
+    padding(child, 14.0),
+    width=992.0,
+    background=if selected { ui_accent_soft() } else { ui_surface() },
+    corner_radius=10.0,
+    border=Some(
+      ui_edge(
+        if selected {
+          ui_accent().multiply_alpha(0.45)
+        } else {
+          ui_border_soft()
+        },
+      ),
+    ),
+    padding=0.0,
+  )
 }
 
 ///|
-fn project_page(model : Model) -> @moui.View[Msg] {
+fn project_detail(model : Model) -> Array[@moui.View[Msg]] {
   let project = model.project
-  let lines : Array[@moui.View[Msg]] = [
-    row([
-      text("Projects").title(),
-      spacer(weight=1.0),
-      button("Refresh", on_click=ProjectRefresh),
-    ], spacing=8.0),
-    text(
-      "Open a local or SSH project by machine id + absolute root. Both use the same workspace RPC surface.",
-      wrap=true,
-    ).caption(),
-    row([
-      text_field(
-        project.machine_id,
-        on_input=fn(value) { ProjectMachine(value) },
-        placeholder="machine id (blank = local)",
-        width=260.0,
-      ),
-      text_field(
-        project.root,
-        on_input=fn(value) { ProjectRoot(value) },
-        placeholder="/absolute/project/root",
-        width=320.0,
-      ),
-      button("Open project", on_click=ProjectOpen),
-    ], spacing=8.0),
-  ]
-  if project.message != "" {
-    lines.push(text(project.message).caption())
-  }
-  lines.push(text("Open workspaces").title())
-  if project.workspaces.is_empty() {
-    lines.push(
-      text(
-        if project.workspaces_loaded {
-          "no open workspaces yet"
-        } else {
-          "loading workspaces from the host..."
-        },
-      ).caption(),
-    )
-  } else {
-    for record in project.workspaces {
-      lines.push(workspace_row(model, record))
-    }
-  }
+  let detail : Array[@moui.View[Msg]] = []
   match project.workspace {
     Some(record) => {
-      lines.push(
-        text(
+      let files : Array[@moui.View[Msg]] = [
+        ui_section("Files"),
+        ui_mono_wrapped(
           "workspace " +
           record.id +
           " · root " +
           record.root +
           " · " +
           (if record.is_git { "git" } else { "non-git (exclusive lease)" }),
-        ).caption(),
-      )
-      lines.push(text("Files").title())
+          10.5,
+          960.0,
+          ui_dim(),
+        ),
+      ]
       if project.entries.is_empty() {
-        lines.push(text("no entries loaded").caption())
+        files.push(ui_muted_wrapped("no entries loaded", 960.0))
       } else {
         for entry in project.entries {
-          lines.push(entry_row(model, entry))
+          files.push(entry_row(model, entry))
         }
       }
-      lines.push(
-        text(
+      detail.push(ui_card(files, width=992.0))
+      let editor : Array[@moui.View[Msg]] = [
+        ui_section("Editor"),
+        ui_meta(
           if project.selected == "" {
-            "Editor (select a file)"
+            "select a file"
           } else {
-            "Editor · " +
-            project.selected +
-            (if project.dirty { " *unsaved*" } else { "" })
+            project.selected + (if project.dirty { " · unsaved" } else { "" })
           },
-        ).title(),
-      )
-      lines.push(
-        text_area(
-          project.content,
-          on_input=fn(value) { ProjectDraft(value) },
-          placeholder="file content",
-          lines=8,
-          width=700.0,
         ),
-      )
-      lines.push(
+        ui_text_area_field(
+          "Content",
+          project.content,
+          fn(value) { ProjectDraft(value) },
+          "file content",
+          960.0,
+          8,
+        ),
         row([
-          button("Save", on_click=ProjectSaveFile),
-          button("Refresh diff", on_click=ProjectRefreshDiff),
-        ], spacing=8.0),
-      )
-      lines.push(text("Git status").title())
-      lines.push(
-        text(
+          ui_primary("Save", ProjectSaveFile),
+          ui_ghost("Refresh diff", ProjectRefreshDiff),
+        ], spacing=8.0, align=@style.CrossAlign::Center),
+      ]
+      detail.push(ui_card(editor, width=992.0))
+      let git : Array[@moui.View[Msg]] = [
+        ui_section("Git status"),
+        ui_code_block(
           if project.status_text == "" {
             "(not loaded)"
           } else {
             project.status_text
           },
-        ).mono(),
-      )
-      lines.push(text("Git diff").title())
-      lines.push(
-        text(
+          960.0,
+        ),
+        ui_section("Git diff"),
+        ui_code_block(
           if project.diff_text == "" {
             "(no diff loaded)"
           } else {
             project.diff_text
           },
-        ).mono(),
-      )
-      lines.push(text("Terminal").title())
-      lines.push(
-        text(
+          960.0,
+        ),
+      ]
+      detail.push(ui_card(git, width=992.0))
+      let terminal : Array[@moui.View[Msg]] = [
+        ui_section("Terminal"),
+        ui_code_block(
           if project.terminal_text == "" {
             "(send a command to start a local PTY or remote ssh -tt + tmux session)"
           } else {
             project.terminal_text
           },
-        ).mono(),
-      )
-      lines.push(
+          960.0,
+        ),
         row([
-          text_field(
+          ui_field(
+            "Command",
             project.terminal_input,
-            on_input=fn(value) { ProjectTerminalInput(value) },
-            placeholder="shell command",
-            width=520.0,
+            fn(value) { ProjectTerminalInput(value) },
+            "shell command",
+            800.0,
           ),
-          button("Send", on_click=ProjectTerminalSend),
-        ], spacing=8.0),
-      )
-      lines.push(text("Worktree").title())
-      lines.push(
+          ui_primary("Send", ProjectTerminalSend),
+        ], spacing=12.0, align=@style.CrossAlign::End),
+      ]
+      detail.push(ui_card(terminal, width=992.0))
+      let worktree : Array[@moui.View[Msg]] = [
+        ui_section("Worktree"),
         row([
-          text_field(
+          ui_field(
+            "Branch",
             project.worktree_branch,
-            on_input=fn(value) { ProjectWorktreeBranch(value) },
-            placeholder="branch",
-            width=200.0,
+            fn(value) { ProjectWorktreeBranch(value) },
+            "branch",
+            240.0,
           ),
-          text_field(
+          ui_field(
+            "Path",
             project.worktree_path,
-            on_input=fn(value) { ProjectWorktreePath(value) },
-            placeholder="/absolute/worktree/path",
-            width=320.0,
+            fn(value) { ProjectWorktreePath(value) },
+            "/absolute/worktree/path",
+            440.0,
           ),
-          button("Create worktree", on_click=ProjectCreateWorktree),
-        ], spacing=8.0),
-      )
+          ui_primary("Create worktree", ProjectCreateWorktree),
+        ], spacing=12.0, align=@style.CrossAlign::End),
+      ]
       if project.worktree_message != "" {
-        lines.push(text(project.worktree_message).caption())
+        worktree.push(ui_meta(project.worktree_message))
       }
+      detail.push(ui_card(worktree, width=992.0))
     }
     None =>
-      lines.push(
-        text(
-          "No project selected. Pick an open workspace in the list above or open a root.",
-        ).caption(),
+      detail.push(
+        ui_card([
+          ui_muted_wrapped(
+            "No project selected. Pick an open workspace in the list above or open a root.",
+            960.0,
+          ),
+        ], width=992.0),
       )
   }
-  column(lines, spacing=8.0)
+  detail
 }
 
 ///|
+fn projects_page(model : Model) -> @moui.View[Msg] {
+  let project = model.project
+  let open_form : Array[@moui.View[Msg]] = [
+    ui_section("Open project"),
+    row([
+      ui_field(
+        "Machine id",
+        project.machine_id,
+        fn(value) { ProjectMachine(value) },
+        "machine id (blank = local)",
+        260.0,
+      ),
+      ui_field(
+        "Root",
+        project.root,
+        fn(value) { ProjectRoot(value) },
+        "/absolute/project/root",
+        440.0,
+      ),
+      ui_primary("Open project", ProjectOpen),
+    ], spacing=12.0, align=@style.CrossAlign::End),
+  ]
+  if project.message != "" {
+    open_form.push(ui_muted_wrapped(project.message, 960.0))
+  }
+  let workspaces : Array[@moui.View[Msg]] = [
+    row([
+      ui_section("Open workspaces"),
+      spacer(weight=1.0),
+      ui_meta(project.workspaces.length().to_string() + " open"),
+    ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
+  ]
+  if project.workspaces.is_empty() {
+    workspaces.push(
+      ui_muted_wrapped(
+        if project.workspaces_loaded {
+          "no open workspaces yet"
+        } else {
+          "loading workspaces from the host..."
+        },
+        960.0,
+      ),
+    )
+  } else {
+    for record in project.workspaces {
+      workspaces.push(workspace_row(model, record))
+    }
+  }
+  column([
+    ui_card(open_form, width=992.0),
+    column(workspaces, spacing=10.0),
+    column(project_detail(model), spacing=16.0),
+  ], spacing=16.0)
+}
+
+///|
+// MARK: - Agents
+
 fn agents_page(model : Model) -> @moui.View[Msg] {
   let agent = model.agent
-  let lines : Array[@moui.View[Msg]] = [
+  let start : Array[@moui.View[Msg]] = [
+    ui_page_title("Agents / Sessions"),
     row([
-      text("Agents / Sessions").title(),
-      spacer(weight=1.0),
-      button("Probe", on_click=AgentProbeNow),
-      button("Refresh", on_click=AgentRefresh),
-    ], spacing=8.0),
-    text(
-      "Starts a local ACP adapter (default: npx @zed-industries/claude-code-acp). The adapter needs a logged-in agent account.",
-      wrap=true,
-    ).caption(),
-    row([
-      text_field(
+      ui_field(
+        "Agent id",
         agent.agent_id,
-        on_input=fn(value) { AgentId(value) },
-        placeholder="agent id",
-        width=170.0,
+        fn(value) { AgentId(value) },
+        "agent id",
+        170.0,
       ),
-      text_field(
+      ui_field(
+        "Mode",
         agent.mode,
-        on_input=fn(value) { AgentMode(value) },
-        placeholder="mode (acp|stdout)",
-        width=150.0,
+        fn(value) { AgentMode(value) },
+        "acp | stdout",
+        150.0,
       ),
-      text_field(
+      ui_field(
+        "Workspace",
         agent.workspace_id,
-        on_input=fn(value) { AgentWorkspace(value) },
-        placeholder="workspace id (blank = cwd)",
-        width=240.0,
+        fn(value) { AgentWorkspace(value) },
+        "workspace id (blank = cwd)",
+        240.0,
       ),
-      text_field(
+      ui_field(
+        "Worktree",
         agent.worktree_id,
-        on_input=fn(value) { AgentWorktree(value) },
-        placeholder="worktree id (optional)",
-        width=220.0,
+        fn(value) { AgentWorktree(value) },
+        "worktree id (optional)",
+        220.0,
       ),
-    ], spacing=8.0),
-    text_area(
+    ], spacing=12.0, align=@style.CrossAlign::End),
+    ui_text_area_field(
+      "Initial prompt",
       agent.prompt,
-      on_input=fn(value) { AgentPromptDraft(value) },
-      placeholder="initial prompt",
-      lines=3,
-      width=700.0,
+      fn(value) { AgentPromptDraft(value) },
+      "initial prompt",
+      960.0,
+      3,
     ),
     row([
-      button("Start session", on_click=AgentStartSession),
-      button("Stop", on_click=AgentStopSession),
-      button("Resume", on_click=AgentResumeSession),
-    ], spacing=8.0),
+      ui_primary("Start session", AgentStartSession),
+      ui_ghost("Stop", AgentStopSession),
+      ui_ghost("Resume", AgentResumeSession),
+      ui_ghost("Probe", AgentProbeNow),
+      spacer(weight=1.0),
+    ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
   ]
   if agent.message != "" {
-    lines.push(text(agent.message).caption())
+    start.push(ui_muted_wrapped(agent.message, 960.0))
   }
-  match agent.session {
+  let session_line = match agent.session {
     Some(record) =>
-      lines.push(
-        text(
-          "session " +
-          record.id +
-          " · " +
-          (if agent.state_text == "" { record.state } else { agent.state_text }) +
-          " · turns " +
-          record.turns.to_string() +
-          " · chunks " +
-          record.chunks.to_string() +
-          " · memory " +
-          record.memory_bytes.to_string() +
-          "B · artifacts " +
-          record.artifacts.length().to_string() +
-          (if agent.stop_reason == "" {
-            ""
-          } else {
-            " · stop " + agent.stop_reason
-          }),
-        ).caption(),
-      )
-    None => lines.push(text("No session started yet.").caption())
+      text(
+        "session " +
+        record.id +
+        " · " +
+        (if agent.state_text == "" { record.state } else { agent.state_text }) +
+        " · turns " +
+        record.turns.to_string() +
+        " · chunks " +
+        record.chunks.to_string() +
+        " · memory " +
+        record.memory_bytes.to_string() +
+        "B · artifacts " +
+        record.artifacts.length().to_string() +
+        (if agent.stop_reason == "" { "" } else { " · stop " + agent.stop_reason }),
+        width=960.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(mono_font(11.0, 400)).foreground(ui_dim())
+    None =>
+      text("No session started yet.", width=960.0, align=@core.TextAlign::TextStart)
+      .font(ui_font(12.0, 400))
+      .foreground(ui_muted())
   }
-  lines.push(text("Transcript").title())
-  lines.push(
-    text(
-      if agent.transcript == "" {
-        "(waiting for output)"
-      } else {
-        agent.transcript
-      },
-    ).mono(),
-  )
-  lines.push(
+  let session : Array[@moui.View[Msg]] = [
+    ui_section("Session"),
+    session_line,
+  ]
+  if agent.pending_decision != "" {
+    session.push(
+      text("pending decision: " + agent.pending_decision, width=960.0, align=@core.TextAlign::TextStart, wrap=true)
+      .font(mono_font(11.0, 400))
+      .foreground(ui_warning()),
+    )
+  }
+  let transcript : Array[@moui.View[Msg]] = [
+    ui_section("Transcript"),
+    ui_code_block(
+      if agent.transcript == "" { "No session yet" } else { agent.transcript },
+      960.0,
+      height=220.0,
+      size=12.0,
+    ),
     row([
-      text_field(
+      ui_field(
+        "Follow-up prompt",
         agent.input,
-        on_input=fn(value) { AgentInputDraft(value) },
-        placeholder="follow-up prompt",
-        width=520.0,
+        fn(value) { AgentInputDraft(value) },
+        "follow-up prompt",
+        800.0,
       ),
-      button("Send", on_click=AgentSendInput),
-    ], spacing=8.0),
-  )
-  lines.push(text("Recent sessions").title())
+      ui_primary("Send", AgentSendInput),
+    ], spacing=12.0, align=@style.CrossAlign::End),
+  ]
+  let recent : Array[@moui.View[Msg]] = [ui_section("Recent sessions")]
   if agent.sessions.is_empty() {
-    lines.push(text("(none)").caption())
+    recent.push(ui_muted_wrapped("(none)", 960.0))
   } else {
     for record in agent.sessions {
-      lines.push(
+      recent.push(
         text(
           record.id +
           " · " +
@@ -546,74 +839,100 @@ fn agents_page(model : Model) -> @moui.View[Msg] {
           record.turns.to_string() +
           " · " +
           record.cwd,
-        ).caption(),
+          width=960.0,
+          align=@core.TextAlign::TextStart,
+          wrap=true,
+        ).font(mono_font(11.0, 400)).foreground(ui_dim()),
       )
     }
   }
-  column(lines, spacing=8.0)
+  column([
+    ui_card(start, width=992.0),
+    ui_card(session, width=992.0),
+    ui_card(transcript, width=992.0),
+    ui_card(recent, width=992.0),
+  ], spacing=16.0)
 }
 
 ///|
-fn inbox_decision_card(decision : @contracts.DecisionRecord) -> @moui.View[Msg] {
+// MARK: - Inbox
+
+fn inbox_decision_card(
+  decision : @contracts.DecisionRecord,
+) -> @moui.View[Msg] {
   let bucket = inbox_bucket_of(decision)
   let actionable = bucket == @contracts.INBOX_NEEDS_YOU
-  let actions : Array[@moui.View[Msg]] = []
+  let meta =
+    "session " +
+    (if decision.session_id == "" { "(none)" } else { decision.session_id }) +
+    " · agent " +
+    decision.agent_id +
+    (if decision.run_id == "" { "" } else { " · run " + decision.run_id })
+  let body : Array[@moui.View[Msg]] = [
+    row([
+      ui_dot(status_tone(bucket)),
+      ui_mono(decision.kind.to_upper(), 10.0),
+      ui_tag(decision.status),
+      ui_tag(bucket),
+      spacer(weight=1.0),
+      ui_mono(
+        if decision.run_id == "" { "" } else { decision.run_id },
+        10.5,
+      ),
+    ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=964.0),
+    text(
+      decision.title,
+      width=964.0,
+      align=@core.TextAlign::TextStart,
+      wrap=true,
+    ).font(ui_font(15.0, 600)).foreground(ui_text_color()),
+    text(meta, width=964.0, align=@core.TextAlign::TextStart, wrap=true)
+    .font(mono_font(11.0, 400))
+    .foreground(ui_dim()),
+  ]
+  if decision.detail == "" {
+    body.push(ui_meta("(no detail)"))
+  } else {
+    body.push(ui_code_block(decision.detail, 964.0))
+  }
+  let answers : Array[@moui.View[Msg]] = []
   if actionable {
     for option in decision.options {
-      actions.push(
-        button(
+      answers.push(
+        ui_ghost_small(
           option.name,
-          on_click=InboxAnswer(decision.id, option.option_id),
+          InboxAnswer(decision.id, option.option_id),
         ),
       )
     }
-    actions.push(
-      button("Answer with text", on_click=InboxSubmitText(decision.id)),
+    answers.push(
+      ui_ghost_small("Answer with text", InboxSubmitText(decision.id)),
     )
   }
-  card(
-    column([
-      row([
-        text(
-          decision.kind + ": " + decision.title,
-          width=900.0,
-          align=@core.TextAlign::TextStart,
-          wrap=true,
-        ).title(),
-        spacer(weight=1.0),
-        auto_tag(decision.status),
-        auto_tag(bucket),
-      ], spacing=8.0),
-      text(
-        "session " +
-        (if decision.session_id == "" { "(none)" } else { decision.session_id }) +
-        " · agent " +
-        decision.agent_id +
-        (if decision.run_id == "" { "" } else { " · run " + decision.run_id }),
-      ).caption(),
-      if decision.detail == "" {
-        text("(no detail)").caption()
-      } else {
-        text(decision.detail).mono()
-      },
-      if decision.status == @contracts.DECISION_STATUS_ANSWERED {
-        text(
-          "answered by " +
-          (if decision.answered_by == "" { "owner" } else { decision.answered_by }) +
-          (if decision.option_id == "" { "" } else { " · " + decision.option_id }) +
-          (if decision.answer_text == "" { "" } else { " · " + decision.answer_text }),
-        ).caption()
-      } else {
-        text("(no answer yet)").caption()
-      },
-      if actions.length() == 0 {
-        text("handled").caption()
-      } else {
-        row(actions, spacing=8.0)
-      },
-    ], spacing=6.0),
-    padding=10.0,
+  if answers.is_empty() {
+    body.push(ui_meta("handled"))
+  } else {
+    body.push(row(answers, spacing=8.0, align=@style.CrossAlign::Center))
+  }
+  if decision.status == @contracts.DECISION_STATUS_ANSWERED {
+    body.push(
+      ui_meta(
+        "answered by " +
+        (if decision.answered_by == "" { "owner" } else { decision.answered_by }) +
+        (if decision.option_id == "" { "" } else { " · " + decision.option_id }) +
+        (if decision.answer_text == "" { "" } else { " · " + decision.answer_text }),
+      ),
+    )
+  }
+  let filled = container(
+    padding(column(body, spacing=8.0).frame(width=964.0), 14.0),
+    width=992.0,
+    background=ui_surface(),
+    corner_radius=10.0,
+    border=Some(ui_edge(ui_border_soft())),
+    padding=0.0,
   )
+  filled
 }
 
 ///|
@@ -625,7 +944,7 @@ fn push_inbox_section(
   if items.length() == 0 {
     return
   }
-  lines.push(text(title).title())
+  lines.push(ui_section(title))
   for decision in items {
     lines.push(inbox_decision_card(decision))
   }
@@ -647,140 +966,173 @@ fn inbox_page(model : Model) -> @moui.View[Msg] {
       handled.push(decision)
     }
   }
+  let stats = row([
+    ui_stat_card("Needs you", needs.length().to_string(), "waiting on you", 322.0),
+    ui_stat_card("Waiting", waiting.length().to_string(), "in flight", 322.0),
+    ui_stat_card("Handled", handled.length().to_string(), "resolved", 322.0),
+  ], spacing=12.0).frame(width=992.0)
   let lines : Array[@moui.View[Msg]] = [
-    row([
-      text("Inbox").title(),
-      spacer(weight=1.0),
-      button("Refresh", on_click=InboxRefresh),
-    ], spacing=8.0),
-    text(
+    ui_section("Approvals"),
+    ui_muted_wrapped(
       "Approvals, Agent permissions, evidence-gate waivers and recovery retries all wait in this one queue. An answer is recorded as an event and an audit record; nothing is auto-approved.",
-      wrap=true,
-    ).caption(),
+      960.0,
+    ),
   ]
   if inbox.message != "" {
-    lines.push(text(inbox.message).caption())
+    lines.push(ui_meta(inbox.message))
   }
+  let queue : Array[@moui.View[Msg]] = []
   if inbox.decisions.is_empty() {
-    lines.push(text("No decisions yet.").caption())
+    queue.push(ui_muted_wrapped("No decisions yet.", 960.0))
   } else {
-    push_inbox_section(lines, "Needs you", needs)
-    push_inbox_section(lines, "Waiting", waiting)
-    push_inbox_section(lines, "Handled", handled)
+    push_inbox_section(queue, "Needs you", needs)
+    push_inbox_section(queue, "Waiting", waiting)
+    push_inbox_section(queue, "Handled", handled)
   }
-  lines.push(
-    row([
-      text_field(
-        inbox.text,
-        on_input=fn(value) { InboxText(value) },
-        placeholder="free-text answer (questions/readiness)",
-        width=520.0,
-      ),
-    ], spacing=8.0),
-  )
-  column(lines, spacing=8.0)
+  column([
+    stats,
+    ui_card(lines, width=992.0),
+    column(queue, spacing=10.0),
+    ui_card([
+      ui_section("Answer text"),
+      row([
+        ui_field(
+          "Free text",
+          inbox.text,
+          fn(value) { InboxText(value) },
+          "free-text answer (questions/readiness)",
+          760.0,
+        ),
+        spacer(weight=1.0),
+      ], spacing=12.0, align=@style.CrossAlign::End).frame(width=960.0),
+    ], width=992.0),
+  ], spacing=16.0)
 }
 
 ///|
-fn task_row(model : Model, record : @contracts.TaskRecord) -> @moui.View[Msg] {
+// MARK: - Tasks
+
+fn task_card(
+  model : Model,
+  record : @contracts.TaskRecord,
+) -> @moui.View[Msg] {
   let selected = model.task.selected_task == record.id
-  let line = row([
-    text(
-      record.title,
-      width=520.0,
-      align=@core.TextAlign::TextStart,
-      wrap=true,
-    ).title(),
-    auto_tag(record.status),
-    spacer(weight=1.0),
-    text(record.id).caption(),
-    button("select", on_click=TaskSelect(record.id)),
-    button("cancel", on_click=TaskCancelNow(record.id)),
-  ], spacing=8.0)
-  let lines : Array[@moui.View[Msg]] = [
-    if selected { line.title() } else { line },
-    text(
-      "workspace " +
-      (if record.workspace_id == "" { "(none)" } else { record.workspace_id }) +
-      (if record.parent_id == "" { "" } else { " · parent " + record.parent_id }) +
-      " · verify " +
-      record.verify.length().to_string() +
-      (if record.goal == "" { "" } else { " · " + record.goal }),
-    ).caption(),
-  ]
-  card(column(lines, spacing=4.0), padding=8.0)
+  let meta =
+    "workspace " +
+    (if record.workspace_id == "" { "(none)" } else { record.workspace_id }) +
+    (if record.parent_id == "" { "" } else { " · parent " + record.parent_id }) +
+    " · verify " +
+    record.verify.length().to_string() +
+    (if record.goal == "" { "" } else { " · " + record.goal })
+  let child = column([
+    row([
+      ui_row_title_wrapped(record.title, 500.0),
+      ui_tag(record.status),
+      spacer(weight=1.0),
+      ui_ghost_small("Select", TaskSelect(record.id)),
+      ui_ghost_small("Cancel", TaskCancelNow(record.id)),
+    ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=964.0),
+    row([
+      ui_mono_wrapped(meta, 10.5, 720.0, ui_dim()),
+      spacer(weight=1.0),
+      ui_mono(record.id, 10.5),
+    ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=964.0),
+  ], spacing=6.0).frame(width=964.0)
+  container(
+    padding(column([child], spacing=0.0), 14.0),
+    width=992.0,
+    background=if selected { ui_accent_soft() } else { ui_surface() },
+    corner_radius=10.0,
+    border=Some(
+      ui_edge(
+        if selected {
+          ui_accent().multiply_alpha(0.45)
+        } else {
+          ui_border_soft()
+        },
+      ),
+    ),
+    padding=0.0,
+  )
 }
 
 ///|
-fn run_row(model : Model, record : @contracts.RunRecord) -> @moui.View[Msg] {
-  let selected = model.task.selected_run == record.id
-  let line = row([
-    text(record.mode + ": " + record.command).mono(),
-    auto_tag(record.status),
-    spacer(weight=1.0),
-    text(
-      if record.machine_id == "" {
-        "local"
-      } else {
-        record.machine_id
-      },
-    ).caption(),
-    button("open", on_click=RunSelect(record.id)),
-    button("cancel", on_click=RunCancelNow(record.id)),
-  ], spacing=8.0)
-  if selected {
-    line.title()
-  } else {
-    line
-  }
+fn run_row(
+  model : Model,
+  record : @contracts.RunRecord,
+) -> @moui.View[Msg] {
+  let _ = model
+  let origin =
+    "machine " +
+    (if record.machine_id == "" { "local" } else { record.machine_id }) +
+    (if record.worktree_id == "" { "" } else { " · worktree " + record.worktree_id })
+  column([
+    row([
+      text(
+        record.mode + ": " + record.command,
+        width=560.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(mono_font(11.0, 400)).foreground(ui_text_color()),
+      ui_tag(record.status),
+      spacer(weight=1.0),
+      ui_ghost_small("Open", RunSelect(record.id)),
+      ui_ghost_small("Cancel", RunCancelNow(record.id)),
+    ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
+    row([
+      ui_mono_wrapped(origin, 10.5, 700.0, ui_dim()),
+      spacer(weight=1.0),
+      ui_mono(record.id, 10.5),
+    ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
+  ], spacing=4.0)
 }
 
 ///|
 fn run_detail_view(model : Model) -> @moui.View[Msg] {
-  let detail = match model.task.detail {
-    Some(value) => value
-    None =>
-      return column([
-        text("Run detail").title(),
-        text("Select a run to inspect evidence, artifacts and the diff.").caption(),
-      ], spacing=6.0)
-  }
-  let run = detail.run
-  let lines : Array[@moui.View[Msg]] = [
-    row([
-      text("Run " + run.id).title(),
-      auto_tag(run.status),
-      spacer(weight=1.0),
-      text(
-        (if run.machine_id == "" { "local" } else { run.machine_id }) +
-        " · " +
-        run.mode +
-        (if run.worktree_id == "" {
-          ""
-        } else {
-          " · worktree " + run.worktree_id
-        }),
-      ).caption(),
-    ], spacing=8.0),
-    text(
-      (if run.command == "" { run.prompt } else { run.command }) +
-      (if run.stop_reason == "" { "" } else { "\nstop: " + run.stop_reason }) +
-      (if run.last_error == "" { "" } else { "\nerror: " + run.last_error }) +
-      (if run.output_summary == "" { "" } else { "\nsummary: " + run.output_summary }),
-    ).mono(),
-    text("Evidence").title(),
-  ]
-  if detail.evidence.is_empty() {
-    lines.push(text("(no evidence yet)").caption())
-  } else {
-    for evidence in detail.evidence {
-      lines.push(
-        card(
-          column([
+  let children : Array[@moui.View[Msg]] = [ui_section("Run detail")]
+  match model.task.detail {
+    Some(detail) => {
+      let run = detail.run
+      children.push(
+        row([
+          text("Run " + run.id, align=@core.TextAlign::TextStart).font(ui_font(14.0, 600)).foreground(ui_text_color()),
+          ui_tag(run.status),
+          spacer(weight=1.0),
+        ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
+      )
+      children.push(
+        ui_mono(
+          "machine " +
+          (if run.machine_id == "" { "local" } else { run.machine_id }) +
+          " · " +
+          run.mode +
+          (if run.worktree_id == "" { "" } else { " · worktree " + run.worktree_id }),
+          10.5,
+        ),
+      )
+      children.push(
+        ui_code_block(
+          (if run.command == "" { run.prompt } else { run.command }) +
+          (if run.stop_reason == "" { "" } else { "\nstop: " + run.stop_reason }) +
+          (if run.last_error == "" { "" } else { "\nerror: " + run.last_error }) +
+          (if run.output_summary == "" {
+            ""
+          } else {
+            "\nsummary: " + run.output_summary
+          }),
+          960.0,
+        ),
+      )
+      children.push(ui_section("Evidence"))
+      if detail.evidence.is_empty() {
+        children.push(ui_muted_wrapped("(no evidence yet)", 900.0))
+      } else {
+        for evidence in detail.evidence {
+          let evidence_body : Array[@moui.View[Msg]] = [
             row([
-              text(evidence.name + " · " + evidence.kind).title(),
+              text(evidence.name + " · " + evidence.kind, align=@core.TextAlign::TextStart).font(ui_font(13.0, 600)).foreground(ui_text_color()),
               spacer(weight=1.0),
-              auto_tag(
+              ui_tag(
                 if evidence.passed {
                   "passed"
                 } else if evidence.waived {
@@ -789,302 +1141,367 @@ fn run_detail_view(model : Model) -> @moui.View[Msg] {
                   "failed"
                 },
               ),
-            ], spacing=8.0),
-            text("$ " + evidence.command + " · exit " + evidence.exit_code.to_string()).mono(),
-            if evidence.excerpt == "" {
-              text("(no output)").caption()
-            } else {
-              text(evidence.excerpt).mono()
-            },
-            if evidence.artifact_id == "" {
-              text("no artifact").caption()
-            } else {
+            ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=912.0),
+            ui_mono(
+              "$ " +
+              evidence.command +
+              " · exit " +
+              evidence.exit_code.to_string(),
+              10.5,
+            ),
+          ]
+          evidence_body.push(
+            ui_code_block(
+              if evidence.excerpt == "" { "(no output)" } else { evidence.excerpt },
+              912.0,
+            ),
+          )
+          if evidence.artifact_id == "" {
+            evidence_body.push(ui_meta("no artifact"))
+          } else {
+            evidence_body.push(
               row([
-                text("artifact " + evidence.artifact_id).caption(),
-                button("read", on_click=ArtifactReadNow(evidence.artifact_id)),
-              ], spacing=8.0)
-            },
-          ], spacing=4.0),
-          padding=8.0,
+                ui_mono("artifact " + evidence.artifact_id, 10.5),
+                spacer(weight=1.0),
+                ui_ghost_small(
+                  "Read",
+                  ArtifactReadNow(evidence.artifact_id),
+                ),
+              ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=912.0),
+            )
+          }
+          children.push(ui_card(evidence_body, padding=12.0, width=936.0))
+        }
+      }
+      children.push(ui_section("Artifacts"))
+      if detail.artifacts.is_empty() {
+        children.push(ui_muted_wrapped("(no artifacts)", 900.0))
+      } else {
+        for artifact in detail.artifacts {
+          children.push(
+            row([
+              text(
+                artifact.kind +
+                " · " +
+                artifact.size.to_string() +
+                "B · " +
+                artifact.uri,
+                width=760.0,
+                align=@core.TextAlign::TextStart,
+                wrap=true,
+              ).font(mono_font(10.5, 400)).foreground(ui_dim()),
+              spacer(weight=1.0),
+              ui_ghost_small("Read", ArtifactReadNow(artifact.id)),
+            ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
+          )
+        }
+      }
+      if model.task.artifact_text != "" {
+        children.push(ui_section("Artifact: " + model.task.artifact_name))
+        children.push(ui_code_block(model.task.artifact_text, 960.0))
+      }
+      children.push(ui_section("Diff (HEAD)"))
+      if detail.diff == "" {
+        children.push(ui_muted_wrapped("(no diff / not a git worktree)", 900.0))
+      } else {
+        children.push(ui_code_block(detail.diff, 960.0))
+      }
+    }
+    None =>
+      children.push(
+        ui_muted_wrapped(
+          "Select a run to inspect evidence, artifacts and the diff.",
+          900.0,
         ),
       )
-    }
   }
-  lines.push(text("Artifacts").title())
-  if detail.artifacts.is_empty() {
-    lines.push(text("(no artifacts)").caption())
-  } else {
-    for artifact in detail.artifacts {
-      lines.push(
-        row([
-          text(
-            artifact.kind +
-            " · " +
-            artifact.size.to_string() +
-            "B · " +
-            artifact.uri,
-          ).mono(),
-          spacer(weight=1.0),
-          button("read", on_click=ArtifactReadNow(artifact.id)),
-        ], spacing=8.0),
-      )
-    }
-  }
-  if model.task.artifact_text != "" {
-    lines.push(
-      text("Artifact: " + model.task.artifact_name).title(),
-    )
-    lines.push(text(model.task.artifact_text).mono())
-  }
-  lines.push(text("Diff (HEAD)").title())
-  lines.push(
-    text(
-      if detail.diff == "" {
-        "(no diff / not a git worktree)"
-      } else {
-        detail.diff
-      },
-    ).mono(),
-  )
-  column(lines, spacing=8.0)
+  ui_card(children, width=992.0)
 }
 
 ///|
 fn activity_view(model : Model) -> @moui.View[Msg] {
   let events = model.task.events
-  let lines : Array[@moui.View[Msg]] = [
+  let children : Array[@moui.View[Msg]] = [
     row([
-      text("Activity").title(),
+      ui_section("Activity"),
       spacer(weight=1.0),
-      text(
+      ui_meta(
         "cursor " +
         model.task.event_seq.to_string() +
         " · " +
         events.length().to_string() +
         " cached",
-      ).caption(),
-    ], spacing=8.0),
+      ),
+    ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
   ]
   if events.is_empty() {
-    lines.push(text("(no events yet)").caption())
+    children.push(ui_muted_wrapped("(no events yet)", 900.0))
   } else {
     let start = if events.length() > 30 { events.length() - 30 } else { 0 }
     let mut index = start
     while index < events.length() {
       let event = events[index]
-      lines.push(
-        text(
-          "#" +
-          event.seq.to_string() +
-          " " +
-          event.event_type +
-          " · " +
-          event.subject,
-        ).mono(),
+      children.push(
+        container(
+          padding_xy(
+            text(
+              "#" +
+              event.seq.to_string() +
+              " " +
+              event.event_type +
+              " · " +
+              event.subject,
+              width=900.0,
+              align=@core.TextAlign::TextStart,
+              wrap=false,
+            ).font(mono_font(10.5, 400)).foreground(ui_dim()),
+            horizontal=0.0,
+          ),
+          height=26.0,
+          padding=0.0,
+        ),
       )
       index = index + 1
     }
   }
-  column(lines, spacing=4.0)
+  ui_card(children, width=992.0)
 }
 
 ///|
 fn tasks_page(model : Model) -> @moui.View[Msg] {
   let state = model.task
-  let lines : Array[@moui.View[Msg]] = [
+  let create : Array[@moui.View[Msg]] = [
+    ui_section("Create task"),
     row([
-      text("Tasks").title(),
-      spacer(weight=1.0),
-      button("Refresh", on_click=TasksRefresh),
-    ], spacing=8.0),
-    text(
-      "Create a ready task, then dispatch command runs to local or SSH machines. Runs pass through verifying: every verify[] command must pass or be explicitly waived.",
-      wrap=true,
-    ).caption(),
-    row([
-      text_field(
+      ui_field(
+        "Title",
         state.title,
-        on_input=fn(value) { TaskTitle(value) },
-        placeholder="task title (required)",
-        width=320.0,
+        fn(value) { TaskTitle(value) },
+        "task title (required)",
+        440.0,
       ),
-      text_field(
+      ui_field(
+        "Workspace id",
         state.workspace_id,
-        on_input=fn(value) { TaskWorkspace(value) },
-        placeholder="workspace id (blank = open Project)",
-        width=260.0,
+        fn(value) { TaskWorkspace(value) },
+        "blank = open Project",
+        340.0,
       ),
-      button("Create ready task", on_click=TaskCreateSubmit),
-    ], spacing=8.0),
+    ], spacing=12.0, align=@style.CrossAlign::End),
+    ui_field(
+      "Goal",
+      state.goal,
+      fn(value) { TaskGoal(value) },
+      "goal (optional)",
+      560.0,
+    ),
+    ui_text_area_field(
+      "Verify commands",
+      state.verify_text,
+      fn(value) { TaskVerify(value) },
+      "verify commands, one per line",
+      960.0,
+      3,
+    ),
     row([
-      text_field(
-        state.goal,
-        on_input=fn(value) { TaskGoal(value) },
-        placeholder="goal (optional)",
-        width=320.0,
-      ),
-      text_field(
-        state.verify_text,
-        on_input=fn(value) { TaskVerify(value) },
-        placeholder="verify commands, one per line",
-        width=420.0,
-      ),
-    ], spacing=8.0),
+      ui_primary("Create", TaskCreateSubmit),
+      spacer(weight=1.0),
+    ], spacing=8.0, align=@style.CrossAlign::Center),
   ]
   if state.message != "" {
-    lines.push(text(state.message).caption())
+    create.push(ui_muted_wrapped(state.message, 960.0))
   }
-  lines.push(text("Board").title())
+  let board : Array[@moui.View[Msg]] = [
+    row([
+      ui_section("Board"),
+      spacer(weight=1.0),
+      ui_meta(
+        state.tasks.length().to_string() +
+        (if state.tasks.length() == 1 { " task" } else { " tasks" }),
+      ),
+    ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
+  ]
   if state.tasks.is_empty() {
-    lines.push(text("No tasks yet.").caption())
+    board.push(ui_muted_wrapped("No tasks yet.", 960.0))
   } else {
     for record in state.tasks {
-      lines.push(task_row(model, record))
+      board.push(task_card(model, record))
     }
   }
   if state.selected_task != "" {
-    lines.push(text("Runs for " + state.selected_task).title())
+    let runs : Array[@moui.View[Msg]] = [
+      row([
+        ui_section("Runs for " + state.selected_task),
+        spacer(weight=1.0),
+        ui_meta(
+          state.runs.length().to_string() +
+          (if state.runs.length() == 1 { " run" } else { " runs" }),
+        ),
+      ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
+    ]
     if state.runs.is_empty() {
-      lines.push(text("(no runs yet)").caption())
+      runs.push(ui_muted_wrapped("(no runs yet)", 900.0))
     } else {
       for record in state.runs {
-        lines.push(run_row(model, record))
+        runs.push(run_row(model, record))
       }
     }
-    lines.push(
+    runs.push(
       row([
-        text_field(
+        ui_field(
+          "Command",
           state.command,
-          on_input=fn(value) { TaskCommand(value) },
-          placeholder="command to run in the worktree",
-          width=420.0,
+          fn(value) { TaskCommand(value) },
+          "command to run in the worktree",
+          520.0,
         ),
-        text_field(
+        ui_field(
+          "Machine id",
           state.machine_id,
-          on_input=fn(value) { TaskMachine(value) },
-          placeholder="machine id (blank = local)",
-          width=220.0,
+          fn(value) { TaskMachine(value) },
+          "blank = local",
+          220.0,
         ),
-        button("Dispatch run", on_click=RunDispatch),
-      ], spacing=8.0),
+        ui_primary("Dispatch run", RunDispatch),
+      ], spacing=12.0, align=@style.CrossAlign::End),
     )
+    board.push(ui_card(runs, width=992.0))
   }
-  lines.push(run_detail_view(model))
-  lines.push(activity_view(model))
-  column(lines, spacing=9.0)
+  column([
+    ui_card(create, width=992.0),
+    column(board, spacing=10.0),
+    run_detail_view(model),
+    activity_view(model),
+  ], spacing=16.0)
 }
 
 ///|
+// MARK: - Search
+
 fn search_page(model : Model) -> @moui.View[Msg] {
   let state = model.search
-  let lines : Array[@moui.View[Msg]] = [
+  let form : Array[@moui.View[Msg]] = [
+    ui_section("Search sessions"),
     row([
-      text("Search").title(),
-      spacer(weight=1.0),
-      text(
-        if state.backend == "" {
-          "FTS5 when available, LIKE otherwise"
-        } else {
-          "backend: " + state.backend
-        },
-      ).caption(),
-    ], spacing=8.0),
-    text(
-      "Search session transcripts and decision text recorded by the host.",
-      wrap=true,
-    ).caption(),
-    row([
-      text_field(
+      ui_field(
+        "Query",
         state.query,
-        on_input=fn(value) { SearchQuery(value) },
-        placeholder="e.g. verify failed, flaky test, waived",
-        width=480.0,
+        fn(value) { SearchQuery(value) },
+        "e.g. verify failed, flaky test, waived",
+        760.0,
       ),
-      button("Search", on_click=SearchSubmit),
-    ], spacing=8.0),
+      ui_primary("Search", SearchSubmit),
+    ], spacing=12.0, align=@style.CrossAlign::End),
+    ui_meta("Search session transcripts and decision text recorded by the host."),
+    ui_meta(
+      if state.backend == "" {
+        "FTS5 when available, LIKE otherwise"
+      } else {
+        "backend: " + state.backend
+      },
+    ),
   ]
   if state.message != "" {
-    lines.push(text(state.message).caption())
+    form.push(ui_muted_wrapped(state.message, 960.0))
   }
+  let results : Array[@moui.View[Msg]] = []
   if state.hits.is_empty() {
-    lines.push(text("(no hits)").caption())
+    results.push(
+      ui_card([
+        ui_muted_wrapped(
+          "No hits yet. Search matches session transcripts and decision text.",
+          960.0,
+        ),
+      ], width=992.0),
+    )
   } else {
     for hit in state.hits {
-      lines.push(
-        card(
-          column([
-            row([
-              auto_tag(hit.kind),
-              text(hit.title).title(),
-              spacer(weight=1.0),
-              text(hit.ref_id).caption(),
-            ], spacing=8.0),
-            text(hit.snippet).mono(),
-            text(hit.ts).caption(),
-          ], spacing=4.0),
-          padding=8.0,
-        ),
+      results.push(
+        ui_card([
+          row([
+            ui_tag(hit.kind),
+            text(hit.title, width=700.0, align=@core.TextAlign::TextStart, wrap=true)
+            .font(ui_font(14.0, 600)).foreground(ui_text_color()),
+            spacer(weight=1.0),
+            ui_mono(hit.ref_id, 10.5),
+          ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
+          ui_code_block(hit.snippet, 960.0),
+          ui_meta(hit.ts),
+        ], width=992.0),
       )
     }
   }
-  column(lines, spacing=8.0)
+  column([
+    ui_card(form, width=992.0),
+    column(results, spacing=10.0),
+  ], spacing=16.0)
 }
 
 ///|
-/// M7 Settings: where the shell points, whether the bearer token is present,
-/// the host version and the data directory. The token itself is never shown;
-/// it stays in `host.json` (0600) and the UI only reports its status.
+// MARK: - Settings
+
 fn settings_page(model : Model) -> @moui.View[Msg] {
   let host = model.host
-  let lines : Array[@moui.View[Msg]] = [
-    text("Settings").title(),
-    text("Connection").caption(),
-    text("state: " + host.link.label()),
-    text(
-      if host.ws_url == "" {
-        "host address: (waiting for host.json)"
+  let connection : Array[@moui.View[Msg]] = [
+    ui_section("Connection"),
+    ui_mono("state: " + host.link.label(), 11.0),
+    ui_mono(
+      "host address: " +
+      (if host.ws_url == "" {
+        "(waiting for host.json)"
       } else {
-        "host address: " + host.ws_url
-      },
-    ).mono(),
-    text("token: " + host.token_status).mono(),
-    text(
-      if host.version == "" {
-        "version: (not connected)"
-      } else {
-        "version: " + host.version
-      },
+        host.ws_url
+      }),
+      11.0,
     ),
-    text("data directory: " + host.state_dir).mono(),
-    text(
+    ui_mono("token: " + host.token_status, 11.0),
+    ui_mono(
+      "version: " + (if host.version == "" { "(not connected)" } else { host.version }),
+      11.0,
+    ),
+    ui_mono("data directory: " + host.state_dir, 11.0),
+    ui_mono(
       "host id: " +
       (if host.host_id == "" { "(not connected)" } else { host.host_id }),
-    ).caption(),
-    text(
-      "Start or reuse the host and open this window with `monexus`. " +
-      "Headless machines: `monexus start --headless`.",
-      wrap=true,
-    ).caption(),
+      11.0,
+    ),
   ]
   if host.last_error != "" {
-    lines.push(text("last error: " + host.last_error).caption())
+    connection.push(
+      text("last error: " + host.last_error, width=960.0, align=@core.TextAlign::TextStart, wrap=true)
+      .font(ui_font(11.0, 400))
+      .foreground(ui_danger()),
+    )
   }
-  column(lines, spacing=8.0)
+  let appearance : Array[@moui.View[Msg]] = [
+    ui_section("Appearance"),
+    row([
+      ui_segment("Light", Light, model.theme_mode),
+      ui_segment("Dark", Dark, model.theme_mode),
+      spacer(weight=1.0),
+    ], spacing=8.0, align=@style.CrossAlign::Center),
+    ui_meta("Applies immediately. Not persisted; MONEXUS_THEME picks the startup mode."),
+  ]
+  let local_host : Array[@moui.View[Msg]] = [
+    ui_section("Local host"),
+    ui_muted_wrapped(
+      "Start or reuse the host and open this window with `monexus`. Headless machines: `monexus start --headless`.",
+      960.0,
+    ),
+  ]
+  column([
+    ui_card(connection, width=992.0),
+    ui_card(appearance, width=992.0),
+    ui_card(local_host, width=992.0),
+  ], spacing=16.0)
 }
 
 ///|
 fn page_body(model : Model) -> @moui.View[Msg] {
   match model.page {
-    Home =>
-      column([
-        text("Welcome to MoNexus").title(),
-        text(
-          "A local-first desktop shell for machines, tasks and agent sessions.",
-        ),
-        host_summary(model.host),
-      ], spacing=10.0)
+    Home => home_page(model)
     Machines => machines_page(model)
-    Projects => project_page(model)
+    Projects => projects_page(model)
     Agents => agents_page(model)
     Inbox => inbox_page(model)
     Tasks => tasks_page(model)
@@ -1094,36 +1511,47 @@ fn page_body(model : Model) -> @moui.View[Msg] {
 }
 
 ///|
-pub fn view(model : Model) -> @moui.View[Msg] {
-  let nav : Array[@moui.View[Msg]] = []
-  for page in [Home, Machines, Projects, Agents, Inbox, Tasks, Search, Settings] {
-    nav.push(nav_button(page, model.page))
-  }
-  center(
-    card(
-      column([
-        row([
-          text("MoNexus").title(),
-          spacer(weight=1.0),
-          text("host " + model.host.link.label()),
-        ], spacing=16.0),
-        row(nav, spacing=8.0),
-        // Long pages (Tasks, Inbox, Agents) scroll inside a fixed viewport so
-        // content and action buttons are reachable instead of clipped. The
-        // scroll container measures its child under unbounded constraints, so
-        // pin the body width: rows with weighted spacers and wrapped text need
-        // a finite width to lay out (otherwise their right-hand actions are
-        // pushed off-screen).
-        scroll_view(
-          page_body(model).frame(width=1180.0),
-          width=1180.0,
-          height=600.0,
-          shows_indicator=true,
-        ),
-      ], spacing=16.0),
-      padding=20.0,
+fn main_island(model : Model) -> @moui.View[Msg] {
+  let body = scroll_view(
+    padding_edges(
+      page_body(model).frame(width=ui_body_width),
+      top=ui_body_padding,
+      right=ui_body_padding,
+      bottom=ui_body_padding,
+      left=ui_body_padding,
     ),
-    width=1280.0,
-    height=800.0,
+    width=ui_main_width,
+    height=ui_scroll_height,
+    request=@core.ScrollRequest::new(
+      id=model.scroll_epoch,
+      offset=@core.Point::new(x=0.0, y=0.0),
+    ),
+    shows_indicator=true,
   )
+  let content = column([
+    top_bar(model),
+    ui_divider(),
+    body,
+    ui_divider(),
+    status_bar(model),
+  ], spacing=0.0).frame(width=ui_main_width, height=ui_main_height)
+  ui_panel(content, width=ui_main_width, height=ui_main_height)
+}
+
+///|
+pub fn view(model : Model) -> @moui.View[Msg] {
+  // Repaint the whole window from the model's appearance before building any
+  // child, so the hand-painted shell and MoUI controls agree on one palette.
+  apply_theme_mode(model.theme_mode)
+  let shell = row([
+    sidebar(model),
+    main_island(model),
+  ], spacing=ui_gap, align=@style.CrossAlign::Start)
+  container(
+    shell,
+    width=ui_window_width,
+    height=ui_window_height,
+    background=ui_frame(),
+    padding=ui_margin,
+  ).theme(app_theme())
 }

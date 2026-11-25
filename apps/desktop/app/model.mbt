@@ -309,6 +309,13 @@ pub struct Model {
   inbox : InboxState
   task : TaskState
   search : SearchState
+  /// Appearance mode; starts from MONEXUS_THEME, flipped by the Settings page.
+  theme_mode : ThemeMode
+  /// Key of the nav/row currently hovered, for hover washes on hand-painted
+  /// rows (buttons carry their own hover styles).
+  hover_row : String
+  /// Bumped on every page switch so the body scroll view resets to the top.
+  scroll_epoch : Int32
 }
 
 ///|
@@ -388,6 +395,9 @@ pub fn Model::new() -> Model {
     inbox: InboxState::new(),
     task: TaskState::new(),
     search: SearchState::new(),
+    theme_mode: theme_mode_from_env(),
+    hover_row: "",
+    scroll_epoch: 0,
   }
 }
 
@@ -450,6 +460,10 @@ pub(all) struct HostStatusSnapshot {
 ///|
 pub(all) enum Msg {
   SelectPage(Page)
+  /// Appearance flip from the Settings segmented control; repaints only.
+  SetTheme(ThemeMode)
+  /// Hover bookkeeping for hand-painted nav/list rows.
+  HoverRow(String, Bool)
   LinkConnecting
   LinkOnline(HostStatusSnapshot)
   LinkOffline(String)
@@ -794,7 +808,12 @@ pub fn update_full(
   let none : Array[MachineCommand] = []
   match msg {
     SelectPage(page) => (
-      { ..model, page },
+      {
+        ..model,
+        page,
+        hover_row: "",
+        scroll_epoch: model.scroll_epoch + 1,
+      },
       match page {
         Agents => [AgentList]
         Inbox => [DecisionList("")]
@@ -802,6 +821,20 @@ pub fn update_full(
         Tasks => [TaskRefresh(model.task.event_seq)]
         _ => none
       },
+    )
+    SetTheme(mode) => ({ ..model, theme_mode: mode }, none)
+    HoverRow(key, hovered) => (
+      {
+        ..model,
+        hover_row: if hovered {
+          key
+        } else if model.hover_row == key {
+          ""
+        } else {
+          model.hover_row
+        },
+      },
+      none,
     )
     LinkConnecting => {
       let host = {
