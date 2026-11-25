@@ -120,14 +120,26 @@ owner 已批准远程 Agent 项目，但只先做 PoC，不直接建完整远程
   远端 mock（非 255 退出）→ `interrupted`/`interrupted`/
   `agent.session.interrupted`；正常 turn 后 EOF → `exited`。纯映射函数另有
   contracts 与 provider 单测。
-- **真实主机证据（Debian 13，非本仓库 CI 环境）**：远端 DSH 0.2.2-rc.5、
-  Node 24.22.3，命令 `@deepseek-ai/dsh/lib/bin.js --profile acp`，真实模型
-  `llm-local` / `DeepSeek-V4.1-Flash-1017-Local-02`；workspace 读写、
-  permission Decision、cancel 均通过。第 2 轮同时执行了 kill 本地 ssh
-  （`lost`）和 kill 远端 DSH（`interrupted`）两个故障用例，当时二者都错误
-  地落到 `exited`——这正是本轮修复的缺陷；修复后的映射由上述 mock smoke
-  覆盖，本环境没有 DSH，未在真实主机上复测，也不对 Ubuntu/macOS 作任何
-  声明。
+- **真实主机证据（Debian 13 x86_64，阿里云，非本仓库 CI 环境）**：远端 DSH
+  0.2.2-rc.5、Node 24.22.3，命令 `@deepseek-ai/dsh/lib/bin.js --profile
+  acp`，真实模型 `llm-local` / `DeepSeek-V4.1-Flash-1017-Local-02`；host 以
+  `MONEXUS_AGENT_SSH=1` 加隔离 state 目录启动。修复前已确认：workspace
+  读写、真实模型 turn（`end_turn`）、permission 请求进入 Decision 并被
+  allow 一次、`agent.stop` 以 `stopped`/`cancelled` 结束且远端进程消失；
+  当时两个故障用例都错误地落到 `exited`，这正是本轮修复的缺陷。修复后
+  复测：真实 DSH turn 带 in-flight `sleep 120` 工具时杀掉本地 ssh 客户端，
+  会话落到 `lost`/`lost`，`last_error` 为 "remote agent connection lost"，
+  事件 `agent.session.lost`，无假 `exited`，远端 `sleep 120`/DSH 随后
+  消失。直接 SIGKILL 远端 DSH 会让本地 ssh 退出 255，按 ADR-0011 记为
+  `lost`（ambiguous），不是 `interrupted`。真实非 255 路径用远端
+  test-only wrapper 在真实 DSH ACP 流上验证：wrapper 运行真实 DSH ACP
+  引擎，经 FIFO 转发 ACP stdin（使握手成立），观察 in-flight `sleep 120`
+  工具后 SIGKILL DSH，并在 prompt 仍 active 时以 3 退出；经 MoNexus 会话
+  `agt_01M897GMSX5WWPDSYF000000FE` 记录 `interrupted`/`interrupted`、
+  `last_error` "remote agent exited mid-turn"、恰好一个
+  `agent.session.interrupted` 事件、无假 `exited`。这是真实 DSH 流上的
+  合成非 255 远端退出（测试装置），不是真实 DSH 崩溃；wrapper 仅测试用、
+  未提交。不对 Ubuntu/macOS 作任何声明。
 
 ## 备选方案
 

@@ -209,14 +209,30 @@ Remote agent PoC (rounds 1–2, not full remote-agent support):
   `lost`/`lost`/`agent.session.lost`, killing the remote mock yields
   `interrupted`/`interrupted`/`agent.session.interrupted`, and a clean turn
   followed by EOF still yields `exited`.
-- Round-2 real-host evidence (Debian 13, remote DSH 0.2.2-rc.5, Node 24.22.3,
-  `@deepseek-ai/dsh/lib/bin.js --profile acp`, model `llm-local` /
-  `DeepSeek-V4.1-Flash-1017-Local-02`): workspace read/write, the permission
-  Decision, cancel, and both the kill-local-ssh (`lost`) and kill-remote-DSH
-  (`interrupted`) scenarios were exercised. The real run exposed this bug —
-  both cases settled as `exited`; this round fixes the mapping and the mock
-  smoke above covers it. The real host was not re-run after the fix, and no
-  Ubuntu/macOS claim is made.
+- Round-2 real-host evidence (Debian 13 x86_64, Aliyun; remote DSH 0.2.2-rc.5,
+  Node 24.22.3, `@deepseek-ai/dsh/lib/bin.js --profile acp`, model `llm-local`
+  / `DeepSeek-V4.1-Flash-1017-Local-02`; host started with
+  `MONEXUS_AGENT_SSH=1` and an isolated state dir): remote workspace
+  read/write, a real model turn (`end_turn`), a permission request entering a
+  Decision and allowed once, and `agent.stop` ending `stopped`/`cancelled`
+  with the remote process gone. The pre-fix run exposed this bug: both failure
+  cases settled as `exited`. Re-run after the fix, a real DSH turn with an
+  in-flight `sleep 120` tool killed by dropping the local `ssh` client settled
+  as `lost`/`lost` with `last_error` "remote agent connection lost", event
+  `agent.session.lost`, no false `exited`, and the remote `sleep 120`/DSH was
+  gone afterwards. SIGKILLing remote DSH directly makes the local `ssh` client
+  exit 255, so ADR-0011 records that as `lost` (ambiguous), not
+  `interrupted`. The real non-255 path was exercised on a real DSH ACP stream
+  with a test-only wrapper on the remote host that runs the real DSH ACP
+  engine, forwards ACP stdin through a FIFO (so the handshake works), watches
+  for the in-flight `sleep 120` tool, SIGKILLs DSH and exits 3 while the
+  prompt is still active; through MoNexus, session
+  `agt_01M897GMSX5WWPDSYF000000FE` recorded `interrupted`/`interrupted` with
+  `last_error` "remote agent exited mid-turn", exactly one
+  `agent.session.interrupted` event, and no false `exited`. That is a
+  synthetic non-255 remote exit on a real DSH stream (test harness), not a
+  real DSH crash; the wrapper is test-only and not committed. No Ubuntu/macOS
+  claim is made.
 - Still missing for real remote agents: `agent.probe` is local-only,
   `agent.resume` does not reconstruct an SSH launch, and `env` from
   `agent.start` is not forwarded over SSH.
