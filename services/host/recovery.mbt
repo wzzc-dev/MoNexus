@@ -480,6 +480,9 @@ async fn monitor_durable_run(
           @contracts.RUN_STATUS_RUNNING,
           summary="exit 0",
         )
+        // The marker is authoritative; drop the (possibly remain-on-exit)
+        // session so later runs cannot collide with this name.
+        provider.durable_stop(handle)
         return Completed("exit 0")
       }
       let detail = "command exited with code " +
@@ -491,6 +494,7 @@ async fn monitor_durable_run(
         stop_reason=@contracts.STOP_REASON_EXITED,
         error_text=detail,
       )
+      provider.durable_stop(handle)
       apply_stop_policy(
         state,
         run_id,
@@ -498,6 +502,31 @@ async fn monitor_durable_run(
         detail,
       )
       return Recovered("exited")
+    }
+    if poll.dead && poll.error == "" {
+      // The pane is dead but the wrapper never wrote the exit marker (the
+      // wrapper was killed, the disk was full, ...). tmux with
+      // remain-on-exit keeps `has-session` true forever, so without this
+      // check the run would stay `running` until the host timeout. The exit
+      // code is unknowable: treat it as lost and apply retry/Decision.
+      let detail = "tmux pane died without an exit marker (pane status " +
+        poll.dead_status.to_string() + ")"
+      let _ = transition_run(
+        state,
+        run_id,
+        @contracts.RUN_STATUS_LOST,
+        stop_reason=@contracts.STOP_REASON_LOST,
+        error_text=detail,
+      )
+      recovery_event(state, run_id, "run.lost", detail)
+      provider.durable_stop(handle)
+      apply_stop_policy(
+        state,
+        run_id,
+        @contracts.STOP_REASON_LOST,
+        "tmux session " + handle.session + ": " + detail,
+      )
+      return Recovered("lost")
     }
     if !poll.alive && poll.error == "" {
       // The session is gone and there is no exit marker: the exit code is
@@ -816,6 +845,7 @@ pub async fn reconcile_runs(state : HostState) -> Unit {
           "run_output",
           "text/plain",
         )
+        provider.durable_stop(handle)
         run_verification(state, run.id, cwd)
       } else {
         let detail = "command exited with code " + first.exit_code.to_string() +
@@ -827,6 +857,7 @@ pub async fn reconcile_runs(state : HostState) -> Unit {
           stop_reason=@contracts.STOP_REASON_EXITED,
           error_text=detail,
         )
+        provider.durable_stop(handle)
         apply_stop_policy(
           state,
           run.id,
@@ -834,6 +865,29 @@ pub async fn reconcile_runs(state : HostState) -> Unit {
           detail,
         )
       }
+      continue
+    }
+    if first.dead {
+      // remain-on-exit keeps the session listed after its pane died. If no
+      // exit marker was written the exit code is unknowable; never reattach
+      // and wait forever.
+      let detail = "tmux pane died while the host was down without an exit marker (pane status " +
+        first.dead_status.to_string() + ")"
+      let _ = transition_run(
+        state,
+        run.id,
+        @contracts.RUN_STATUS_LOST,
+        stop_reason=@contracts.STOP_REASON_LOST,
+        error_text=detail,
+      )
+      recovery_event(state, run.id, "run.lost", detail)
+      provider.durable_stop(handle)
+      apply_stop_policy(
+        state,
+        run.id,
+        @contracts.STOP_REASON_LOST,
+        "tmux session " + handle.session + ": " + detail,
+      )
       continue
     }
     if !first.alive {

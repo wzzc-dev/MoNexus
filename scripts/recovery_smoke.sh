@@ -20,6 +20,9 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/monexus-m6-smoke.XXXXXX")"
 mkdir -p "$WORK/home" "$WORK/tmux" "$WORK/fake" "$WORK/bin"
 export HOME="$WORK/home"
 export TMUX_TMPDIR="$WORK/tmux"
+# Match a user tmux configured to keep dead panes; scenario 5b asserts that a
+# dead pane without an exit marker is classified `lost`, never `running`.
+printf 'set -g remain-on-exit on\n' >"$HOME/.tmux.conf"
 export FAKE_SSH_DIR="$WORK/fake"
 printf 'ok\n' >"$FAKE_SSH_DIR/mode"
 export PATH="$WORK/bin:$ROOT/.moon/bin:$PATH"
@@ -207,6 +210,7 @@ else
   D1="$(rpc run.get "$(jq -n --arg id "$R1" '{run_id:$id}')")"
   eq 'run used a durable tmux session' 'tmux' "$(printf '%s' "$D1" | jq -r '.run.durable')"
   contains 'desktop run output is an artifact' 'desktop-exit-ok' "$(printf '%s' "$D1" | jq -r '.artifacts[].id' >/dev/null; rpc artifact.read "$(jq -n --arg id "$(printf '%s' "$D1" | jq -r '.artifacts[0].id')" '{artifact_id:$id}')")"
+  eq 'nested sh -c command wrote the exit marker' '0' "$(cat "$(printf '%s' "$D1" | jq -r '.run.exit_path')" 2>/dev/null)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -359,6 +363,45 @@ else
   rpc decision.respond "$(jq -n --arg id "$D5ID" '{decision_id:$id,option_id:"fail",text:"",answered_by:"owner"}')" >/dev/null
   DEC5B="$(rpc decision.list '{"status":"","session_id":""}')"
   eq 'owner fail moves the Decision to handled' 'handled' "$(printf '%s' "$DEC5B" | jq -r --arg id "$D5ID" '.decisions[] | select(.id==$id) | .inbox' | head -n1)"
+fi
+
+# ---------------------------------------------------------------------------
+printf '\n== 5b. remain-on-exit: dead pane without exit marker is lost, not running ==\n'
+# ---------------------------------------------------------------------------
+if [ "$TMUX_OK" != "1" ]; then
+  skip 'remain-on-exit dead pane (tmux missing)'
+else
+  # Make the isolated server keep dead panes, like a user tmux configured with
+  # `set -g remain-on-exit on`; the old bug was a Run stuck in `running`
+  # forever because has-session stayed true after the pane died.
+  tmux start-server 2>/dev/null || true
+  tmux set-option -g remain-on-exit on 2>/dev/null || true
+  eq 'tmux remain-on-exit is enabled for this scenario' 'on' \
+    "$(tmux show-options -g remain-on-exit 2>/dev/null | awk '{print $2}')"
+  T5B="$(new_task 'remain-on-exit dead pane')"
+  # The command kills the wrapper shell before it can write the exit marker.
+  # The pane then dies while tmux keeps the session listed.
+  R5B="$(rpc run.create "$(jq -n --arg tk "$T5B" --arg ws "$WS" \
+    '{task_id:$tk,workspace_id:$ws,mode:"command",command:"kill $PPID",idempotency_key:"m6/dead-pane"}')" | jq -r '.run.id')"
+  wait_run "$R5B" lost 120 && pass 'dead pane without an exit marker becomes lost' || fail 'dead pane becomes lost, not running forever' "$(run_status "$R5B")"
+  D5B="$(rpc run.get "$(jq -n --arg id "$R5B" '{run_id:$id}')")"
+  eq 'dead pane stop_reason is lost' 'lost' "$(printf '%s' "$D5B" | jq -r '.run.stop_reason')"
+  contains 'dead pane detail names the pane' 'pane' "$(printf '%s' "$D5B" | jq -r '.run.last_error')"
+  SESS5B="$(printf '%s' "$D5B" | jq -r '.run.tmux_session')"
+  wait_task_runs "$T5B" 2 100 && pass 'dead pane is retried exactly once' || fail 'dead pane retry created one attempt'
+  RETRY5B="$(rpc run.list "$(jq -n --arg tk "$T5B" '{task_id:$tk}')" | jq -r --arg id "$R5B" '.runs[] | select(.retried_from==$id) | .id' | head -n1)"
+  wait_run "$RETRY5B" lost 120 && pass 'retry also dies without a marker and stops' || fail 'retry dead pane becomes lost' "$(run_status "$RETRY5B")"
+  eq 'dead pane never exceeds two attempts' '2' "$(rpc run.list "$(jq -n --arg tk "$T5B" '{task_id:$tk}')" | jq -r '.runs | length')"
+  DEC5B="$(rpc decision.list '{"status":"","session_id":""}')"
+  D5BID="$(printf '%s' "$DEC5B" | jq -r --arg id "$RETRY5B" '.decisions[] | select(.run_id==$id and .kind=="recovery") | .id' | head -n1)"
+  [ -n "$D5BID" ] && pass 'dead pane raised a recovery Decision' || fail 'dead pane recovery Decision' "$DEC5B"
+  eq 'dead pane Decision sits in Needs you' 'needs_you' "$(printf '%s' "$DEC5B" | jq -r --arg id "$D5BID" '.decisions[] | select(.id==$id) | .inbox' | head -n1)"
+  if tmux has-session -t "$SESS5B" 2>/dev/null; then
+    fail 'dead pane session is torn down after settlement' "$SESS5B"
+  else
+    pass 'dead pane session is torn down after settlement'
+  fi
+  rpc decision.respond "$(jq -n --arg id "$D5BID" '{decision_id:$id,option_id:"fail",text:"",answered_by:"owner"}')" >/dev/null
 fi
 
 # ---------------------------------------------------------------------------

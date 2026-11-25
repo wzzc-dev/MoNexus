@@ -1492,10 +1492,15 @@ pub(all) struct DurableHandle {
 ///|
 /// One poll of a durable run. `alive` means the tmux session still exists;
 /// `exited` means the exit marker exists and `exit_code` is authoritative.
+/// `dead` means the session exists but its pane is dead (`remain-on-exit`):
+/// if no exit marker was written, the command's exit code is unknowable and
+/// the caller must treat the run as lost instead of polling forever.
 pub(all) struct DurablePoll {
   alive : Bool
   exited : Bool
   exit_code : Int
+  dead : Bool
+  dead_status : Int
   output : String
   error : String
 }
@@ -1512,7 +1517,17 @@ fn durable_poll_script(
   let q = @ssh.shell_quote
   [
     "if command -v tmux >/dev/null 2>&1; then",
-    "  if tmux has-session -t " + q(session) + " 2>/dev/null; then printf '__ALIVE__\\n'; fi",
+    "  if tmux has-session -t " + q(session) + " 2>/dev/null; then",
+    "    printf '__ALIVE__\\n'",
+    "    pane_dead=$(tmux list-panes -t " + q(session) + " -F '#{pane_dead}' 2>/dev/null | head -n 1)",
+    "    if [ \"$pane_dead\" = \"1\" ]; then",
+    "      pane_status=$(tmux display-message -p -t " + q(session) + " '#{pane_dead_status}' 2>/dev/null)",
+    "      if [ -z \"$pane_status\" ]; then pane_status=-1; fi",
+    "      printf '__DEAD__%s\\n' \"$pane_status\"",
+    "    elif [ -z \"$pane_dead\" ] && tmux capture-pane -p -t " + q(session) + " 2>/dev/null | grep -q 'Pane is dead'; then",
+    "      printf '__DEAD__-1\\n'",
+    "    fi",
+    "  fi",
     "fi",
     "if [ -f " + q(exit_path) + " ]; then",
     "  printf '__EXIT__%s\\n' \"$(cat " + q(exit_path) + ")\"",
@@ -1529,11 +1544,18 @@ fn parse_durable_poll(text : String) -> DurablePoll {
   let mut alive = false
   let mut exited = false
   let mut exit_code = -1
-  let mut output = ""
+  let mut dead = false
+  let mut dead_status = -1
   let mut in_log = false
+  // Lines after `__LOG__` are the raw log tail. Collecting and joining them
+  // (instead of appending "\n" per line) keeps an empty log empty and
+  // preserves a trailing newline only when the log really has one.
+  let log_lines : Array[String] = []
   for raw in text.split("\n") {
     let line = raw.to_owned()
-    if line == "__ALIVE__" {
+    if in_log {
+      log_lines.push(line)
+    } else if line == "__ALIVE__" {
       alive = true
     } else if line.has_prefix("__EXIT__") {
       exited = true
@@ -1541,13 +1563,18 @@ fn parse_durable_poll(text : String) -> DurablePoll {
         _ => -1
       }
       exit_code = code
+    } else if line.has_prefix("__DEAD__") {
+      dead = true
+      let code = @string.parse_int(line.substring(start=8).trim()) catch {
+        _ => -1
+      }
+      dead_status = code
     } else if line == "__LOG__" {
       in_log = true
-    } else if in_log {
-      output = output + line + "\n"
     }
   }
-  { alive, exited, exit_code, output, error: "" }
+  let output = log_lines.join("\n")
+  { alive, exited, exit_code, dead, dead_status, output, error: "" }
 }
 
 ///|
@@ -1579,11 +1606,18 @@ pub async fn WorkspaceProvider::durable_start(
       let exit_path = local_dir + "/run.exit"
       let script = [
         "mkdir -p " + q(local_dir),
-        "rm -f " + q(exit_path),
+        "rm -f " + q(exit_path) + " " + q(exit_path + ".tmp"),
         "if ! command -v tmux >/dev/null 2>&1; then printf '__MONEXUS_NO_TMUX__\\n'; exit 0; fi",
-        "tmux new-session -d -s " + q(session) + " -c " + q(cwd) +
-        " sh -c 'sh -c \"$1\" > \"$2\" 2>&1; printf \"%s\" \"$?\" > \"$3\"' monexus-run " +
-        q(command) + " " + q(log_path) + " " + q(exit_path),
+        // A crashed or cancelled previous run can leave a dead pane with the
+        // same deterministic name (remain-on-exit keeps it listed). Remove it
+        // before creating the session, otherwise new-session fails silently
+        // and this run never gets a fresh exit marker.
+        "tmux kill-session -t " + q(session) + " 2>/dev/null || true",
+        "if ! tmux new-session -d -s " + q(session) + " -c " + q(cwd) +
+        " sh -c 'sh -c \"$1\" > \"$2\" 2>&1; printf \"%s\" \"$?\" > \"$3.tmp\"; mv \"$3.tmp\" \"$3\"' monexus-run " +
+        q(command) + " " + q(log_path) + " " + q(exit_path) + "; then",
+        "  printf '__MONEXUS_TMUX_FAILED__\\n'; exit 3",
+        "fi",
         "printf '__MONEXUS_STARTED__\\n'",
       ].join("\n")
       (log_path, exit_path, script)
@@ -1595,11 +1629,14 @@ pub async fn WorkspaceProvider::durable_start(
         "dir=\"$HOME/.monexus/logs\"; mkdir -p \"$dir\"",
         "printf '__HOME__%s\\n' \"$HOME\"",
         "log=\"$dir/" + session + ".log\"; exitf=\"$dir/" + session + ".exit\"",
-        "rm -f \"$exitf\"",
+        "rm -f \"$exitf\" \"$exitf.tmp\"",
         "if ! command -v tmux >/dev/null 2>&1; then printf '__MONEXUS_NO_TMUX__\\n'; exit 0; fi",
-        "tmux new-session -d -s " + q(session) + " -c " + q(cwd) +
-        " sh -c 'sh -c \"$1\" > \"$2\" 2>&1; printf \"%s\" \"$?\" > \"$3\"' monexus-run " +
-        q(command) + " \"$log\" \"$exitf\"",
+        "tmux kill-session -t " + q(session) + " 2>/dev/null || true",
+        "if ! tmux new-session -d -s " + q(session) + " -c " + q(cwd) +
+        " sh -c 'sh -c \"$1\" > \"$2\" 2>&1; printf \"%s\" \"$?\" > \"$3.tmp\"; mv \"$3.tmp\" \"$3\"' monexus-run " +
+        q(command) + " \"$log\" \"$exitf\"; then",
+        "  printf '__MONEXUS_TMUX_FAILED__\\n'; exit 3",
+        "fi",
         "printf '__MONEXUS_STARTED__\\n'",
       ].join("\n")
       (log_path, exit_path, script)
@@ -1653,6 +1690,8 @@ pub async fn WorkspaceProvider::durable_poll(
       alive: false,
       exited: false,
       exit_code: -1,
+      dead: false,
+      dead_status: -1,
       output: "",
       error: "run is not durable (tmux unavailable)",
     }
@@ -1669,6 +1708,8 @@ pub async fn WorkspaceProvider::durable_poll(
         alive: false,
         exited: false,
         exit_code: -1,
+        dead: false,
+        dead_status: -1,
         output: "",
         error: error.to_string(),
       }
@@ -1678,6 +1719,8 @@ pub async fn WorkspaceProvider::durable_poll(
       alive: false,
       exited: false,
       exit_code: -1,
+      dead: false,
+      dead_status: -1,
       output: "",
       error: "transport unavailable: " + result.stderr,
     }
