@@ -9,3 +9,6 @@ node_modules/
 
 # Local logs
 *.log
+
+# Release packaging output
+/dist/

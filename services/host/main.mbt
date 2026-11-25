@@ -16,7 +16,7 @@ async fn main {
 async fn run_host_command(args : Array[String]) -> (Int32, String) {
   let command = if args.length() > 1 { args[1] } else { "version" }
   match command {
-    "version" => (0, host_version_line())
+    "version" | "--version" | "-V" => (0, host_version_line())
     "help" | "--help" | "-h" => (0, usage_text())
     "serve" => serve_command(args[2:].to_owned())
     "status" => status_command(args[2:].to_owned())
@@ -35,24 +35,24 @@ async fn run_host_command(args : Array[String]) -> (Int32, String) {
 }
 
 ///|
-const HOST_VERSION : String = "0.4.0-m4"
+const HOST_VERSION : String = @contracts.PRODUCT_VERSION
 
 ///|
 fn host_version_line() -> String {
-  "monexus-host " + HOST_VERSION + " (M4)"
+  @contracts.product_version_line("monexus-host")
 }
 
 ///|
 fn usage_text() -> String {
   [
     "usage:",
-    "  monexus-host version",
+    "  monexus-host version | --version",
     "  monexus-host serve [--state-dir DIR] [--heartbeat-ms N] [--port N]",
     "  monexus-host status [--state-dir DIR]",
     "  monexus-host subscribe [--state-dir DIR] [--since SEQ]",
     "      [--timeout-ms N] [--max-events N]",
-    "  monexus-host machine add [--state-dir DIR] --host HOST [--name NAME]",
-    "      [--port N] [--user USER] [--identity FILE]",
+    "  monexus-host machine add [--state-dir DIR] [--kind ssh|local] --host HOST",
+    "      [--name NAME] [--port N] [--user USER] [--identity FILE]",
     "      [--use-ssh-config true|false]",
     "      [--host-key-policy accept-new|yes|no|config]",
     "      [--known-hosts-file FILE]",
@@ -392,8 +392,8 @@ fn profile_lines(profile : @contracts.MachineProfile) -> Array[String] {
 fn machine_usage() -> String {
   [
     "usage:",
-    "  monexus-host machine add [--state-dir DIR] --host HOST [--name NAME]",
-    "      [--port N] [--user USER] [--identity FILE]",
+    "  monexus-host machine add [--state-dir DIR] [--kind ssh|local] --host HOST",
+    "      [--name NAME] [--port N] [--user USER] [--identity FILE]",
     "      [--use-ssh-config true|false] [--host-key-policy POLICY]",
     "      [--known-hosts-file FILE]",
     "  monexus-host machine list [--state-dir DIR]",
@@ -425,8 +425,16 @@ async fn machine_command(args : Array[String]) -> (Int32, String) {
 async fn machine_add_command(args : Array[String]) -> (Int32, String) {
   let (pairs, _) = parse_pairs(args)
   let state_dir = pair_last(pairs, "--state-dir", @client.default_state_dir())
-  let host = pair_last(pairs, "--host", "")
-  if host == "" {
+  let kind = pair_last(pairs, "--kind", @contracts.MACHINE_KIND_SSH)
+  if kind != @contracts.MACHINE_KIND_SSH && kind != @contracts.MACHINE_KIND_LOCAL {
+    return (2, "monexus-host: machine add --kind must be ssh or local\n" + machine_usage())
+  }
+  let host = if kind == @contracts.MACHINE_KIND_LOCAL {
+    "localhost"
+  } else {
+    pair_last(pairs, "--host", "")
+  }
+  if kind == @contracts.MACHINE_KIND_SSH && host == "" {
     return (2, "monexus-host: machine add needs --host\n" + machine_usage())
   }
   let client = match connect_client(state_dir) {
@@ -435,8 +443,13 @@ async fn machine_add_command(args : Array[String]) -> (Int32, String) {
   }
   let record = match client.call_machine_add(
     request_id("req"),
-    name=pair_last(pairs, "--name", host),
+    name=pair_last(pairs, "--name", if kind == @contracts.MACHINE_KIND_LOCAL {
+      "this machine"
+    } else {
+      host
+    }),
     host=host,
+    kind~,
     port=pair_int(pairs, "--port", 22),
     user=pair_last(pairs, "--user", ""),
     identity=pair_last(pairs, "--identity", ""),

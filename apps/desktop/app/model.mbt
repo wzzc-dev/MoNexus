@@ -64,6 +64,7 @@ pub(all) struct HostProjection {
   host_id : String
   version : String
   ws_url : String
+  token_status : String
   state_dir : String
   event_seq : Int64
   event_count : Int
@@ -78,6 +79,7 @@ pub fn HostProjection::new(state_dir : String) -> HostProjection {
     host_id: "",
     version: "",
     ws_url: "",
+    token_status: "unknown (host not connected)",
     state_dir,
     event_seq: 0L,
     event_count: 0,
@@ -323,8 +325,9 @@ pub fn Model::new() -> Model {
             ..host,
             link: Online,
             host_id: "host_scene",
-            version: "0.1.0-m1",
+            version: @contracts.PRODUCT_VERSION,
             ws_url: "ws://127.0.0.1:0/ws",
+            token_status: "present (host.json 0600, scene)",
             event_seq: 3L,
             event_count: 3,
             last_event: "host.heartbeat",
@@ -435,6 +438,8 @@ pub(all) struct HostStatusSnapshot {
   host_id : String
   version : String
   ws_url : String
+  token_status : String
+  state_dir : String
   event_seq : Int64
 }
 
@@ -758,6 +763,12 @@ pub fn update_full(
         host_id: snapshot.host_id,
         version: snapshot.version,
         ws_url: snapshot.ws_url,
+        token_status: snapshot.token_status,
+        state_dir: if snapshot.state_dir == "" {
+          model.host.state_dir
+        } else {
+          snapshot.state_dir
+        },
         event_seq: snapshot.event_seq,
         last_error: "",
       }

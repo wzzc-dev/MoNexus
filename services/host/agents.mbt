@@ -841,7 +841,7 @@ async fn agent_target_dir(
       Ok(value) => value
       Err(error) => return Err(error)
     }
-    if record.machine_id != "" {
+    if !machine_is_local(state, record.machine_id) {
       return Err(
         agent_unsupported(
           "agent sessions currently run only on local worktrees",
@@ -859,7 +859,7 @@ async fn agent_target_dir(
       Ok(value) => value
       Err(error) => return Err(error)
     }
-    if record.machine_id != "" {
+    if !machine_is_local(state, record.machine_id) {
       return Err(
         agent_unsupported(
           "agent sessions currently run only on local workspaces",

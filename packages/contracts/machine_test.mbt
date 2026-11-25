@@ -60,6 +60,40 @@ test "machine add params round-trip through validation and trimming" {
   assert_eq(spec.user, "tester")
   assert_eq(spec.use_ssh_config, false)
   assert_eq(spec.host_key_policy, MACHINE_HOST_KEY_POLICY_STRICT)
+  assert_eq(spec.kind, MACHINE_KIND_SSH)
+}
+
+///|
+test "machine add kind local needs no ssh target" {
+  let params = machine_add_params(
+    "req_local",
+    name="  ",
+    host="",
+    kind=MACHINE_KIND_LOCAL,
+  )
+  let spec = match parse_machine_add(params) {
+    Ok(value) => value
+    Err(message) => fail("unexpected validation error: " + message)
+  }
+  assert_eq(spec.kind, MACHINE_KIND_LOCAL)
+  assert_eq(spec.name, "this machine")
+  assert_eq(spec.host, "localhost")
+  assert_eq(spec.port, 0)
+  assert_eq(spec.use_ssh_config, false)
+}
+
+///|
+test "machine add rejects an unknown kind" {
+  let params = machine_add_params(
+    "req_bad_kind",
+    name="x",
+    host="h",
+    kind="container",
+  )
+  match parse_machine_add(params) {
+    Ok(_) => fail("unknown kind must be rejected")
+    Err(message) => assert_true(message.contains("invalid kind"))
+  }
 }
 
 ///|

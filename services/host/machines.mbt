@@ -8,6 +8,52 @@
 /// desktop can show Unauthorized/Timeout/NotFound instead of an ssh exit code.
 
 ///|
+/// Profile for the built-in local machine. It never touches SSH: the host
+/// probes its own OS/arch/toolchain through a POSIX shell and reports itself
+/// online, so "this machine" can sit in the same registry as SSH machines.
+async fn local_machine_profile() -> @ssh.MachineProfile {
+  let (os, arch, tools) = probe_local_capabilities()
+  let hostname = match @env.get_env_var("HOSTNAME") {
+    Some(value) if value != "" => value
+    _ =>
+      match @env.get_env_var("HOST") {
+        Some(value) if value != "" => value
+        _ => "localhost"
+      }
+  }
+  let shell = match @env.get_env_var("SHELL") {
+    Some(value) if value != "" => value
+    _ => "/bin/sh"
+  }
+  let has_gui = match @env.get_env_var("DISPLAY") {
+    Some(value) if value != "" => true
+    _ =>
+      match @env.get_env_var("WAYLAND_DISPLAY") {
+        Some(value) if value != "" => true
+        _ => false
+      }
+  }
+  {
+    os,
+    arch,
+    kernel: "",
+    hostname,
+    shell,
+    tools,
+    has_docker: false,
+    has_gui,
+    max_parallel: local_max_parallel(),
+    notes: "local machine (no ssh; host process)",
+    raw: "",
+  }
+}
+
+///|
+fn is_local_machine(record : @contracts.MachineRecord) -> Bool {
+  record.kind == @contracts.MACHINE_KIND_LOCAL
+}
+
+///|
 fn machine_target(record : @contracts.MachineRecord) -> @ssh.SshTarget {
   @ssh.SshTarget::new(
     host=record.host,
@@ -150,15 +196,26 @@ async fn handle_machine_add(
       return
     }
   }
+  let is_local = spec.kind == @contracts.MACHINE_KIND_LOCAL
   // `ssh -G` is local and fast; recording the effective values at add time
-  // makes the explicit target auditable even before the first probe.
-  let target = machine_target_of_spec(spec)
-  let (effective, effective_error) = resolve_effective_for(target)
+  // makes the explicit target auditable even before the first probe. The
+  // local machine has no SSH target, so it is probed in-process instead.
+  let (effective, effective_error) = if is_local {
+    (Map([]), "")
+  } else {
+    let target = machine_target_of_spec(spec)
+    resolve_effective_for(target)
+  }
+  let local_profile = if is_local {
+    Some(contract_profile(local_machine_profile()))
+  } else {
+    None
+  }
   let now = @async.now()
   let ts = @contracts.format_rfc3339(now)
   let record : @contracts.MachineRecord = {
     id: @contracts.new_id("mch", now),
-    kind: @contracts.MACHINE_KIND_SSH,
+    kind: spec.kind,
     name: spec.name,
     host: spec.host,
     port: spec.port,
@@ -167,8 +224,12 @@ async fn handle_machine_add(
     use_ssh_config: spec.use_ssh_config,
     host_key_policy: spec.host_key_policy,
     known_hosts_file: spec.known_hosts_file,
-    status: @contracts.MACHINE_STATUS_UNKNOWN,
-    profile: None,
+    status: if is_local {
+      @contracts.MACHINE_STATUS_ONLINE
+    } else {
+      @contracts.MACHINE_STATUS_UNKNOWN
+    },
+    profile: local_profile,
     ssh_effective: effective,
     ssh_effective_error: effective_error,
     last_seen: "",
@@ -431,9 +492,20 @@ async fn handle_machine_probe(
     }
   }
   state.mutex.release()
-  let target = machine_target(existing)
-  let (ssh_effective, ssh_effective_error) = resolve_effective_for(target)
-  let probed = @ssh.probe(target, timeout_seconds=timeout_seconds)
+  let is_local = is_local_machine(existing)
+  let (ssh_effective, ssh_effective_error) = if is_local {
+    (Map([]), "")
+  } else {
+    let target = machine_target(existing)
+    resolve_effective_for(target)
+  }
+  // The local machine is probed in-process; no ssh binary is involved.
+  let probed = if is_local {
+    Ok(local_machine_profile())
+  } else {
+    let target = machine_target(existing)
+    @ssh.probe(target, timeout_seconds=timeout_seconds)
+  }
   let ts = @contracts.format_rfc3339(@async.now())
   state.mutex.acquire()
   // Re-check: the machine may have been removed while ssh was running.

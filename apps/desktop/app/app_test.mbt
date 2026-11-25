@@ -34,7 +34,9 @@ test "all eight pages can be switched by tapping navigation" {
     ),
   )
   harness.tap_text("Settings")
-  assert_true(harness.has_text("Settings page"))
+  assert_true(harness.has_text("Connection"))
+  assert_true(harness.has_text("token: unknown (host not connected)"))
+  assert_true(harness.has_text("host address: (waiting for host.json)"))
   harness.tap_text("Home")
   assert_true(harness.has_text("Welcome to MoNexus"))
 }
@@ -48,6 +50,8 @@ test "host status and events are reflected in the model" {
       host_id: "host_test",
       version: "0.1.0-m1",
       ws_url: "ws://127.0.0.1:1234/ws",
+      token_status: "present (host.json, never displayed)",
+      state_dir: "/tmp/monexus-test",
       event_seq: 7L,
     }),
   )
@@ -71,6 +75,8 @@ test "page selection is stable across link updates" {
       host_id: "host_test",
       version: "0.1.0-m1",
       ws_url: "ws://127.0.0.1:1234/ws",
+      token_status: "present (host.json, never displayed)",
+      state_dir: "/tmp/monexus-test",
       event_seq: 0L,
     }),
   )
