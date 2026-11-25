@@ -1,0 +1,19 @@
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "moonbitlang/core/encoding/utf8" @utf8,
+  "moonbitlang/core/random",
+  "moonbit-community/pty" @pty,
+}
+
+import {
+  "moonbitlang/async/fs",
+  "moonbitlang/async/process",
+  "moonbitlang/core/env",
+} for "test"
+
+supported_targets = "native"
+
+options(
+  "native-stub": [ "kill.c" ],
+)
