@@ -19,6 +19,7 @@ Secrets are redacted before logs, artifacts, events and audit records.
 - Failures: [`docs/troubleshooting.md`](docs/troubleshooting.md).
 - M7 verification and the architecture §14 mapping: [`docs/m7.md`](docs/m7.md).
 - Design: [`docs/architecture.md`](docs/architecture.md), [`docs/adr/`](docs/adr/).
+- Desktop visual system: [`docs/design-ui.md`](docs/design-ui.md).
 
 ## Install
 
