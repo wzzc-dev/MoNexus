@@ -1,367 +1,449 @@
-# MoNexus
+# MoNexus V0.1
 
-MoNexus is a local-first desktop shell for machines, tasks and agent
-sessions. This worktree contains the **M6 vertical slice**: the M5 host and
-MoUI shell extended with crash/SSH recovery for in-flight Runs, durable tmux
-execution, stop reasons (`exited`/`lost`/`unverifiable`) with a retry-once
-policy, a unified Decision queue for approvals/permissions/waivers/recovery,
-a three-section Inbox (Needs you / waiting / handled), and an audit trail for
-policy verdicts, Decision answers and recovery actions. Secrets are redacted
-before logs, artifacts and events. The host keeps machine,
-workspace/worktree/lease, agent-session, decision, artifact, project, task,
-run, evidence and audit records plus the append-only event log in SQLite.
+MoNexus is a local-first desktop workbench for machines, workspaces, tasks and
+agent sessions. One `monexus` command starts (or reuses) a `monexus-host`
+single-instance process and opens the MoUI desktop window. The host keeps the
+authoritative state — machines, workspaces/worktrees, agent sessions,
+decisions, projects/tasks/runs/evidence, artifacts and the append-only event
+log — in SQLite under `~/.monexus`, and serves it over authenticated
+WebSocket JSON-RPC on loopback.
 
-Packaging (M7) is intentionally **not** implemented here.
+V0.1 is the M1–M7 vertical slice. Its recovery rule is **silence is not
+exit**: a Run settles only from an observed exit code or a verified result.
+Anything the host cannot observe becomes `unverifiable` and asks the owner
+through the Inbox — it is never silently retried or marked successful.
+Secrets are redacted before logs, artifacts, events and audit records.
+
+- Start here: [Quick start](#quick-start), [Acceptance](#acceptance).
+- Day-to-day use: [`docs/usage.md`](docs/usage.md).
+- Failures: [`docs/troubleshooting.md`](docs/troubleshooting.md).
+- M7 verification and the architecture §14 mapping: [`docs/m7.md`](docs/m7.md).
+- Design: [`docs/architecture.md`](docs/architecture.md), [`docs/adr/`](docs/adr/).
+
+## Install
+
+Two supported ways to get a runnable V0.1: install the packaged tarball, or
+build from this worktree.
+
+### Packaged tarball (no MoonBit toolchain needed)
+
+The release artifact is `dist/monexus-0.1.0-linux-x86_64.tar.gz` plus its
+`.sha256` file. On a Linux x86_64 machine:
+
+```bash
+sha256sum -c monexus-0.1.0-linux-x86_64.tar.gz.sha256
+tar -xzf monexus-0.1.0-linux-x86_64.tar.gz
+./monexus-0.1.0-linux-x86_64/bin/monexus version
+```
+
+Install layout:
+
+```
+monexus-0.1.0-linux-x86_64/
+  bin/monexus             launcher (single entry point)
+  bin/monexus-host        host executable
+  bin/monexus-desktop     native desktop executable
+  share/monexus/VERSION
+  share/monexus/README.md
+  share/monexus/docs/     usage, troubleshooting, architecture, m7, ADRs
+  share/monexus/examples/workspace/{README.md,AGENTS.md}
+```
+
+Move the directory anywhere (for example `~/opt/monexus-0.1.0`) and add its
+`bin/` to `PATH`:
+
+```bash
+mv monexus-0.1.0-linux-x86_64 ~/opt/monexus-0.1.0
+export PATH="$HOME/opt/monexus-0.1.0/bin:$PATH"
+monexus version
+```
+
+Keep `bin/` and `share/` together: the launcher resolves its resources
+relative to its own path. Add the real `bin/` directory to `PATH` instead of
+symlinking a single file elsewhere.
+
+Runtime dependencies are deliberately small: glibc, a Vulkan runtime
+(`libvulkan.so.1`) and, for a window, Wayland or X11. `tmux` is optional but
+required for durable/crash-recoverable command Runs; `ssh` is only needed for
+SSH machines. Node.js is **not** needed to run the packaged binaries.
+
+### From source
+
+Prerequisites:
+
+- MoonBit toolchain with the native target (`~/.moon/bin` on `PATH`).
+- **Node.js on `PATH`** — the MoUI skia package runs a node prebuild step.
+- Linux: a Vulkan runtime (`libvulkan.so.1`). The desktop package links
+  through a repo-local `libvulkan.so` shim, so `libvulkan-dev` is not needed.
+- A display server (Wayland or X11) for the window; headless verification
+  works without one.
+
+```bash
+export PATH="$HOME/.moon/bin:$HOME/.nvm/versions/node/v26.13.0/bin:$PATH"
+moon build --target native --release
+moon test  --target native
+scripts/package.sh            # tarball + checksum in dist/
+```
+
+`scripts/package.sh` verifies that the repo `VERSION` file and
+`packages/contracts/version.mbt` agree (`0.1.0`), builds
+`--target native --release`, and stages the fixed products:
+
+```
+_build/native/release/build/monexus/host/host.exe
+_build/native/release/build/monexus/desktop/linux_skia/linux_skia.exe
+```
+
+It then writes `dist/monexus-<version>-<os>-<arch>.tar.gz` and
+`...tar.gz.sha256`. `--skip-build` reuses existing release binaries;
+`--out DIR` changes the output root.
+
+From the worktree the launcher picks the release binaries first, then the
+debug build, so this also works after a plain `moon build --target native`:
+
+```bash
+scripts/monexus.sh version   # or scripts/start.sh
+```
+
+## Quick start
+
+```bash
+monexus
+```
+
+This is `monexus start`: it checks for a live host, reuses it or starts
+`monexus-host serve` detached, waits for `host.json`, prints the loopback
+endpoint (never the token), then opens the desktop window. The host stays
+alive after the window closes (`keepAlive`), so reopening the window is fast
+and background Runs keep going. Single-instance protection comes from
+`host.status` plus the host's `host.lock` flock.
+
+On a machine without a display, the launcher exits with code 3 and a clear
+message instead of failing inside the window backend. Use:
+
+```bash
+monexus start --headless       # start/reuse the host, print endpoint, no window
+monexus status                 # host online/offline, ws_url, token presence
+monexus stop                   # stop a host started by this launcher
+monexus --help
+monexus version
+```
+
+Useful variants:
+
+```bash
+monexus start --state-dir /tmp/monexus-demo   # isolated state
+monexus start --no-keep-alive                 # stop the host when the window exits
+MONEXUS_STATE_DIR=/tmp/monexus-demo monexus   # same, via environment
+scripts/start.sh                              # equivalent to scripts/monexus.sh start
+```
+
+The desktop Settings page shows the connection state, host `ws_url`, token
+status (present/missing, never the token), product version, data directory,
+host id, launcher hint and last error.
+
+### First run
+
+The host creates `~/.monexus` (mode 0700) before serving:
+
+```
+~/.monexus/
+  host.json         {ws_url, token, host_id, pid, ...}, mode 0600, atomic rename
+  host.lock         single-instance flock
+  monexus.db        SQLite + WAL: projections, events, audit
+  agents/           per-agent homes
+  artifacts/        run/agent artifacts
+  logs/             host.log (launcher) and SSH run markers
+  examples/hello-workspace/   sample Workspace with README.md, AGENTS.md and a git repo
+```
+
+Existing files are never overwritten. The sample workspace is initialized
+with `git init` when `git` is available, so Projects/worktrees can be tried
+immediately. Restarting the host on the same state dir continues the event
+sequence and reconciles projections from the append-only log.
+
+## Register machines
+
+The desktop **Machines** page can add/probe/remove machines. The CLI uses the
+same RPC surface through `monexus host` (the host must be running):
+
+```bash
+# This machine: a host-side local provider, no SSH.
+monexus host machine add --kind local --name "this machine"
+
+# An SSH machine. Use explicit values for predictable unattended behavior.
+monexus host machine add --name box --host 10.0.0.5 --port 22 --user me \
+  --identity ~/.ssh/id_ed25519 --use-ssh-config false \
+  --host-key-policy accept-new --known-hosts-file ~/.monexus/known_hosts
+
+monexus host machine list
+monexus host machine probe --id mch_... --timeout-seconds 10
+monexus host machine remove --id mch_...
+```
+
+`--kind local` is an additive V0.1 contract extension: the record stores
+`kind=local`, uses the local workspace provider, and gets a local capability
+profile (OS, arch, shell, display, parallel limit) without running `ssh`.
+The default kind remains `ssh`, so existing SSH records are unchanged.
+`--use-ssh-config true` inherits `~/.ssh/config` and records the effective
+`ssh -G` values; explicit flags are the source of truth when it is false.
+Probe failures are classified as `Unauthorized`, `Timeout`, `NotFound`,
+`Unreachable`, `HostKeyRejected` or `RemoteError` with a readable reason.
+
+## Open a Workspace
+
+In the desktop: **Projects** → pick a machine (the local record or an SSH
+one), enter a root path, **Open project**. The page lists the directory,
+reads/writes files atomically via temp-file + rename, shows git status/diff,
+opens a terminal, and creates worktrees.
+
+From the CLI:
+
+```bash
+monexus host rpc --method workspace.open \
+  --params '{"target":"mch_...","root":"/home/me/project"}'
+
+monexus host rpc --method worktree.create \
+  --params '{"workspace_id":"wsp_...","branch":"m7-demo","path":"/tmp/wt-demo","base":""}'
+
+monexus host rpc --method worktree.list --params '{"workspace_id":"wsp_..."}'
+```
+
+`target` accepts a machine id; `"local"` or an empty target uses the local
+provider. The first-run sample is
+`~/.monexus/examples/hello-workspace`; open it with the local machine.
+
+## Start an Agent session
+
+Desktop: **Agents** → choose the workspace (or worktree), keep the default
+ACP adapter or provide a command, then **Start session**. The streamed
+transcript, state, follow-up prompts and stop/resume controls are on the same
+page. ACP permission requests are converted into Decisions and appear in the
+Inbox; nothing is auto-approved.
+
+CLI example with the test double (no account or network needed):
+
+```bash
+monexus host rpc --method agent.probe --params '{
+  "agent_id":"mock","mode":"acp","command":"node",
+  "args":["tests/agent/mock_acp_agent.mjs"],"env":{}}'
+
+monexus host rpc --method agent.start --params '{
+  "agent_id":"mock","mode":"acp","command":"node",
+  "args":["tests/agent/mock_acp_agent.mjs"],
+  "workspace_id":"wsp_...","prompt":"hello"}'
+
+monexus host rpc --method agent.read --params '{"session_id":"ags_...","cursor":0}'
+monexus host rpc --method agent.stop --params '{"session_id":"ags_..."}'
+```
+
+A real ACP session needs Node, network access for the first
+`npx -y @zed-industries/claude-code-acp@0.16.2` download, and a logged-in
+Claude Code account on the host machine. The host spawns the adapter with
+`env -u CLAUDECODE` and reuses the machine's login; it never reads or logs
+credentials. Without a login the readiness probe fails and the Inbox shows a
+readiness Decision. Agent sessions are local-workspace only in V0.1.
+
+## Tasks, evidence and approvals
+
+Desktop: **Tasks** → choose the open Project, create a task with a title and
+one `verify` command per line, then dispatch a command Run to a machine.
+Evidence must pass before a Run becomes `succeeded`; a failed verify parks
+the Run in `waiting_approval` and creates a Decision.
+
+CLI sketch:
+
+```bash
+monexus host rpc --method project.create --params '{
+  "name":"demo","verify":["sh -c \"test -f verify.txt\"","echo verify-ok"]}'
+
+monexus host rpc --method task.create --params '{
+  "title":"parallel local+ssh","project_id":"prj_...","workspace_id":"wsp_..."}'
+
+monexus host rpc --method run.create --params '{
+  "task_id":"tsk_...","workspace_id":"wsp_...","machine_id":"mch_...",
+  "mode":"command","command":"sh -c \"sleep 2; echo done\"",
+  "idempotency_key":"demo/1"}'
+
+monexus host rpc --method decision.list --params '{"status":"pending"}'
+monexus host rpc --method decision.respond \
+  --params '{"decision_id":"dec_...","option_id":"waive","text":"accepted"}'
+```
+
+Two Runs of one task may target different machines/workspaces and execute in
+parallel up to each machine's `max_parallel` (`MONEXUS_MAX_PARALLEL`, default
+4). A finished task rolls up as, for example, `2/2 runs succeeded`. Verify
+failure offers three Inbox answers:
+
+- `waive` — stamp the failed evidence as waived, then succeed;
+- `retry` — re-run the verify gate and ask again if it fails;
+- `fail` — settle the Run as failed.
+
+Command risk policy also runs before a Run exists. Read-only commands are
+allowed; destructive/high-risk commands such as `rm -rf build` become an
+approval Decision; root/system commands such as `sudo ...`, `mkfs`,
+`shutdown` or `systemctl` are denied and audited.
+
+## Failure recovery
+
+The three V0.1 recovery scenarios settle through the same policy:
+
+1. **Desktop exits / reconnects.** The host keeps running (`keepAlive`).
+   Reopening the window reconnects to the same `host.json`, replays state and
+   resumes the Inbox. Link transitions are visible on Settings; set
+   `MONEXUS_LINK_TRACE=1` to trace `link connecting/online/offline` on stdout.
+2. **Host restarts.** On startup the host reconciles projections and every
+   active Run. A durable tmux session is polled: an observed exit 0 continues
+   to the evidence gate (`run.reconcile.reconnect`), a non-zero exit fails,
+   a dead/missing pane becomes `lost`, and an unobservable transport becomes
+   `unverifiable` — never a silent success. `lost` retries once automatically;
+   `unverifiable` never auto-retries and immediately raises a recovery
+   Decision.
+3. **SSH disconnect / unreachable machine.** A short drop is tolerated.
+   Persistent transport failure marks the Run `lost`/`unverifiable` with an
+   explanation, tears down the durable session and raises a recovery Decision
+   (Retry / Fail / Waive) for the owner.
+
+Run **Inbox** is the single attention queue: **Needs you**, **waiting**
+(answered but work continues) and **handled**. Recovery Decisions show the
+Run status and stop reason. `monexus host rpc --method audit.list --params
+'{"limit":100}'` exposes policy verdicts, Decision answers and recovery
+actions; secrets and bearer tokens are absent from events, logs, artifacts
+and audit detail.
+
+## Acceptance
+
+`scripts/acceptance.sh` runs V0.1 end to end under a throwaway `HOME`:
+
+```bash
+scripts/acceptance.sh
+# or reuse repository binaries without packaging:
+ACCEPTANCE_SKIP_PACKAGE=1 scripts/acceptance.sh
+# also probe a real, logged-in ACP adapter once:
+M7_REAL_ACP=1 scripts/acceptance.sh
+```
+
+It builds packages the tarball, verifies its SHA-256, unpacks it, and drives
+the **installed** `bin/monexus` / `monexus-host` / `monexus-desktop` against
+`<temp>/.monexus`. External dependencies are substituted, not contacted:
+
+- SSH machines use a throwaway **loopback sshd** (random 127.0.0.1 port,
+  temporary host/client keys, temporary known-hosts file; the real `~/.ssh`
+  is asserted untouched);
+- the unreachable-SSH scenario uses a fake `ssh` on `PATH` with an injectable
+  disconnect mode;
+- the desktop reconnect scenario runs the real window under `xvfb-run` when
+  no physical display exists.
+
+The script prints one `PASS`/`FAIL`/`SKIP` row per requirement (packaging plus
+items a–h) and a `SUMMARY checks=... failed=... result=...` line; it exits
+non-zero on any failure. The verified run and the per-item architecture §14
+mapping are in [`docs/m7.md`](docs/m7.md). The M1–M6 regression smokes remain
+available:
+
+```bash
+scripts/host_smoke.sh       # M1 host
+scripts/machine_smoke.sh    # M2 machines, temp sshd
+scripts/workspace_smoke.sh  # M3 workspace/worktree/lease/terminal, temp sshd
+scripts/agent_smoke.sh      # M4 ACP session/permission/memory, mock adapter
+scripts/task_smoke.sh       # M5 tasks/runs/evidence/search, temp sshd
+scripts/recovery_smoke.sh   # M6 recovery matrix, fake ssh faults
+```
 
 ## Layout
 
 ```
 moon.work                     workspace manifest
-packages/contracts/           JSON-RPC, event envelope, discovery, machine/agent/task contracts
-packages/machines/            SQLite store (machines, workspaces, agents, decisions, artifacts, tasks, runs, evidence) + replay
-packages/providers/           SSH/PTY, local-or-SSH workspace provider, ACP agent provider
+VERSION                       product version (0.1.0)
+packages/contracts/           JSON-RPC, discovery, machine/agent/task/version contracts
+packages/machines/            SQLite store + projections/replay
+packages/providers/           SSH/PTY, local-or-SSH workspace, ACP agent, policy
 packages/host-client/         host.json discovery + WebSocket JSON-RPC client
-services/host/                monexus-host executable (serve/status/subscribe/machine/rpc) + agent/task handlers
-apps/desktop/app/             MoUI model/update/view, host-link + machine + agent stream workers, tests
+services/host/                monexus-host executable + handlers + recovery
+apps/desktop/app/             MoUI model/update/view, host-link/workers, tests
 apps/desktop/linux_skia/      Linux native entry + Vulkan linker shim
-scripts/host_smoke.sh         end-to-end host smoke test (M1 regression)
-scripts/machine_smoke.sh      machine registry + SSH probe smoke test (temp sshd/fake ssh)
-scripts/workspace_smoke.sh    M3 workspace/worktree/lease/terminal smoke (temp sshd)
-scripts/agent_smoke.sh        M4 ACP session/permission/memory smoke (mock adapter)
-scripts/task_smoke.sh         M5 Task/Run scheduling, evidence gate, events/search smoke (temp sshd)
-scripts/recovery_smoke.sh     M6 recovery matrix, stop reasons, Decision/Inbox loop, audit (fake ssh faults)
-tests/agent/                  mock ACP + stdout test doubles (test-only, JS)
-docs/m1.md … docs/m6.md       design notes, verification and limitations
-spikes/m0/                    frozen M0 spike (see docs/spikes/m0.md)
+scripts/monexus.sh, start.sh  single-command launcher
+scripts/package.sh            release build, install layout, tar.gz + SHA-256
+scripts/acceptance.sh         fresh-HOME PASS/FAIL acceptance
+tests/agent/                  mock ACP/stdout test doubles (test-only, JS)
+docs/m1.md … docs/m7.md       milestone notes, verification and limitations
+docs/usage.md, troubleshooting.md
+docs/adr/                     architecture decisions
+spikes/m0/                    frozen M0 spike
 ```
 
-## Prerequisites
+## Protocol and data
 
-- MoonBit toolchain with native target (`~/.moon/bin` on `PATH`).
-- **Node.js on `PATH`** — the MoUI skia package runs a node prebuild step.
-- Linux: a Vulkan runtime (`libvulkan.so.1`). The desktop package adds a tiny
-  repo-local linker script named `libvulkan.so` so linking works without
-  `libvulkan-dev`; it is used only through `-L`.
-- A display server (Wayland or X11) to open the native window. Headless
-  machines can still build, test and render screenshots.
-- For **real** agent sessions: a logged-in Claude Code account on the host
-  machine, and network access for the first
-  `npx -y @zed-industries/claude-code-acp@0.16.2` download. The host spawns
-  the adapter via `env -u CLAUDECODE` and reuses the machine's existing
-  login; it never reads or logs credentials. Without a login the readiness
-  probe fails and a readiness Decision shows up in the desktop Inbox.
-
-```bash
-export PATH="$HOME/.moon/bin:$HOME/.nvm/versions/node/v26.13.0/bin:$PATH"
-```
-
-The Node path above is the one used during M1 verification; use whatever
-`node` your environment provides.
-
-## Build and test
-
-Run everything **from the repository root**. The desktop link flag
-`-Lapps/desktop/linux_skia/third_party/vulkan` is relative to this directory.
-
-```bash
-moon build --target native
-moon test  --target native
-```
-
-Expected: build succeeds and all tests pass (contracts, providers,
-host-client, machines, host, desktop app).
-
-If the Vulkan shim cannot be used in your environment, set
-`MOUI_SKIA_ENABLE_GPU_VULKAN=0` before building; that avoids linking against
-Vulkan at the cost of the GPU path.
-
-## Run the host
-
-```bash
-# Terminal 1: state dir defaults to $MONEXUS_STATE_DIR or $HOME/.monexus
-_build/native/debug/build/monexus/host/host.exe serve
-
-# Terminal 2 (same state dir)
-_build/native/debug/build/monexus/host/host.exe status
-_build/native/debug/build/monexus/host/host.exe subscribe --max-events 3
-```
-
-`serve` writes `host.json` atomically with mode `0600`, binds a random
-`127.0.0.1` port, rejects a second instance with the `host.lock` flock, and
-opens `<state_dir>/monexus.db`. Machine records and events are persisted
-there; after a restart the event sequence continues and `subscribe --since 0`
-replays the recent machine events.
-
-### Machine registry
-
-```bash
-HOST=_build/native/debug/build/monexus/host/host.exe
-
-# Explicit target; --use-ssh-config false pins to -F /dev/null.
-$HOST machine add --name box --host 127.0.0.1 --port 2222 \
-  --user me --identity /path/to/key --use-ssh-config false \
-  --host-key-policy accept-new --known-hosts-file /tmp/monexus_known_hosts
-
-$HOST machine list
-$HOST machine probe --id mch_... --timeout-seconds 10
-$HOST machine remove --id mch_...
-```
-
-`add` and `probe` record the effective `ssh -G` values (hostname/user/port/
-identityfile/...). When `--use-ssh-config` is on, values inherited from
-`~/.ssh/config` are reflected in the record; with it off the explicit record
-is the only source of truth. Probe failures come back as `Unauthorized`,
-`Timeout`, `NotFound`, `Unreachable`, `HostKeyRejected` or `RemoteError` with
-a readable reason and the first stderr line.
-
-Smoke tests:
-
-```bash
-scripts/host_smoke.sh       # M1 host regression
-scripts/machine_smoke.sh    # machine add/list/probe/remove, events, restart
-scripts/workspace_smoke.sh  # M3 open/read/write/diff/worktrees/leases/terminals
-scripts/agent_smoke.sh      # M4 ACP session → permission → Decision → memory artifact
-scripts/task_smoke.sh       # M5 tasks/runs/evidence gate/events/search
-scripts/recovery_smoke.sh   # M6 crash/SSH recovery matrix, Decisions, audit, secrets
-M4_REAL_ACP=1 scripts/agent_smoke.sh   # also probes the real claude-code-acp once
-```
-
-`agent_smoke.sh` runs entirely against a temp state dir/temp `HOME` with a
-JavaScript mock ACP agent under `tests/agent` (never on the product path).
-It proves probe readiness (ok + auth failure), AGENTS.md read-only,
-audited MEMORY.md writes, memory injection, streaming/send, the permission
-round trip through the Inbox, stop + memory diff artifact, resume via
-`session/load`, the stdout fallback, host-restart reconcile, and event
-replay. The opt-in real-adapter section reports `UNVERIFIED` (skipped)
-instead of failing when the machine is not logged in.
-
-`task_smoke.sh` uses a temp state dir, `MONEXUS_MAX_PARALLEL=1` and a
-throwaway loopback sshd. It proves the local happy path (inherited verify,
-subtask parent, idempotent dispatch, evidence/artifacts/diff/rollup), local
-queueing and cancellation, all three verify-decision options (waive/retry/
-fail), event cursor stability, `search.sessions`, local + SSH runs on one
-task in parallel, host-restart projection reads, and illegal transitions.
-See `docs/m5.md` for the schedule/evidence/event design and M5 limitations.
-
-`recovery_smoke.sh` uses a temp state dir, an isolated `TMUX_TMPDIR` with
-`remain-on-exit on`, and a fake `ssh` on `PATH` that executes remote commands
-locally and can be switched to `disconnect` via a mode file. It proves desktop
-exit, host `SIGKILL` reattach, missing-session `lost` + one retry,
-`remain-on-exit` dead panes without an exit marker → `lost` (never an
-infinite `running`), short SSH drops that do not fail a Run, remote silence →
-`unverifiable` + Decision (never auto-retried), duplicate dispatch/answer
-idempotency, retry exhaustion, policy deny/approval, audit field completeness
-and secret-free artifacts/audit. See `docs/m6.md`.
-
-`machine_smoke.sh` starts an ephemeral non-root sshd on a random loopback
-port and injects a fake `ssh` for error classification. Every `add` passes an
-explicit temporary known-hosts file; the script snapshots the real `~/.ssh`
-before and after and asserts it was not modified. It never contacts an
-external machine. `workspace_smoke.sh` uses the same sshd/temp-HOME pattern
-and additionally proves that two worktrees written in parallel stay isolated
-and that a second lease on the same target is refused.
-
-## Run the desktop shell
-
-```bash
-_build/native/debug/build/monexus/desktop/linux_skia/linux_skia.exe
-```
-
-Start the host first (or let the shell show `offline` and retry). The window
-shows eight switchable pages — Home, Machines, Projects, Agents, Inbox,
-Tasks, Search, Settings — and a live host status (`connecting` / `online` /
-`offline`) with an event counter and a 1.5 s reconnect backoff.
-
-The Machines page is functional: fill host/port/user/identity, choose whether
-to use `~/.ssh/config`, cycle the host-key policy, then Add. Cards show
-online/offline/degraded, the resolved target and profile summary, the last
-error, and Probe/Remove buttons. Machine commands use a separate short-lived
-connection (a queue worker beside the event subscription) so notifications
-are not dropped while a request is in flight; after a reconnect the page
-refreshes the machine list.
-
-The Projects page opens a local or SSH root by machine id, lists a directory,
-reads/writes a file atomically, shows git status and a file diff, sends
-commands to a local PTY or a remote `ssh -tt`+tmux terminal, and creates
-worktrees.
-
-The Agents page starts an ACP session against a local workspace/worktree,
-shows the streamed transcript and session state, sends follow-up prompts,
-stops the session and resumes it via `session/load` (when the adapter
-declares it). The Inbox page lists pending decisions: ACP permissions render
-one button per option and a free-text field, and readiness failures appear on
-the same channel. Transcripts are polled by cursor every 300 ms on a
-short-lived connection so the event subscription is never blocked.
-
-The Tasks page creates a `ready` task (workspace defaults to the open
-Project), dispatches command runs to local or an SSH machine id, and shows the
-selected task's runs with a Run detail: status, evidence (pass/waived/failed,
-exit code, excerpt), artifacts (readable), and the worktree diff. The
-Activity section is a cursor-fed tail of the host event stream; task/run/
-artifact/decision events refresh the board and the open run live, including a
-verify Decision answered from the Inbox. The Search page queries
-`search.sessions` and renders hits with kind, ref, snippet and the backend
-(`fts` or `like`).
-
-With no display server the native entry panics at window creation; this is a
-MoUI Linux backend limitation, not a MoNexus error. Use the headless
-verification below instead.
-
-## Headless verification (no display)
-
-App tests drive the real TEA runtime and tap navigation by text:
-
-```bash
-moon test --target native -p monexus/desktop/app
-```
-
-Offscreen screenshots of the shell (requires the `moui` CLI and the app
-package's `pub fn program()`):
-
-```bash
-cd apps/desktop
-LIBRARY_PATH="$PWD/linux_skia/third_party/vulkan" \
-  moui screenshot --app app --out /tmp/monexus-home.png --width 920 --height 560
-LIBRARY_PATH="$PWD/linux_skia/third_party/vulkan" MONEXUS_SCENE_PAGE=Machines \
-  moui screenshot --app app --out /tmp/monexus-machines.png
-LIBRARY_PATH="$PWD/linux_skia/third_party/vulkan" MONEXUS_SCENE_PAGE=Machines \
-  MONEXUS_SCENE_MACHINES=demo MONEXUS_SCENE_HOST=online \
-  moui screenshot --app app --out /tmp/monexus-machines-demo.png
-LIBRARY_PATH="$PWD/linux_skia/third_party/vulkan" MONEXUS_SCENE_HOST=online \
-  moui screenshot --app app --out /tmp/monexus-online.png
-LIBRARY_PATH="$PWD/linux_skia/third_party/vulkan" MONEXUS_SCENE_HOST=offline \
-  moui screenshot --app app --out /tmp/monexus-offline.png
-```
-
-(`moui screenshot` builds its own native render package and does not need a
-display. It also links `-lvulkan` without the package's `cc-link-flags`, so
-point `LIBRARY_PATH` at the repo-local shim directory as shown; the Vulkan
-runtime `libvulkan.so.1` must still be installed.)
-
-## Protocol (M5 + M6 audit)
-
-- Transport: WebSocket JSON-RPC 2.0 at `ws://127.0.0.1:<random>/ws`,
-  `Authorization: Bearer <token>` during the HTTP upgrade; wrong or missing
-  token returns `401`.
-- Requests: `host.status`, `events.subscribe`, `machine.add`, `machine.list`,
-  `machine.probe`, `machine.remove`, the `workspace.*`/`worktree.*`/
-  `lease.*`/`terminal.*` methods, `agent.probe/start/send/read/stop/list/
-  resume/memoryRead/memoryWrite`, `decision.list/respond`, the M5
-  `project.create/list`, `task.create/list/get/cancel`,
-  `run.create/list/get/cancel`, `artifact.read`, `events.list`,
-  `search.sessions` and M6 `audit.list`, and `rpc --method ... --params ...`
-  for shell-driven calls. `decision.list` accepts `bucket` and returns the
-  computed `inbox`/`run_status`; `decision.respond` routes approval and
-  recovery answers through the same queue as permissions and waivers. Every request must
-  carry a non-empty `params.client_request_id`; the host caches the response
-  and returns it again for a retry with the same key.
-- Notifications: `events.event` with `params.event` set to the ADR 0002 event
-  envelope. `host.heartbeat` is emitted every second (configurable with
-  `--heartbeat-ms`). Machine events are `machine.registered`,
-  `machine.connected`, `machine.probed`, `machine.disconnected` and the
-  `machine.removed` tombstone; each carries the full machine snapshot so the
-  desktop can upsert without another request. Agent events are
-  `agent.readiness.ok/failed`, `agent.session.started/updated/output/
-  stopped/exited/resumed`, `agent.artifact.created`, `agent.memory.updated`,
-  and the decision events `decision.requested/responded/expired`; they carry
-  the full session/decision/artifact record. M5 adds `project.created`,
-  `task.created/assigned/status.changed/cancelled`,
-  `run.queued/started/progress/verifying/evidence/succeeded/failed/
-  cancelled/waiting_approval`, and `artifact.created` (with `run_id`); every
-  event carries the full Task/Run/Evidence projection.
-- Persistence: machine, workspace, worktree, lease, agent-session, decision,
-  artifact, project, task, run and evidence events live in SQLite
-  (`<state_dir>/monexus.db`, WAL) with their projections. `meta.last_seq`
-  keeps the event sequence monotonic across restarts, startup replays
-  machine/workspace/worktree/lease events to reconcile the projections and
-  closes agent sessions that were live when the previous host exited, and
-  now also rebuilds the task projections from events. The last 256 events
-  are cached in memory for `events.subscribe --since` replay; the desktop
-  uses `events.list --since <cursor>` for the Activity tail.
-- Errors: JSON-RPC codes `-32700`, `-32600`, `-32601`, `-32602`, `-32603`;
-  machine/workspace failures use the host error code with `data.kind` =
+- Transport: WebSocket JSON-RPC 2.0 at `ws://127.0.0.1:<random>/ws`;
+  `Authorization: Bearer <token>` during upgrade (missing/wrong token → 401).
+- Requests include `host.status`, `events.subscribe/list`, `machine.*`,
+  `workspace.*`, `worktree.*`, `lease.*`, `terminal.*`, `agent.*`,
+  `decision.*`, `project.*`, `task.*`, `run.*`, `artifact.read`,
+  `search.sessions`, `audit.list`, and the generic `rpc --method ...`.
+  Every request carries a non-empty `params.client_request_id`; the host
+  caches responses for retries with the same key.
+- Notifications: `events.event` (full projection in the ADR-0002 envelope),
+  plus a `host.heartbeat` every second (`--heartbeat-ms`). Machine, workspace,
+  agent, decision, task/run/evidence, artifact and audit events each carry
+  enough state for the desktop to upsert without another request.
+- Persistence: SQLite WAL at `<state_dir>/monexus.db`, with monotonic
+  `meta.last_seq`; startup replays machine/workspace/task projections and
+  reconciles agent sessions and active Runs. The in-memory event ring feeds
+  `events.subscribe --since`; older history is available through
+  `events.list --since`.
+- Errors: JSON-RPC `-32700/-32600/-32601/-32602/-32603`; provider kinds
   `unauthorized|timeout|not_found|unreachable|host_key|remote|invalid|
-  conflict|internal`, agent failures add `readiness|unsupported`, and a
-  message prefixed by a readable label (`Unauthorized: ...`).
+  conflict|internal` (plus `readiness|unsupported` for agents), with a
+  readable message prefix.
 
-## Known limitations (M1–M6)
+## Known limitations (V0.1)
 
-- Probing is **manual**: there is no background heartbeat/probe loop yet.
+- Packaging is verified for Linux x86_64 only. The launcher is a POSIX shell
+  script; there is no Windows build, installer, auto-update or code signing.
+- The window needs Wayland/X11. Headless machines use `--headless`, tests, or
+  `xvfb-run`; there is no built-in virtual display.
+- Building from source needs MoonBit + Node; the packaged binaries do not
+  need Node at runtime.
+- A real ACP session needs Node, a first-run npx download and a logged-in
+  account; agent sessions and their in-memory transcripts are local-only and
+  do not survive a host restart (session/decision/artifact records do).
+- Durable command Runs need `tmux` on the target. Without it the host uses a
+  synchronous fallback and such a Run is `unverifiable` after a host restart.
+- Probing is manual (Machines page/CLI); there is no background probe loop.
+  Heartbeats are host events, not per-machine liveness checks.
 - File listing is one directory level; reads are whole-file and diffs stop at
-  128 KiB. Large-file streaming and recursive walking are out of scope.
-- Desktop terminal output is polled after each send rather than streamed, and
-  no `workspace.changed` watcher exists for external edits.
-- The generic `rpc` CLI uses wire field names; typed machine commands remain
-  the only first-class CLI subcommands.
-- `events.subscribe --since` replays from the 256-event in-memory ring, which
-  is seeded from SQLite on startup. Older events are reachable through the
-  M5 `events.list --since` RPC (used by the desktop Activity tail), not
-  through the subscription itself.
+  128 KiB. No recursive walk or file watcher.
 - The response idempotency cache is in memory; a retry with the same
-  `client_request_id` after a host restart may execute again. The desktop
-  uses fresh ids per command.
-- OpenSSH resolves `~` in `ssh -G` via the passwd home, not `$HOME`; pass an
-  explicit `known_hosts_file`/identity path when the state must stay
-  independent of the user's `~/.ssh`.
-- The client allows **one request in flight** per connection; the desktop
-  therefore uses a separate command connection for machine RPCs.
-- `HostStatus.pid` / `HostInfo.pid` are `0`: MoonBit's async runtime exposes
-  no portable `getpid` in the pinned version.
-- On SIGINT/SIGTERM the process exits through async cancellation; the stale
-  `host.json` is tolerated and overwritten on the next start (the flock is
-  released by the OS).
-- MoUI Linux entry requires Node at build time and a display at run time; use
-  tests/screenshots on headless machines.
-- No web/wasm desktop target yet.
-- Agents run **local only**: `agent.start` rejects SSH-backed workspaces and
-  worktrees, so a remote project cannot host an agent session yet.
-- Finished agent transcripts are in-memory (bounded to 64 sessions). Session,
-  decision and artifact records persist, but the transcript text does not
-  survive a host restart.
-- Desktop agent output is polled through `agent.read` every 300 ms; the event
-  stream carries state changes, not transcript chunks.
-- The stdout fallback has no protocol handshake, no turn completion and no
-  readiness beyond an executable check.
-- Runs that were `verifying` when the host exited are marked `unverifiable`
-  and raise a Decision; the evidence gate is not re-entered because provider
-  side effects are not idempotent.
-- A recovered Run without a persisted `worktree_id` verifies in the workspace
-  root; a host-managed worktree created but not attached before the crash is
-  an accepted edge case.
-- Agent-mode Runs are not tmux-durable (local-only ACP); their failure path
-  records `execution_failed`, not the command stop reasons.
-- Command-mode Runs without tmux (`durable=direct`) are unverifiable after a
-  host restart by design.
-- tmux session names use the last 12 characters of the Run id; hosts sharing
-  one tmux server and reset id counters can collide, and the pre-start
-  cleanup would kill the same-named leftover (safe for our own crashes, not
-  for two live hosts on one server).
+  `client_request_id` after a host restart may execute again. The desktop uses
+  fresh ids per command.
+- One request in flight per connection; the desktop uses a separate command
+  connection for machine RPCs.
+- `HostStatus.pid` / `HostInfo.pid` are `0` because the pinned MoonBit runtime
+  exposes no portable `getpid`.
+- On SIGINT/SIGTERM a stale `host.json` is tolerated and overwritten on the
+  next start; the OS releases the flock.
+- Verify commands run serially per Run; a waiver applies to every failed
+  evidence row of that Run. Search may report the `like` backend instead of
+  FTS5 depending on the bundled SQLite.
+- `events.subscribe --since` replays only from the 256-event in-memory ring
+  (seeded from SQLite at startup); use `events.list --since` for older
+  history.
+- OpenSSH resolves `~` in `ssh -G` using the passwd home, not `$HOME`; pass
+  explicit identity/known-hosts paths when state must be isolated.
 - Owner-declared command text is stored verbatim (it is the program and the
-  retry source); credentials must come from the machine account, and
-  `agent_env` names that look secret are redacted.
-- Agent-mode Runs are local-only and use an internal Sink, so they do not
-  stream into the Agents page. Desktop dispatch is command-mode only.
-- `verify[]` commands run serially per run; a waiver applies to every failed
-  evidence row of the run (not a selected row) and stores only the Decision
-  answer as audit text.
-- Search indexes finished session transcripts and decisions; live
-  transcripts are not searchable until finalize. This environment's bundled
-  SQLite reports `backend: like`, not FTS5.
-- The desktop Tasks board refreshes whole lists on relevant events rather
-  than applying deltas, and the Activity tail keeps 200 events (renders 30).
-- Permission answers are manual through `decision.respond`; there is no
-  auto-approve or timeout-based policy.
-- The real adapter needs a logged-in account on the host machine. The host
-  spawns it with `env -u CLAUDECODE` and never reads or logs credentials;
-  when no login exists, readiness fails and the Inbox shows a readiness
-  Decision.
+  retry source), so credentials must come from the machine account. Agent env
+  names that look secret are redacted.
+- A recovered Run without a persisted `worktree_id` verifies in the workspace
+  root; a worktree created but not attached before a crash is an accepted
+  edge case.
+- tmux session names use the last 12 characters of the Run id; two live hosts
+  sharing one tmux server can collide.
+- No web/wasm desktop target yet.
 
 ## Licenses
 
-MoNexus code in this worktree is Apache-2.0. MoUI (`wzzc-dev/moui`) and
+MoNexus code is Apache-2.0. MoUI (`wzzc-dev/moui`) and
 `wzzc-dev/moui_skia_renderer` are Apache-2.0 dependencies fetched at build
-time; they are **not vendored**. The MoNexus shell uses their public TEA/View
-API; no MoUI example source was copied. M0 spike code and the refactored
-providers are MoNexus originals. SQLite is used through
-`moonbit-community/sqlite3` (which bundles SQLite 3.49.1, public domain) and
-is likewise fetched, not vendored.
+time; they are **not** vendored. SQLite is used through
+`moonbit-community/sqlite3` (bundling SQLite 3.49.1, public domain) and is
+likewise fetched, not vendored.

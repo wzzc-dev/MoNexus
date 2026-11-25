@@ -948,6 +948,47 @@ fn search_page(model : Model) -> @moui.View[Msg] {
 }
 
 ///|
+/// M7 Settings: where the shell points, whether the bearer token is present,
+/// the host version and the data directory. The token itself is never shown;
+/// it stays in `host.json` (0600) and the UI only reports its status.
+fn settings_page(model : Model) -> @moui.View[Msg] {
+  let host = model.host
+  let lines : Array[@moui.View[Msg]] = [
+    text("Settings").title(),
+    text("Connection").caption(),
+    text("state: " + host.link.label()),
+    text(
+      if host.ws_url == "" {
+        "host address: (waiting for host.json)"
+      } else {
+        "host address: " + host.ws_url
+      },
+    ).mono(),
+    text("token: " + host.token_status).mono(),
+    text(
+      if host.version == "" {
+        "version: (not connected)"
+      } else {
+        "version: " + host.version
+      },
+    ),
+    text("data directory: " + host.state_dir).mono(),
+    text(
+      "host id: " +
+      (if host.host_id == "" { "(not connected)" } else { host.host_id }),
+    ).caption(),
+    text(
+      "Start or reuse the host and open this window with `monexus`. " +
+      "Headless machines: `monexus start --headless`.",
+    ).caption(),
+  ]
+  if host.last_error != "" {
+    lines.push(text("last error: " + host.last_error).caption())
+  }
+  column(lines, spacing=8.0)
+}
+
+///|
 fn page_body(model : Model) -> @moui.View[Msg] {
   match model.page {
     Home =>
@@ -964,13 +1005,7 @@ fn page_body(model : Model) -> @moui.View[Msg] {
     Inbox => inbox_page(model)
     Tasks => tasks_page(model)
     Search => search_page(model)
-    Settings =>
-      column([
-        text("Settings").title(),
-        text("Settings page"),
-        text("state dir: " + model.host.state_dir).mono(),
-        text("Token and endpoint come from host.json (mode 0600).").caption(),
-      ], spacing=10.0)
+    Settings => settings_page(model)
   }
 }
 

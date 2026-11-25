@@ -7,6 +7,14 @@ fn request_id(prefix : String) -> String {
 }
 
 ///|
+fn trace_link(line : String) -> Unit {
+  match @env.get_env_var("MONEXUS_LINK_TRACE") {
+    Some(value) if value != "" && value != "0" => println(line)
+    _ => ()
+  }
+}
+
+///|
 fn dispatch(msg : Msg) -> Unit {
   match dispatch_cell.val {
     Some(dispatch) => dispatch(msg)
@@ -21,10 +29,12 @@ fn dispatch(msg : Msg) -> Unit {
 pub async fn host_link_loop(state_dir : String) -> Unit {
   for ;; {
     dispatch(LinkConnecting)
+    trace_link("link connecting")
     let info = match @client.read_host_info(state_dir) {
       Ok(value) => value
       Err(message) => {
         dispatch(LinkOffline("host.json: " + message))
+        trace_link("link offline host.json: " + message)
         @async.sleep(RECONNECT_DELAY_MS)
         continue
       }
@@ -33,6 +43,7 @@ pub async fn host_link_loop(state_dir : String) -> Unit {
       Ok(value) => value
       Err(message) => {
         dispatch(LinkOffline(message))
+        trace_link("link offline " + message)
         @async.sleep(RECONNECT_DELAY_MS)
         continue
       }
@@ -41,6 +52,7 @@ pub async fn host_link_loop(state_dir : String) -> Unit {
       Ok(value) => value
       Err(message) => {
         dispatch(LinkOffline(message))
+        trace_link("link offline " + message)
         client.close()
         @async.sleep(RECONNECT_DELAY_MS)
         continue
@@ -50,6 +62,7 @@ pub async fn host_link_loop(state_dir : String) -> Unit {
       Ok(_) => ()
       Err(message) => {
         dispatch(LinkOffline(message))
+        trace_link("link offline " + message)
         client.close()
         @async.sleep(RECONNECT_DELAY_MS)
         continue
@@ -60,9 +73,16 @@ pub async fn host_link_loop(state_dir : String) -> Unit {
         host_id: status.host_id,
         version: status.version,
         ws_url: info.ws_url,
+        token_status: if info.token == "" {
+          "missing"
+        } else {
+          "present (host.json, never displayed)"
+        },
+        state_dir: status.state_dir,
         event_seq: status.event_seq,
       }),
     )
+    trace_link("link online " + info.ws_url)
     // Reconnect implies the projection may have changed while the desktop was
     // away (or the host restarted); pull the machine list once.
     enqueue_machine_command(RefreshMachines)
@@ -94,6 +114,7 @@ pub async fn host_link_loop(state_dir : String) -> Unit {
         }
         Err(message) => {
           dispatch(LinkOffline(message))
+          trace_link("link offline " + message)
           connected = false
         }
       }

@@ -26,6 +26,92 @@ async fn remove_host_info(state : HostState) -> Unit {
 }
 
 ///|
+/// Run a helper command (git init in the example workspace) without turning a
+/// missing optional tool into a host failure.
+async fn run_quiet(argv : Array[String]) -> Unit {
+  let _ = @process.collect_output(argv[0], argv[1:]) catch { _ => return }
+  ()
+}
+
+///|
+/// Create the first-run layout under the state directory: `agents/`,
+/// `artifacts/`, `logs/`, and a tiny example workspace. Existing files are
+/// never overwritten, and a missing `git` only costs the repository init.
+async fn init_state_layout(state_dir : String) -> Result[Unit, String] {
+  for name in ["agents", "artifacts", "logs", "examples"] {
+    let path = state_dir + "/" + name
+    @fs.mkdir(path, permission=0o700, recursive=true, allow_exist=true) catch {
+      error =>
+        return Err("cannot create " + path + ": " + error.to_string())
+    }
+  }
+  let sample = state_dir + "/examples/hello-workspace"
+  @fs.mkdir(sample, permission=0o700, recursive=true, allow_exist=true) catch {
+    error =>
+      return Err("cannot create " + sample + ": " + error.to_string())
+  }
+  let readme_path = sample + "/README.md"
+  let readme = [
+    "# Hello Workspace",
+    "",
+    "This is the MoNexus example workspace created on first run.",
+    "",
+    "- Open it from Projects with the root path shown below.",
+    "- Create a worktree, start an agent session, or dispatch a task.",
+    "",
+    "Root: " + sample,
+    "",
+  ].join("\n")
+  if !(@fs.exists(readme_path) catch { _ => false }) {
+    @fs.write_file(
+      readme_path,
+      readme,
+      create_mode=@fs.CreateMode::CreateOrTruncate,
+      permission=0o600,
+    ) catch {
+      error => return Err("cannot write " + readme_path + ": " + error.to_string())
+    }
+  }
+  let agents_md = sample + "/AGENTS.md"
+  if !(@fs.exists(agents_md) catch { _ => false }) {
+    @fs.write_file(
+      agents_md,
+      [
+        "# AGENTS.md",
+        "",
+        "Project conventions for agents. MoNexus keeps this file read-only",
+        "for sessions; durable agent memory lives in AGENTS/<id>/MEMORY.md.",
+        "",
+      ].join("\n"),
+      create_mode=@fs.CreateMode::CreateOrTruncate,
+      permission=0o600,
+    ) catch {
+      error => return Err("cannot write " + agents_md + ": " + error.to_string())
+    }
+  }
+  // A git repository makes worktrees/diffs usable immediately. Best effort:
+  // git is optional for the host itself.
+  if !(@fs.exists(sample + "/.git") catch { _ => false }) {
+    ignore(
+      @async.with_timeout_opt(
+        10_000,
+        async fn() {
+          run_quiet(["git", "-C", sample, "init", "-q"])
+          run_quiet(["git", "-C", sample, "add", "README.md", "AGENTS.md"])
+          run_quiet([
+            "git", "-C", sample,
+            "-c", "user.email=monexus@localhost",
+            "-c", "user.name=MoNexus",
+            "commit", "-qm", "example workspace",
+          ])
+        },
+      ),
+    )
+  }
+  Ok(())
+}
+
+///|
 /// Run the M1 host until cancelled (SIGINT/SIGTERM). Returns an error before
 /// serving when the state directory cannot be prepared or another instance
 /// already holds the lock.
@@ -41,6 +127,10 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
         "cannot create state dir " + options.state_dir + ": " +
         error.to_string(),
       )
+  }
+  match init_state_layout(options.state_dir) {
+    Ok(_) => ()
+    Err(message) => return Err(message)
   }
   let lock_path = @contracts.host_lock_path(options.state_dir)
   let lock = @fs.open(

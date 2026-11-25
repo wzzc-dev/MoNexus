@@ -1,7 +1,52 @@
 ///|
+fn desktop_usage() -> String {
+  [
+    "usage: monexus-desktop [--version] [--help]",
+    "",
+    "Opens the MoNexus window and connects to the host described by",
+    "$MONEXUS_STATE_DIR/host.json (default $HOME/.monexus). Start or reuse a",
+    "host first:",
+    "  monexus start            # launcher: host + desktop",
+    "  monexus start --headless # no display: host only",
+    "",
+    "A display server is required for the window (Wayland or X11).",
+  ].join("\n")
+}
+
+///|
 /// Linux native entry. The host-link worker runs beside the MoUI window task;
 /// the task group cancels the worker when the window closes.
 async fn main {
+  let args = @env.args()
+  let command = if args.length() > 1 { args[1] } else { "" }
+  match command {
+    "--version" | "version" | "-V" => {
+      println(@contracts.product_version_line("monexus-desktop"))
+      return
+    }
+    "--help" | "-h" | "help" => {
+      println(desktop_usage())
+      return
+    }
+    _ => ()
+  }
+  let has_display = match @env.get_env_var("DISPLAY") {
+    Some(value) if value != "" => true
+    _ =>
+      match @env.get_env_var("WAYLAND_DISPLAY") {
+        Some(value) if value != "" => true
+        _ => false
+      }
+  }
+  if !has_display {
+    println(
+      "monexus-desktop: no display server found (DISPLAY and WAYLAND_DISPLAY are unset).\n" +
+      "Run `monexus start --headless` on this machine, or open the window under a\n" +
+      "display server (for example `xvfb-run -a monexus-desktop`).\n" +
+      "Build/test headless checks: moon test --target native -p monexus/desktop/app",
+    )
+    @env.exit(3)
+  }
   let runtime = @runtime.new_program_with_dimensions(
     program=@app.program(),
     width=920.0,

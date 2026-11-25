@@ -13,3 +13,4 @@
 | [0007](0007-ui-and-moui.md) | UI 与 MoUI 边界（vendor 流程） | Accepted |
 | [0008](0008-ssh-access.md) | SSH 接入与远端执行 | Accepted |
 | [0009](0009-ops-agent.md) | 机管 Agent（`ops`）作为 V0.1 种子角色 | Accepted |
+| [0010](0010-m7-launcher-packaging.md) | M7 启动器、打包、首次运行与验收 | Accepted |

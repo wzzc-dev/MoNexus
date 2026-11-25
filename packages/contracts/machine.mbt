@@ -39,6 +39,12 @@ pub const EVENT_MACHINE_REMOVED : String = "machine.removed"
 pub const MACHINE_KIND_SSH : String = "ssh"
 
 ///|
+/// The machine running the host itself. It has no SSH target; `workspace.open`
+/// with this id is the same local provider as an empty machine id, but the
+/// record makes "this machine" visible in the registry (V0.1 M7).
+pub const MACHINE_KIND_LOCAL : String = "local"
+
+///|
 pub const MACHINE_STATUS_UNKNOWN : String = "unknown"
 
 ///|
@@ -405,6 +411,7 @@ pub fn MachineRecord::is_reachable(self : MachineRecord) -> Bool {
 /// Parsed `machine.add` parameters. Validation happens before any database
 /// write; a host must not be able to smuggle ssh options.
 pub(all) struct MachineAddSpec {
+  kind : String
   name : String
   host : String
   port : Int
@@ -482,6 +489,32 @@ pub fn is_valid_host_key_policy(policy : String) -> Bool {
 pub fn parse_machine_add(
   params : Map[String, @json.Json],
 ) -> Result[MachineAddSpec, String] {
+  let kind = string_field_or(params, "kind", MACHINE_KIND_SSH)
+  if kind == MACHINE_KIND_LOCAL {
+    let name = match string_field(params, "name") {
+      Some(value) =>
+        if value.trim() == "" {
+          "this machine"
+        } else {
+          value.trim().to_owned()
+        }
+      None => "this machine"
+    }
+    return Ok({
+      kind,
+      name,
+      host: "localhost",
+      port: 0,
+      user: "",
+      identity: "",
+      use_ssh_config: false,
+      host_key_policy: MACHINE_HOST_KEY_POLICY_ACCEPT_NEW,
+      known_hosts_file: "",
+    })
+  }
+  if kind != MACHINE_KIND_SSH {
+    return Err("invalid kind: expected ssh or local")
+  }
   let host = match string_field(params, "host") {
     Some(value) => value.trim().to_owned()
     None => return Err("missing host")
@@ -517,6 +550,7 @@ pub fn parse_machine_add(
     None => ""
   }
   Ok({
+    kind,
     name: if name == "" { host } else { name },
     host,
     port,
@@ -533,6 +567,7 @@ pub fn machine_add_params(
   client_request_id : String,
   name~ : String,
   host~ : String,
+  kind~ : String = MACHINE_KIND_SSH,
   port~ : Int = 22,
   user~ : String = "",
   identity~ : String = "",
@@ -542,6 +577,7 @@ pub fn machine_add_params(
 ) -> Map[String, @json.Json] {
   let params : Map[String, @json.Json] = Map([
     ("client_request_id", json_string(client_request_id)),
+    ("kind", json_string(kind)),
     ("name", json_string(name)),
     ("host", json_string(host)),
     ("port", json_int(port)),

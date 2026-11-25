@@ -54,6 +54,22 @@ fn workspace_row_name(root : String) -> String {
 }
 
 ///|
+/// Whether a machine id names the host's own machine. Empty and a registered
+/// `local` record are equivalent for provider selection and agent locality.
+async fn machine_is_local(state : HostState, machine_id : String) -> Bool {
+  if machine_id == "" {
+    return true
+  }
+  state.mutex.acquire()
+  let is_local = match state.store.get_machine(machine_id) {
+    Ok(Some(record)) => record.kind == @contracts.MACHINE_KIND_LOCAL
+    _ => false
+  }
+  state.mutex.release()
+  is_local
+}
+
+///|
 /// Open a provider for `machine_id` (empty = local) and `root`. The machine
 /// lookup happens under the mutex; the network I/O does not.
 async fn open_provider(
@@ -80,6 +96,14 @@ async fn open_provider(
   let record = match machine {
     Some(value) => value
     None => return Err(workspace_not_found("machine not found"))
+  }
+  // A registered local machine uses the same in-process provider as the empty
+  // machine id; the record exists so "this machine" is visible and auditable.
+  if record.kind == @contracts.MACHINE_KIND_LOCAL {
+    return match @workspace.open_local(root) {
+      Ok(provider) => Ok(provider)
+      Err(error) => Err(workspace_error_of_provider(error))
+    }
   }
   match @workspace.open_ssh(machine_target(record), root) {
     Ok(provider) => Ok(provider)
