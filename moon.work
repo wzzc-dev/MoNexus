@@ -7,5 +7,6 @@ members = [
   "./packages/providers",
   "./packages/host-client",
   "./services/host",
+  "./services/runtime",
   "./apps/desktop",
 ]
