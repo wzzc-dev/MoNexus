@@ -94,58 +94,17 @@ pub async fn resolve_command(command : String) -> String? {
 }
 
 ///|
-/// The executable and argv the provider actually spawns. `env -u CLAUDECODE`
+/// The executable and argv a local spawn actually uses. `env -u CLAUDECODE`
 /// strips the variable the Claude Code adapter uses to detect a nested
-/// invocation; M0 found the real adapter refuses to run with it set.
+/// invocation; M0 found the real adapter refuses to run with it set. The
+/// launcher owns the remote variant; this entry point stays local-only for
+/// readiness probes and for callers that predate the ProcessLauncher split.
 pub async fn spawn_command(
   mode : String,
   command : String,
   args : Array[String],
 ) -> Result[(String, Array[String]), String] {
-  let configured = if command.trim() == "" {
-    if mode == @contracts.AGENT_MODE_ACP {
-      default_acp_command()
-    } else {
-      ""
-    }
-  } else {
-    command.trim().to_owned()
-  }
-  if configured == "" {
-    return Err("command is required for " + mode + " mode")
-  }
-  let resolved = match resolve_command(configured) {
-    Some(value) => value
-    None => return Err("executable not found: " + configured)
-  }
-  let effective_args = if command.trim() == "" &&
-    mode == @contracts.AGENT_MODE_ACP &&
-    args.is_empty() {
-    default_acp_args()
-  } else {
-    args
-  }
-  // Prefer an absolute env(1) so the wrapper works even from a GUI launch
-  // with a reduced PATH.
-  let has_usr_env = @fs.exists("/usr/bin/env") catch { _ => false }
-  let has_bin_env = @fs.exists("/bin/env") catch { _ => false }
-  let env_path = if has_usr_env {
-    Some("/usr/bin/env")
-  } else if has_bin_env {
-    Some("/bin/env")
-  } else {
-    None
-  }
-  match env_path {
-    Some(wrapper) => {
-      let argv : Array[String] = ["-u", "CLAUDECODE", resolved]
-      for arg in effective_args {
-        argv.push(arg)
-      }
-      Ok((wrapper, argv))
-    }
-    None => Ok((resolved, effective_args))
-  }
+  local_agent_argv(mode, command, args)
 }
 
 ///|
@@ -366,6 +325,23 @@ pub fn acp_permission_result(option_id : String) -> @json.Json {
 }
 
 ///|
+/// `session/cancel` is a client→agent notification (no id): it asks the
+/// adapter to abandon the current turn. Sending it before closing the process
+/// is what makes `agent.stop` a cooperative cancel rather than a silent kill.
+pub fn acp_cancel_params(session_id : String) -> @json.Json {
+  @contracts.json_object([("sessionId", @contracts.json_string(session_id))])
+}
+
+///|
+pub fn acp_cancel_notification(session_id : String) -> @json.Json {
+  @contracts.json_object([
+    ("jsonrpc", @contracts.json_string("2.0")),
+    ("method", @contracts.json_string("session/cancel")),
+    ("params", acp_cancel_params(session_id)),
+  ])
+}
+
+///|
 pub fn acp_cancelled_result() -> @json.Json {
   @contracts.json_object([
     ("outcome",
@@ -561,7 +537,7 @@ pub fn classify_readiness_failure(message : String) -> String {
 ///|
 async fn drain_stderr(
   reader : @process.ReadFromProcess,
-  on_line : (String) -> Unit,
+  on_line : async (String) -> Unit,
 ) -> Unit {
   defer reader.close()
   while true {
@@ -578,18 +554,32 @@ async fn drain_stderr(
 }
 
 ///|
-/// Spawn one agent process inside `group`. The caller keeps the task group
-/// alive for as long as the session should live; `no_wait=false` ties the
-/// process lifetime to that group.
+/// Spawn one agent process inside `group` through `launcher`. The caller keeps
+/// the task group alive for as long as the session should live; `no_wait=false`
+/// ties the process lifetime to that group.
+///
+/// The ACP code above this boundary sees the same `AgentProcess` either way:
+/// local launches exec the adapter directly; SSH launches a local `ssh -T`
+/// client whose stdin/stdout carry the protocol and whose stderr stays a
+/// separate pipe. Only a local launch receives `spec.env`: an SSH launch must
+/// let the remote machine use its own login/runtime, and the host never copies
+/// credentials to it.
 pub async fn[G] spawn_agent(
   group : @async.TaskGroup[G],
   spec : AgentSpec,
-  on_stderr : (String) -> Unit,
+  on_stderr : async (String) -> Unit,
+  launcher~ : ProcessLauncher = ProcessLauncher::Local,
 ) -> Result[AgentProcess, String] {
-  let (argv0, argv) = match spawn_command(spec.mode, spec.command, spec.args) {
+  let (argv0, argv, cwd) = match
+    launch_argv(launcher, spec.mode, spec.command, spec.args, spec.cwd) {
     Ok(value) => value
     Err(message) => return Err(message)
   }
+  let is_ssh = match launcher {
+    ProcessLauncher::Ssh(_) => true
+    ProcessLauncher::Local => false
+  }
+  let extra_env : Map[String, String] = if is_ssh { Map([]) } else { spec.env }
   let stdin_pair = @process.write_to_process() catch {
     _ => return Err("cannot create stdin pipe")
   }
@@ -602,13 +592,12 @@ pub async fn[G] spawn_agent(
     _ => return Err("cannot create stderr pipe")
   }
   let (stderr_reader, stderr_output) = stderr_pair
-  let cwd = spec.cwd.trim().to_owned()
   let process = if cwd == "" {
     @process.spawn(
       group,
       argv0,
       argv,
-      extra_env=spec.env,
+      extra_env=extra_env,
       inherit_env=true,
       stdin=stdin_input,
       stdout=stdout_output,
@@ -619,7 +608,7 @@ pub async fn[G] spawn_agent(
       group,
       argv0,
       argv,
-      extra_env=spec.env,
+      extra_env=extra_env,
       inherit_env=true,
       stdin=stdin_input,
       stdout=stdout_output,
@@ -688,7 +677,7 @@ async fn probe_handshake(
 async fn probe_acp(base : @contracts.AgentReadiness, spec : AgentSpec) -> @contracts.AgentReadiness {
   let timeout_ms = agent_timeout_ms()
   @async.with_task_group(async fn(group) {
-    let process = match spawn_agent(group, spec, _line => ()) {
+    let process = match spawn_agent(group, spec, async fn(_line) { () }) {
       Ok(value) => value
       Err(message) =>
         return readiness_failure(base, "SpawnFailed", "unknown", message)

@@ -243,7 +243,9 @@ A real ACP session needs Node, network access for the first
 Claude Code account on the host machine. The host spawns the adapter with
 `env -u CLAUDECODE` and reuses the machine's login; it never reads or logs
 credentials. Without a login the readiness probe fails and the Inbox shows a
-readiness Decision. Agent sessions are local-workspace only in V0.1.
+readiness Decision. Agent sessions are local-workspace only in V0.1; a gated
+round-1 PoC (`MONEXUS_AGENT_SSH=1`) can launch an SSH workspace's adapter over
+`ssh -T` — see `docs/usage.md` §4.
 
 ## Tasks, evidence and approvals
 
@@ -347,6 +349,7 @@ scripts/host_smoke.sh       # M1 host
 scripts/machine_smoke.sh    # M2 machines, temp sshd
 scripts/workspace_smoke.sh  # M3 workspace/worktree/lease/terminal, temp sshd
 scripts/agent_smoke.sh      # M4 ACP session/permission/memory, mock adapter
+scripts/agent_ssh_smoke.sh  # PoC: mock ACP over ssh -T, temp sshd + temp keys
 scripts/task_smoke.sh       # M5 tasks/runs/evidence/search, temp sshd
 scripts/recovery_smoke.sh   # M6 recovery matrix, fake ssh faults
 ```
