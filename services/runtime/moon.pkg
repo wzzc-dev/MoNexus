@@ -1,6 +1,8 @@
 import {
   "monexus/contracts",
+  "monexus/git-runtime" @git_runtime,
   "monexus/machines",
+  "monexus/pty-runtime" @pty_runtime,
   "moonbitlang/async",
   "moonbitlang/async/fs",
   "moonbitlang/async/io",

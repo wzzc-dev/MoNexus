@@ -20,6 +20,38 @@ pub const EVENT_EXEC_EXITED : String = "runtime.exec.exited"
 pub const EVENT_OUTBOX_ACK : String = "runtime.outbox.ack"
 
 ///|
+/// PTY lifecycle and output events. A PTY session uses its stable
+/// `session_id` as the outbox `run_id`, so its `run_seq` stream is
+/// independent of every exec run and every other session.
+pub const EVENT_PTY_OPENED : String = "runtime.pty.opened"
+
+///|
+pub const EVENT_PTY_OUTPUT : String = "runtime.pty.output"
+
+///|
+/// A transcript catch-up event. The ring evicted events the pump had not yet
+/// published; the payload references the transcript range that holds the
+/// redacted bytes. No output is invented and no seq is skipped.
+pub const EVENT_PTY_GAP : String = "runtime.pty.gap"
+
+///|
+pub const EVENT_PTY_EXITED : String = "runtime.pty.exited"
+
+///|
+/// Git operations are published under the fixed outbox `run_id` `git`, so
+/// every operation has a monotonic `run_seq` in one stream.
+pub const EVENT_GIT_RESULT : String = "runtime.git.result"
+
+///|
+pub const EVENT_GIT_ERRORED : String = "runtime.git.errored"
+
+///|
+pub const EVENT_GIT_WORKTREE_ADDED : String = "runtime.git.worktree_added"
+
+///|
+pub const EVENT_GIT_WORKTREE_REMOVED : String = "runtime.git.worktree_removed"
+
+///|
 /// One persisted outbox event, decoded from the shared event log.
 pub(all) struct StoredEvent {
   seq : Int64

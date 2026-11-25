@@ -4,7 +4,9 @@ The transport-agnostic half of ADR-0012: idempotent command execution, bounded
 output streaming, a crash-safe outbox and a rooted workspace API. It opens no
 sockets, holds no credentials and does not implement pairing, TLS, WSS or the
 remote RPC surface (A1.2). Everything lives in the `monexus/runtime` package
-(`services/runtime`, added to `moon.work`).
+(`services/runtime`, added to `moon.work`). PTY sessions and rooted git
+operations are integrated into the same executor and outbox; see
+`docs/runtime-pty-git.md` for their API, limits and event contract.
 
 ## Public API
 
@@ -93,7 +95,9 @@ the host database.
 
 ## Known gaps
 
-- No WSS/TLS/pairing, remote RPC, ACP, git, PTY or UI integration (A1.0/A1.2).
+- No WSS/TLS/pairing, remote RPC, ACP, host-level git/PTY wiring or UI
+  integration (A1.0/A1.2). Git and PTY are available at the runtime-core level
+  (`docs/runtime-pty-git.md`); transport wiring is A1.2b.
 - No log retention/GC; stream logs grow to the per-stream cap and stay.
 - Startup replay and `pending_events` are bounded by the store page size but
   the full replay itself is linear in the number of retained events.
