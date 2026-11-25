@@ -12,6 +12,10 @@ import {
 
 supported_targets = "native"
 
+options(
+  "native-stub": [ "openssl_error.c" ],
+)
+
 import {
   "monexus/contracts" @contracts,
   "moonbitlang/async" @async,

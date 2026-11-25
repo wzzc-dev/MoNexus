@@ -4,6 +4,26 @@
 /// No external network, no user credentials, no system trust store changes.
 
 ///|
+/// Test-only serialization and OpenSSL error-queue reset.
+///
+/// The test driver runs up to 10 async tests concurrently in one process and
+/// one event-loop thread, so every test in this package shares OpenSSL's
+/// thread-local error queue. `moonbitlang/async` drains only one queue entry
+/// per raised `TlsError`. The plaintext-client rejection test deliberately
+/// fails a handshake, which pushes more than one entry on OpenSSL 3.5; the
+/// leftover "record layer failure" entry then makes `SSL_get_error` report
+/// SSL_ERROR_SSL for a healthy connection's WANT_READ, and the pinned
+/// round-trip test fails spuriously.
+///
+/// Serialize the TLS tests and clear the queue before each one so a rejection
+/// test can never be observed by a success-path test. This changes test timing
+/// only; all pinning and failure-closed assertions below are unchanged.
+let tls_test_lock : @async.Mutex = @async.Mutex()
+
+///|
+extern "C" fn clear_openssl_errors() = "monexus_a1_clear_openssl_errors"
+
+///|
 async test "test PKI lives in a temp dir and is cleaned up" {
   let pki = generate_test_pki()
   assert_true(@fs.exists(pki.dir))
@@ -19,6 +39,9 @@ async test "test PKI lives in a temp dir and is cleaned up" {
 async test "pinned TLS loopback round-trips JSON-RPC frames" {
   let pki = generate_test_pki()
   defer pki.cleanup()
+  tls_test_lock.acquire()
+  defer tls_test_lock.release()
+  clear_openssl_errors()
   let server = tls_listen_localhost()
   defer server.close()
   let port = server.addr().port()
@@ -63,6 +86,9 @@ async test "pinned TLS loopback round-trips JSON-RPC frames" {
 async test "wrong certificate pin fails closed before any payload" {
   let pki = generate_test_pki()
   defer pki.cleanup()
+  tls_test_lock.acquire()
+  defer tls_test_lock.release()
+  clear_openssl_errors()
   let server = tls_listen_localhost()
   defer server.close()
   let port = server.addr().port()
@@ -88,6 +114,9 @@ async test "wrong certificate pin fails closed before any payload" {
 async test "unrelated CA cannot complete the TLS handshake" {
   let pki = generate_test_pki()
   defer pki.cleanup()
+  tls_test_lock.acquire()
+  defer tls_test_lock.release()
+  clear_openssl_errors()
   let server = tls_listen_localhost()
   defer server.close()
   let port = server.addr().port()
@@ -117,6 +146,9 @@ async test "unrelated CA cannot complete the TLS handshake" {
 async test "plaintext client is rejected and gets no JSON response" {
   let pki = generate_test_pki()
   defer pki.cleanup()
+  tls_test_lock.acquire()
+  defer tls_test_lock.release()
+  clear_openssl_errors()
   let server = tls_listen_localhost()
   defer server.close()
   let port = server.addr().port()
