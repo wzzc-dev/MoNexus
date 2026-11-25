@@ -1,5 +1,7 @@
 import {
   "wzzc-dev/moui/views",
+  "wzzc-dev/moui/views/style" @style,
+  "wzzc-dev/moui/core" @core,
   "wzzc-dev/moui",
   "monexus/contracts" @contracts,
   "monexus/host-client" @client,
