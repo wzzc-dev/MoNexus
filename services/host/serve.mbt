@@ -154,6 +154,9 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
       allow_failure=true,
       async fn() { heartbeat_loop(state) },
     )
+    // M6: settle or reattach every Run that survived a restart before any
+    // client can observe a stale `running` status.
+    reconcile_runs(state)
     server.run_forever(allow_failure=true, max_connections=64) <|
     ((request, _body, conn) => {
       handle_connection(state, request, conn)

@@ -24,7 +24,7 @@ test "all eight pages can be switched by tapping navigation" {
   assert_true(harness.has_text("Agents / Sessions"))
   assert_true(harness.has_text("Start session"))
   harness.tap_text("Inbox")
-  assert_true(harness.has_text("No pending decisions."))
+  assert_true(harness.has_text("No decisions yet."))
   harness.tap_text("Tasks")
   assert_true(harness.has_text("Board"))
   harness.tap_text("Search")
@@ -444,4 +444,65 @@ test "search submit trims the query and stores hits with the backend" {
   let loaded = update(searching, SearchLoaded(hits, "like"))
   assert_eq(loaded.search.hits.length(), 1)
   assert_eq(loaded.search.backend, "like")
+}
+
+///|
+test "inbox decisions flow from needs you to waiting and handled" {
+  let pending = @contracts.DecisionRecord::new(
+    id="dec_pending",
+    kind=@contracts.DECISION_KIND_APPROVAL,
+    title="Approve a high-risk command",
+    detail="rm -rf build",
+    session_id="",
+    agent_id="",
+    options=[
+      @contracts.DecisionOption::new(
+        option_id=@contracts.DECISION_OPTION_APPROVE,
+        name="Approve once",
+        kind="allow_once",
+      ),
+      @contracts.DecisionOption::new(
+        option_id=@contracts.DECISION_OPTION_DENY,
+        name="Deny",
+        kind="reject_once",
+      ),
+    ],
+    created_at="2026-01-01T00:00:00Z",
+    run_id="run_1",
+  )
+  assert_eq(inbox_bucket_of(pending), @contracts.INBOX_NEEDS_YOU)
+  // The host answers an approval: the Run returns to the queue, so the
+  // Decision moves to Waiting while work continues.
+  let waiting = {
+    ..pending,
+    status: @contracts.DECISION_STATUS_ANSWERED,
+    option_id: @contracts.DECISION_OPTION_APPROVE,
+    answered_by: "owner",
+    answered_at: "2026-01-01T00:01:00Z",
+    run_status: @contracts.RUN_STATUS_QUEUED,
+  }
+  assert_eq(inbox_bucket_of(waiting), @contracts.INBOX_WAITING)
+  let handled = {
+    ..waiting,
+    run_status: @contracts.RUN_STATUS_SUCCEEDED,
+  }
+  assert_eq(inbox_bucket_of(handled), @contracts.INBOX_HANDLED)
+  let recovery_retry = {
+    ..pending,
+    id: "dec_recovery",
+    kind: @contracts.DECISION_KIND_RECOVERY,
+    status: @contracts.DECISION_STATUS_ANSWERED,
+    option_id: @contracts.DECISION_OPTION_RETRY,
+    answered_by: "owner",
+    run_status: @contracts.RUN_STATUS_RUNNING,
+  }
+  assert_eq(inbox_bucket_of(recovery_retry), @contracts.INBOX_WAITING)
+  let model = update(
+    Model::new(),
+    InboxDecisions([pending, waiting, handled, recovery_retry]),
+  )
+  assert_eq(model.inbox.decisions.length(), 4)
+  assert_true(model.inbox.message.contains("needs you: 1"))
+  assert_true(model.inbox.message.contains("waiting: 2"))
+  assert_true(model.inbox.message.contains("handled: 1"))
 }

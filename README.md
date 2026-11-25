@@ -1,17 +1,17 @@
 # MoNexus
 
 MoNexus is a local-first desktop shell for machines, tasks and agent
-sessions. This worktree contains the **M5 vertical slice**: the M4 host and
-MoUI shell extended with Task/Run scheduling, per-machine `max_parallel`
-queueing, idempotent dispatch, a `verify[]` evidence gate backed by
-Artifacts and owner Decisions, cursor-based event refresh in the desktop
-Tasks board/Run detail/Activity stream, and `search.sessions` over session
-and decision text (FTS5 with a LIKE fallback). The host keeps machine,
+sessions. This worktree contains the **M6 vertical slice**: the M5 host and
+MoUI shell extended with crash/SSH recovery for in-flight Runs, durable tmux
+execution, stop reasons (`exited`/`lost`/`unverifiable`) with a retry-once
+policy, a unified Decision queue for approvals/permissions/waivers/recovery,
+a three-section Inbox (Needs you / waiting / handled), and an audit trail for
+policy verdicts, Decision answers and recovery actions. Secrets are redacted
+before logs, artifacts and events. The host keeps machine,
 workspace/worktree/lease, agent-session, decision, artifact, project, task,
-run and evidence records plus the append-only event log in SQLite.
+run, evidence and audit records plus the append-only event log in SQLite.
 
-Crash recovery for in-flight runs (M6) and packaging (M7) are intentionally
-**not** implemented here.
+Packaging (M7) is intentionally **not** implemented here.
 
 ## Layout
 
@@ -29,8 +29,9 @@ scripts/machine_smoke.sh      machine registry + SSH probe smoke test (temp sshd
 scripts/workspace_smoke.sh    M3 workspace/worktree/lease/terminal smoke (temp sshd)
 scripts/agent_smoke.sh        M4 ACP session/permission/memory smoke (mock adapter)
 scripts/task_smoke.sh         M5 Task/Run scheduling, evidence gate, events/search smoke (temp sshd)
+scripts/recovery_smoke.sh     M6 recovery matrix, stop reasons, Decision/Inbox loop, audit (fake ssh faults)
 tests/agent/                  mock ACP + stdout test doubles (test-only, JS)
-docs/m1.md … docs/m5.md       design notes, verification and limitations
+docs/m1.md … docs/m6.md       design notes, verification and limitations
 spikes/m0/                    frozen M0 spike (see docs/spikes/m0.md)
 ```
 
@@ -121,6 +122,7 @@ scripts/machine_smoke.sh    # machine add/list/probe/remove, events, restart
 scripts/workspace_smoke.sh  # M3 open/read/write/diff/worktrees/leases/terminals
 scripts/agent_smoke.sh      # M4 ACP session → permission → Decision → memory artifact
 scripts/task_smoke.sh       # M5 tasks/runs/evidence gate/events/search
+scripts/recovery_smoke.sh   # M6 crash/SSH recovery matrix, Decisions, audit, secrets
 M4_REAL_ACP=1 scripts/agent_smoke.sh   # also probes the real claude-code-acp once
 ```
 
@@ -140,6 +142,15 @@ queueing and cancellation, all three verify-decision options (waive/retry/
 fail), event cursor stability, `search.sessions`, local + SSH runs on one
 task in parallel, host-restart projection reads, and illegal transitions.
 See `docs/m5.md` for the schedule/evidence/event design and M5 limitations.
+
+`recovery_smoke.sh` uses a temp state dir, an isolated `TMUX_TMPDIR` and a
+fake `ssh` on `PATH` that executes remote commands locally and can be
+switched to `disconnect` via a mode file. It proves desktop exit, host
+`SIGKILL` reattach, missing-session `lost` + one retry, short SSH drops that
+do not fail a Run, remote silence → `unverifiable` + Decision (never
+auto-retried), duplicate dispatch/answer idempotency, retry exhaustion,
+policy deny/approval, audit field completeness and secret-free
+artifacts/audit. See `docs/m6.md`.
 
 `machine_smoke.sh` starts an ephemeral non-root sshd on a random loopback
 port and injects a fake `ssh` for error classification. Every `add` passes an
@@ -226,7 +237,7 @@ display. It also links `-lvulkan` without the package's `cc-link-flags`, so
 point `LIBRARY_PATH` at the repo-local shim directory as shown; the Vulkan
 runtime `libvulkan.so.1` must still be installed.)
 
-## Protocol (M5)
+## Protocol (M5 + M6 audit)
 
 - Transport: WebSocket JSON-RPC 2.0 at `ws://127.0.0.1:<random>/ws`,
   `Authorization: Bearer <token>` during the HTTP upgrade; wrong or missing
@@ -236,9 +247,11 @@ runtime `libvulkan.so.1` must still be installed.)
   `lease.*`/`terminal.*` methods, `agent.probe/start/send/read/stop/list/
   resume/memoryRead/memoryWrite`, `decision.list/respond`, the M5
   `project.create/list`, `task.create/list/get/cancel`,
-  `run.create/list/get/cancel`, `artifact.read`, `events.list` and
-  `search.sessions`, and `rpc --method ... --params ...` for shell-driven
-  calls. Every request must
+  `run.create/list/get/cancel`, `artifact.read`, `events.list`,
+  `search.sessions` and M6 `audit.list`, and `rpc --method ... --params ...`
+  for shell-driven calls. `decision.list` accepts `bucket` and returns the
+  computed `inbox`/`run_status`; `decision.respond` routes approval and
+  recovery answers through the same queue as permissions and waivers. Every request must
   carry a non-empty `params.client_request_id`; the host caches the response
   and returns it again for a retry with the same key.
 - Notifications: `events.event` with `params.event` set to the ADR 0002 event
@@ -270,7 +283,7 @@ runtime `libvulkan.so.1` must still be installed.)
   conflict|internal`, agent failures add `readiness|unsupported`, and a
   message prefixed by a readable label (`Unauthorized: ...`).
 
-## Known limitations (M1–M5)
+## Known limitations (M1–M6)
 
 - Probing is **manual**: there is no background heartbeat/probe loop yet.
 - File listing is one directory level; reads are whole-file and diffs stop at
@@ -308,9 +321,19 @@ runtime `libvulkan.so.1` must still be installed.)
   stream carries state changes, not transcript chunks.
 - The stdout fallback has no protocol handshake, no turn completion and no
   readiness beyond an executable check.
-- Task/Run scheduling is in place, but there is **no M6 recovery**: runs that
-  were `running/verifying` when the host exited are not resumed or marked
-  `lost`; startup reconciles projections only.
+- Runs that were `verifying` when the host exited are marked `unverifiable`
+  and raise a Decision; the evidence gate is not re-entered because provider
+  side effects are not idempotent.
+- A recovered Run without a persisted `worktree_id` verifies in the workspace
+  root; a host-managed worktree created but not attached before the crash is
+  an accepted edge case.
+- Agent-mode Runs are not tmux-durable (local-only ACP); their failure path
+  records `execution_failed`, not the command stop reasons.
+- Command-mode Runs without tmux (`durable=direct`) are unverifiable after a
+  host restart by design.
+- Owner-declared command text is stored verbatim (it is the program and the
+  retry source); credentials must come from the machine account, and
+  `agent_env` names that look secret are redacted.
 - Agent-mode Runs are local-only and use an internal Sink, so they do not
   stream into the Agents page. Desktop dispatch is command-mode only.
 - `verify[]` commands run serially per run; a waiver applies to every failed

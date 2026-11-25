@@ -484,8 +484,94 @@ fn agents_page(model : Model) -> @moui.View[Msg] {
 }
 
 ///|
+fn inbox_decision_card(decision : @contracts.DecisionRecord) -> @moui.View[Msg] {
+  let bucket = inbox_bucket_of(decision)
+  let actionable = bucket == @contracts.INBOX_NEEDS_YOU
+  let actions : Array[@moui.View[Msg]] = []
+  if actionable {
+    for option in decision.options {
+      actions.push(
+        button(
+          option.name,
+          on_click=InboxAnswer(decision.id, option.option_id),
+        ),
+      )
+    }
+    actions.push(
+      button("Answer with text", on_click=InboxSubmitText(decision.id)),
+    )
+  }
+  card(
+    column([
+      row([
+        text(decision.kind + ": " + decision.title).title(),
+        spacer(weight=1.0),
+        tag(decision.status),
+        tag(bucket),
+      ], spacing=8.0),
+      text(
+        "session " +
+        (if decision.session_id == "" { "(none)" } else { decision.session_id }) +
+        " · agent " +
+        decision.agent_id +
+        (if decision.run_id == "" { "" } else { " · run " + decision.run_id }),
+      ).caption(),
+      if decision.detail == "" {
+        text("(no detail)").caption()
+      } else {
+        text(decision.detail).mono()
+      },
+      if decision.status == @contracts.DECISION_STATUS_ANSWERED {
+        text(
+          "answered by " +
+          (if decision.answered_by == "" { "owner" } else { decision.answered_by }) +
+          (if decision.option_id == "" { "" } else { " · " + decision.option_id }) +
+          (if decision.answer_text == "" { "" } else { " · " + decision.answer_text }),
+        ).caption()
+      } else {
+        text("(no answer yet)").caption()
+      },
+      if actions.length() == 0 {
+        text("handled").caption()
+      } else {
+        row(actions, spacing=8.0)
+      },
+    ], spacing=6.0),
+    padding=10.0,
+  )
+}
+
+///|
+fn push_inbox_section(
+  lines : Array[@moui.View[Msg]],
+  title : String,
+  items : Array[@contracts.DecisionRecord],
+) -> Unit {
+  if items.length() == 0 {
+    return
+  }
+  lines.push(text(title).title())
+  for decision in items {
+    lines.push(inbox_decision_card(decision))
+  }
+}
+
+///|
 fn inbox_page(model : Model) -> @moui.View[Msg] {
   let inbox = model.inbox
+  let needs : Array[@contracts.DecisionRecord] = []
+  let waiting : Array[@contracts.DecisionRecord] = []
+  let handled : Array[@contracts.DecisionRecord] = []
+  for decision in inbox.decisions {
+    let bucket = inbox_bucket_of(decision)
+    if bucket == @contracts.INBOX_NEEDS_YOU {
+      needs.push(decision)
+    } else if bucket == @contracts.INBOX_WAITING {
+      waiting.push(decision)
+    } else {
+      handled.push(decision)
+    }
+  }
   let lines : Array[@moui.View[Msg]] = [
     row([
       text("Inbox").title(),
@@ -493,64 +579,25 @@ fn inbox_page(model : Model) -> @moui.View[Msg] {
       button("Refresh", on_click=InboxRefresh),
     ], spacing=8.0),
     text(
-      "Permission requests and readiness failures wait here. An ACP permission is answered on the same session pipe; nothing is auto-approved.",
+      "Approvals, Agent permissions, evidence-gate waivers and recovery retries all wait in this one queue. An answer is recorded as an event and an audit record; nothing is auto-approved.",
     ).caption(),
   ]
   if inbox.message != "" {
     lines.push(text(inbox.message).caption())
   }
   if inbox.decisions.is_empty() {
-    lines.push(text("No pending decisions.").caption())
+    lines.push(text("No decisions yet.").caption())
   } else {
-    for decision in inbox.decisions {
-      let actions : Array[@moui.View[Msg]] = []
-      for option in decision.options {
-        actions.push(
-          button(
-            option.name,
-            on_click=InboxAnswer(decision.id, option.option_id),
-          ),
-        )
-      }
-      actions.push(
-        button("Answer with text", on_click=InboxSubmitText(decision.id)),
-      )
-      lines.push(
-        card(
-          column([
-            row([
-              text(decision.kind + ": " + decision.title).title(),
-              spacer(weight=1.0),
-              tag(decision.status),
-            ], spacing=8.0),
-            text(
-              "session " +
-              (if decision.session_id == "" {
-                "(none)"
-              } else {
-                decision.session_id
-              }) +
-              " · agent " +
-              decision.agent_id,
-            ).caption(),
-            if decision.detail == "" {
-              text("(no detail)").caption()
-            } else {
-              text(decision.detail).mono()
-            },
-            row(actions, spacing=8.0),
-          ], spacing=6.0),
-          padding=10.0,
-        ),
-      )
-    }
+    push_inbox_section(lines, "Needs you", needs)
+    push_inbox_section(lines, "Waiting", waiting)
+    push_inbox_section(lines, "Handled", handled)
   }
   lines.push(
     row([
       text_field(
         inbox.text,
         on_input=fn(value) { InboxText(value) },
-        placeholder="free-text answer (for questions/readiness)",
+        placeholder="free-text answer (questions/readiness)",
         width=520.0,
       ),
     ], spacing=8.0),

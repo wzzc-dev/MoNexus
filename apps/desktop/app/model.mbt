@@ -202,7 +202,23 @@ pub fn AgentState::new() -> AgentState {
 }
 
 ///|
-/// Inbox page: pending Decisions shared by permissions and readiness.
+/// Inbox bucket for a Decision. The host enriches `inbox`; the fallback keeps
+/// offline/test records on the same shared rule.
+pub fn inbox_bucket_of(record : @contracts.DecisionRecord) -> String {
+  if record.inbox != "" {
+    record.inbox
+  } else {
+    @contracts.decision_inbox_bucket(
+      record.status,
+      record.kind,
+      record.option_id,
+      record.run_status,
+    )
+  }
+}
+
+///|
+/// Inbox page: every Decision, grouped into Needs you / waiting / handled.
 pub(all) struct InboxState {
   decisions : Array[@contracts.DecisionRecord]
   text : String
@@ -722,7 +738,7 @@ pub fn update_full(
       { ..model, page },
       match page {
         Agents => [AgentList]
-        Inbox => [DecisionList(@contracts.DECISION_STATUS_PENDING)]
+        Inbox => [DecisionList("")]
         Tasks => [TaskRefresh(model.task.event_seq)]
         _ => none
       },
@@ -1445,18 +1461,34 @@ pub fn update_full(
       { ..model, agent: { ..model.agent, message: text } },
       none,
     )
-    InboxRefresh => (model, [DecisionList(@contracts.DECISION_STATUS_PENDING)])
-    InboxDecisions(records) => (
-      {
-        ..model,
-        inbox: {
-          ..model.inbox,
-          decisions: records,
-          message: "pending decisions: " + records.length().to_string(),
+    InboxRefresh => (model, [DecisionList("")])
+    InboxDecisions(records) => {
+      let mut needs = 0
+      let mut waiting = 0
+      let mut handled = 0
+      for record in records {
+        let bucket = inbox_bucket_of(record)
+        if bucket == @contracts.INBOX_NEEDS_YOU {
+          needs = needs + 1
+        } else if bucket == @contracts.INBOX_WAITING {
+          waiting = waiting + 1
+        } else {
+          handled = handled + 1
+        }
+      }
+      (
+        {
+          ..model,
+          inbox: {
+            ..model.inbox,
+            decisions: records,
+            message: "needs you: " + needs.to_string() + " · waiting: " +
+            waiting.to_string() + " · handled: " + handled.to_string(),
+          },
         },
-      },
-      none,
-    )
+        none,
+      )
+    }
     InboxText(value) => (
       { ..model, inbox: { ..model.inbox, text: value } },
       none,
@@ -1468,7 +1500,7 @@ pub fn update_full(
       },
       [
         DecisionRespond(decision_id, option_id, model.inbox.text, "owner"),
-        DecisionList(@contracts.DECISION_STATUS_PENDING),
+        DecisionList(""),
       ],
     )
     InboxSubmitText(decision_id) => (
@@ -1478,7 +1510,7 @@ pub fn update_full(
       },
       [
         DecisionRespond(decision_id, "", model.inbox.text, "owner"),
-        DecisionList(@contracts.DECISION_STATUS_PENDING),
+        DecisionList(""),
       ],
     )
     TaskTitle(value) => (

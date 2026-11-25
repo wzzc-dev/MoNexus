@@ -262,6 +262,10 @@ async fn handle_request(
       state.mutex.release()
       handle_search_sessions(state, sink, request, client_request_id)
     }
+    @contracts.METHOD_AUDIT_LIST => {
+      state.mutex.release()
+      handle_audit_list(state, sink, request, client_request_id)
+    }
     @contracts.METHOD_EVENTS_SUBSCRIBE => {
       let since = @contracts.subscribe_since(request.params)
       let replay = match since {
