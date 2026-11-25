@@ -1,0 +1,9 @@
+import {
+  "monexus/recipes" @recipes,
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "moonbitlang/async/process",
+  "moonbitlang/core/json",
+}
+
+supported_targets = "native"

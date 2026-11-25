@@ -4,6 +4,7 @@ members = [
   "./spikes/a1-pairing",
   "./packages/contracts",
   "./packages/machines",
+  "./packages/recipes",
   "./packages/providers",
   "./packages/host-client",
   "./services/host",
