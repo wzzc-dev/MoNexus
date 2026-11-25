@@ -47,10 +47,15 @@ async fn main {
     )
     @env.exit(3)
   }
+  // Resolve the startup appearance before building the model: a saved
+  // Settings choice wins over MONEXUS_THEME, which in turn beats the dark
+  // default. A missing/corrupt file is reported on the Settings page, never a
+  // startup failure.
+  let startup_theme = @app.startup_theme()
   // 1280x800 keeps the Tasks/Inbox/Agents bodies and buttons on screen; long
   // pages scroll inside the shell viewport (see app/view.mbt).
   let runtime = @runtime.new_program_with_dimensions(
-    program=@app.program(),
+    program=@app.program_with_startup(startup_theme),
     width=1280.0,
     height=800.0,
   )
@@ -71,6 +76,9 @@ async fn main {
   let stream_task : async () -> Unit = async fn() {
     @app.agent_stream_loop(@client.default_state_dir())
   }
+  let theme_task : async () -> Unit = async fn() {
+    @app.theme_choice_loop()
+  }
   @async.with_task_group(async fn(group) {
     group.spawn_bg(
       no_wait=true,
@@ -86,6 +94,11 @@ async fn main {
       no_wait=true,
       allow_failure=true,
       stream_task,
+    )
+    group.spawn_bg(
+      no_wait=true,
+      allow_failure=true,
+      theme_task,
     )
     window_task()
   })

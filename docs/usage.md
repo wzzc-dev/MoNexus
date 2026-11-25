@@ -350,6 +350,8 @@ monexus host rpc --method audit.list --params '{"limit":100}'
 | variable | purpose |
 | --- | --- |
 | `MONEXUS_STATE_DIR` | state directory (default `$HOME/.monexus`) |
+| `MONEXUS_THEME=light\|dark` | desktop startup appearance used when no Settings choice has been saved (illegal or missing → dark) |
+| `MONEXUS_CONFIG_DIR` | desktop preference directory (default `$XDG_CONFIG_HOME/monexus`, else `$HOME/.config/monexus`); the theme choice is `theme.json` |
 | `MONEXUS_HOST_BIN`, `MONEXUS_DESKTOP_BIN` | override component binaries in the launcher |
 | `MONEXUS_MAX_PARALLEL` | per-machine Run limit (default 4) |
 | `MONEXUS_AGENT_SSH=1` | opt in to the round-1 remote-agent PoC: SSH-backed `agent.start` launches the adapter over `ssh -T` instead of returning the local-only error |
@@ -360,3 +362,20 @@ monexus host rpc --method audit.list --params '{"limit":100}'
 | `TMUX_TMPDIR` | isolate the tmux server used by tests |
 | `ACCEPTANCE_SKIP_PACKAGE=1` | acceptance uses repo binaries instead of a tarball |
 | `M7_REAL_ACP=1` | acceptance also probes a real ACP adapter |
+
+### Theme preference
+
+The Settings page's Light/Dark control applies immediately and saves the
+explicit choice locally for the desktop. Startup uses, in order:
+
+1. the saved choice (`theme.json` in the config directory above);
+2. a legal `MONEXUS_THEME=light|dark`;
+3. dark, the product default.
+
+The file is one small JSON object (`{"schema_version":1,"theme":"light"}`),
+written atomically with mode 0600 and holding no secrets; it is not part of
+the workspace or the host event log. Editing or deleting it is safe: a missing
+file is silent, while an unreadable, corrupt or unknown-valued file is ignored,
+falls through to the environment/default and is reported on the Settings page.
+`MONEXUS_THEME` therefore only decides the mode until a choice has been saved;
+remove `theme.json` to make the variable authoritative again.

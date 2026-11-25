@@ -578,3 +578,18 @@ test "inbox decisions flow from needs you to waiting and handled" {
   assert_true(model.inbox.message.contains("waiting: 2"))
   assert_true(model.inbox.message.contains("handled: 1"))
 }
+
+///|
+test "the Settings appearance note describes persistence" {
+  let harness = @test_support.WidgetHarness::from_program(
+    program=program(),
+    width=1280.0,
+    height=800.0,
+  )
+  harness.tap_text("Settings")
+  assert_true(
+    harness.has_text(
+      "Applies immediately and is saved for future launches; MONEXUS_THEME picks the startup mode only until you choose one.",
+    ),
+  )
+}
