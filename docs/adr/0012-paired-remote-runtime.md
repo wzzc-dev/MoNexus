@@ -1,6 +1,6 @@
 # ADR-0012：配对远端 runtime（A1）——控制面留在主控，执行面下沉
 
-- 状态：Accepted（owner 于 2026-11-25 按条件通过 D8，并批准开工 A1.0 设计验证）
+- 状态：Accepted（owner 于 2026-11-25 按条件通过 D8，并批准开工 A1.0 设计验证；2026-11-26 依据 A1.0 spike 结论修订 §2.2、§3、§7）
 - 日期：2026-11-25
 - 依据：`docs/architecture.md` §6、§7、§8、§11、§18/D8；ADR-0003（MachineProvider）、ADR-0008（SSH 接入）、ADR-0011（Agent over SSH PoC）；`docs/v0.2-plan.md` A1
 - 关系：本 ADR 细化 D8 的 A1 边界；V0.1 的 SSH 直连路径保持为基线、引导与回退通道。
@@ -26,17 +26,17 @@ V0.2 的 A1 要解决这两个问题，同时不能把 MoNexus 变成第二套�
 ### 2. 配对与认证
 
 - **由 node 主动外连 primary**，不为 node 打开入站端口。A1 要求 primary 有一个可达的 TLS 端点（公网、内网或既有 VPN/Tailscale 均可）；若 primary 本身完全在 NAT 后，先用现有 SSH 反向隧道引导，公网 relay 不在 A1 范围。
-- **一次性短时配对码**：primary 生成高熵配对码，TTL ≤ 10 分钟、单次使用、错误尝试有速率限制；配对码只存哈希，不写日志/事件。node 在配对时提交自己的 `runtime_id`、公钥、版本与能力清单。
-- **双向认证**：
-  - TLS 保护通道；primary 提供证书，node 在首次配对时显示并固定证书/公钥指纹，后续不静默更换。
-  - node 生成机器密钥对，primary 记录公钥并签发按机器 scoped、可吊销的短期凭据；重连用挑战签名，不把长期明文 token 放进 URL、argv、日志或事件。
-  - 配对成功后主控写入 enrollment 事件；吊销、轮换、过期与重新配对均产生审计事件。密钥轮换不改变 runtime_id。
+- **一次性短时配对码**：primary 生成高熵配对码，TTL ≤ 10 分钟、单次使用、错误尝试有速率限制；配对码只存哈希，不写日志/事件。node 在配对时提交自己的 `runtime_id`、设备密钥承诺（A1.0 spike 中为 SHA-256 commitment，不是可验证公钥）、版本与能力清单。
+- **双向认证（按 A1.0 验证结论修订）**：
+  - **pinned TLS 保护通道**：primary 提供证书；node 首次配对时固定 CA 与叶证书的 SHA-256 指纹（CA 用 `CustomPemFile`，叶证书用 `get_peer_certificate` 复核），后续不静默更换。hostname 校验按 DNS 名进行（spike 使用 `DNS:localhost`），IP 直连的 SAN 方案另行设计。
+  - **node 身份用对称机器凭据，不用挑战签名**：当前 MoonBit core 与 `moonbitlang/x` 没有 Ed25519/ECDSA/RSA 签名 API，A1 不宣称 Ed25519。primary 在配对时签发按机器 scoped、可吊销的短期 256 位高熵 bearer token（primary 只存 SHA-256 哈希、常时比较）；若 node 声明 `auth.hmac-sha256`，重连改用 HMAC-SHA256 challenge-response（primary 保留 HMAC 验证密钥）。token 只在 pinned TLS 内传输，不进入 URL、argv、日志或事件。
+  - 配对成功后主控写入 enrollment 事件；吊销、轮换、过期与重新配对均产生审计事件。凭据轮换不改变 runtime_id。
 - **拒绝重放**：配对码、挑战、审批凭据均带 nonce/有效期，服务端去重；错误/过期/已用的配对码返回统一错误，不泄漏哪一步失败。
 - **实现可行性**：A1 spike 先验证 MoonBit `moonbitlang/async` 的 TLS 入口、证书固定和签名库；若某平台缺少可用实现，不降低为明文，改为只支持已验证平台并在 doctor 中拒绝其他平台。
 
 ### 3. 传输与协议
 
-- **WSS + JSON-RPC 2.0**，复用 host RPC 的信封约定（请求 id、错误对象、notification），但使用独立的 `runtime.*` 方法命名空间；不做第二条 HTTP/自定义控制协议。
+- **pinned TLS + 长度前缀 JSON-RPC 2.0 帧（按 A1.0 验证结论修订）**：4 字节大端长度（1..65,536 字节，即 64 KiB 上限）+ 一个完整的 JSON-RPC 2.0 对象；复用 host RPC 的信封约定（请求 id、错误对象、notification），但使用独立的 `runtime.*` 方法命名空间；不做第二条 HTTP/自定义控制协议。**不存在明文回退路径。** WSS 作为后续可选项，仅在 MoonBit 提供可用的 TLS HTTP server 后启用并另写 ADR。
 - node 发起连接并维持心跳；断线按指数退避重连，禁止无限快速重试；primary 可下发 `drain`，让 node 停止接新 Run 后安全退出。
 - 消息有界：单帧上限、每通道排队上限、stdout/stderr 分块上限与背压；超限断开并生成可读诊断，不静默丢弃关键事件。
 - 方法面最小集：
@@ -80,6 +80,7 @@ V0.2 的 A1 要解决这两个问题，同时不能把 MoNexus 变成第二套�
 - `machine.add` 增加显式 `provider=runtime` 选项；SSH 仍是默认与回退路径。A1 上线不改变既有 `kind=ssh` 机器的行为、ID、事件或审批路径。
 - runtime 安装、版本与 doctor 由独立命令/配置完成；协议版本不兼容时 node 拒绝连接并给出可读错误，不自动降级到不安全协议。
 - 吊销或回退：primary 删除 enrollment、关闭端点、作废凭据；node 停止接新 Run，已有 Run 按 drain 完成或取消；本地 state 可丢弃，不以 node 状态恢复控制面。
+- **TLS server 实现依赖**：A1.0 使用的 `@tls.Tls::server` 被上游标记为 `#internal(..., "do not use, for internal testing only")`，不是受支持的 production surface。A1.2 必须要么取得上游公开的 TLS server API，要么自持一层薄 FFI（OpenSSL 符号与 native stub 已在依赖中）；doctor 必须检测并拒绝没有可用 TLS server 实现的平台。A1.0 不得宣称该 API 为生产可用。
 - 迁移与回退文档必须包含：如何从 runtime 切回 SSH、如何清理 node state/日志、如何确认没有重复 Run。
 
 ### 8. 非目标
@@ -104,6 +105,16 @@ V0.2 的 A1 要解决这两个问题，同时不能把 MoNexus 变成第二套�
 - **协议与实现复杂度**：MoonBit TLS/签名可用性和跨平台差异需要 spike 验证；若不可用，A1 缩减到已验证平台，不用明文替代。
 - **运维负担**：runtime 需要安装、升级、诊断与日志清理。缓解：doctor、版本握手、drain、显式回退 SSH、文档。
 - **网络边界**：primary 必须可达；完全 NAT 对 NAT 不在 A1。缓解：文档明确部署前置，必要时用 SSH 反向隧道或后续 relay。
+
+### A1.0 验证结论（2026-11-26）
+
+独立 spike（`spikes/a1-pairing`，不接入生产 host/desktop）在 Linux native 上得出：
+
+- **无 WSS server**：`@http.Server` 没有 TLS 变体，`@websocket.Conn::from_http_server` 只接受基于 `@socket.Tcp` 的 `@http.ServerConnection`。A1 改用 pinned TLS + 长度前缀 JSON-RPC 2.0 帧（64 KiB 上限），无明文路径；WSS 留作依赖上游 TLS HTTP server 的后续选项。
+- **无非对称签名**：MoonBit core 与 `moonbitlang/x` 不提供 Ed25519/ECDSA/RSA 签名。§2.2 已改为 256 位 bearer token 或 HMAC-SHA256 challenge-response，primary 只存哈希/HMAC 验证密钥；A1 不宣称挑战签名或 Ed25519。
+- **TLS server 是上游内部 API**：`Tls::server` 标记为 `#internal`，仅适用于测试/spike；A1.2 必须取得上游公开 API 或自持薄 FFI，doctor 拒绝无实现的平台。
+- **已验证**：128 位一次性配对码；错误、过期、已用、重放与版本不匹配拒绝；失败限速；错误指纹与不受信任 CA 拒绝；bearer/HMAC 重连、心跳续传、吊销、轮换；日志/审计不含配对码、凭据或测试私钥。spike 24 个测试与全仓 117 个测试通过，agent/SSH smoke 与 acceptance 保持绿色。
+- **残余风险**：配对失败预算当前是全局 10 次/60 秒，未认证洪水可短时阻塞合法配对；A1.2 需按来源/runtime 作用域限速或明确记录该残余 DoS 风险。
 
 ## 验证计划
 

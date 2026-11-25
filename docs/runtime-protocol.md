@@ -1,6 +1,6 @@
 # MoNexus 远端 runtime 传输协议（A1.2 草案）
 
-- 状态：**Draft，A1.0 spike 验证中**；本文是 A1.2 的实现依据，spike 结论若与此冲突，以 spike 证据修订本文与 ADR-0012。
+- 状态：**Draft，已按 A1.0 spike 结论修订（2026-11-26）**；本文是 A1.2 的实现依据，后续实现若与此冲突，以实际证据修订本文与 ADR-0012。
 - 日期：2026-11-26
 - 依据：`docs/adr/0012-paired-remote-runtime.md`、`docs/v0.2-plan.md` §2.1、`docs/architecture.md` §6–§8。
 - 范围：primary（主控 host）与 node（`monexus-host --runtime`）之间的配对、认证、JSON-RPC 传输、幂等、重连与审批绑定。不包含 ACP 语义、UI、调度与多主控。
@@ -15,7 +15,7 @@
 
 ### 1.2 TLS 与证书固定
 
-- 使用 `moonbitlang/async/tls` 的 TLS server/client（已确认 0.22.7 在 Linux native 提供 `Tls::server_from_pair` 与 `Tls::client_from_pair`）。
+- 使用 `moonbitlang/async/tls` 的 `Tls::server` / `Tls::client`（已在 0.22.7 Linux native 验证）。**Caveat：** `Tls::server` 被上游标记为 `#internal(..., "do not use, for internal testing only")`，不是受支持的 production surface。A1.2 必须取得上游公开的 TLS server API 或自持一层薄 FFI；doctor 必须检测并拒绝没有可用 TLS server 实现的平台。A1.0 不宣称该 API 为生产可用。
 - node 只信任 primary 的证书：首次配对时由带外渠道（配对二维码/配对码页面）给出 primary 证书的 SHA-256 指纹，node 将其写入本地配置（0600）；连接时使用 `CustomPemFile` 固定根证书并再次比对 `get_peer_certificate` 的 SHA-256 指纹。不匹配、缺失或指纹变化一律拒绝连接，不静默回退到系统根证书。
 - primary 不要求 node 提供客户端证书；node 的身份由 1.3 的机器凭据证明。若后续引入 node 证书，必须另写 ADR，不在 A1 追加。
 - 证书轮换是显式操作：primary 发布新指纹，node 在 owner 确认后更新；旧指纹立即失效。轮换产生审计事件。
@@ -26,7 +26,8 @@
 - node 在 TLS 连接上发送 `runtime.pair`：`pairing_code`、`runtime_id`（node 生成，稳定）、`protocol_version`、`capabilities`、`version`。
 - primary 校验后签发机器凭据：32 字节随机 token，返回一次；primary 只保存 token 哈希与 runtime_id/能力/吊销状态，node 以 0600 保存 token。token 不进入 URL、argv、日志或事件。
 - 重连用 `runtime.hello` 携带 token 与 runtime_id；primary 对 token 哈希查找、校验未吊销/未过期并绑定 runtime_id。
-- **与 ADR-0012 的偏差**：MoonBit 0.22.7 未提供可用的非对称签名 API，因此 A1 不使用挑战签名，改用 pinned TLS + 高熵 bearer token。安全边界仍为 TLS 机密性/完整性 + 可吊销的按机器凭据；token 泄露风险由 0600 存储、短 TTL/轮换与吊销事件缓解。该偏差必须在 A1.0 findings 中记录，A1.2 不得宣称 Ed25519/WSS。
+- 若 node 在 pairing 时声明 `auth.hmac-sha256`，primary 可改用 HMAC-SHA256 challenge-response：签发 30 秒单次挑战，node 对绑定 runtime_id、挑战与客户端 nonce 的 transcript 计算 HMAC；primary 保留 HMAC 验证密钥并常时比较。该模式仍是共享密钥，不是公钥证明。
+- **与 ADR-0012 的偏差（已回写）**：MoonBit 0.22.7 未提供可用的非对称签名 API，因此 A1 不使用挑战签名，改用 pinned TLS + 高熵 bearer token（或上述 HMAC 模式）。安全边界仍为 TLS 机密性/完整性 + 可吊销的按机器凭据；token 泄露风险由 0600 存储、短 TTL/轮换与吊销事件缓解。A1.2 不得宣称 Ed25519 或 WSS。
 - 错误统一为 `pairing_rejected`，不区分错码、过期、已用、已吊销，避免枚举。
 
 ### 1.4 帧格式
@@ -34,14 +35,14 @@
 MoonBit 0.22.7 的 HTTP server 不能直接包 TLS，`websocket.Conn::from_http_server` 只接受 `http.ServerConnection`（其构造要求 TCP），因此 A1 不使用 WSS；改为在 TLS 流上使用长度前缀的 JSON-RPC 2.0 帧：
 
 ```text
-4 字节大端无符号长度 N（1..1,048,576）
+4 字节大端无符号长度 N（1..65,536，即 64 KiB 上限）
 N 字节 UTF-8 JSON（一个完整的 JSON-RPC 2.0 对象）
 ```
 
 - 超过上限、长度为 0、非法 JSON、顶层不是对象、缺少 `jsonrpc: "2.0"` → 关闭连接并记录有界诊断；不尝试继续解析。
 - 每条请求/响应/通知一帧；二进制数据用 base64，单帧内数组/字符串有上限。
 - 队列与背压：每连接最多 64 个未完成请求，每流最多 1 MiB 待发送；超限返回 `busy` 或断开，不静默丢事件。
-- 该帧格式等价于 WSS 的消息边界与有序性；若未来 MoonBit 提供可用的 TLS HTTP server，可在不改变方法面的前提下切回 WSS，并另写 ADR。
+- 单帧上限固定为 64 KiB；超过即断开，不允许通过调高上限绕过。该帧格式提供与 WSS 等价的消息边界与有序性；若未来 MoonBit 提供可用的 TLS HTTP server，可在不改变方法面的前提下把 WSS 作为后续选项启用，并另写 ADR。**不存在明文回退路径。**
 
 ## 2. 握手、心跳与 drain
 
@@ -161,4 +162,4 @@ node → primary：
 | 审批绑定 | 摘要/版本/nonce/过期/跨 run 全部拒绝 |
 | 路径逃逸 | 根目录、`..`、绝对路径、符号链接拒绝 |
 
-**待 spike 确认**：上述 TLS 固定与 token 重连在 Linux native 的实际行为；若 `Tls::client_from_pair` 的证书固定/对端证书读取与预期不符，A1.2 先修传输层，不进入执行面接线。
+**A1.0 spike 已验证**：pinned TLS 固定（`CustomPemFile` + `get_peer_certificate` 指纹复核）、token/HMAC 重连、心跳与帧边界在 Linux native 的实际行为；错误指纹与不受信任 CA 均 fail closed，明文客户端得不到 JSON 响应。**剩余前置**：A1.2 必须先解决 `Tls::server` 的上游公开 API 或自有薄 FFI，否则不进入执行面接线。
