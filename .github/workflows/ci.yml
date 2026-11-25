@@ -51,8 +51,16 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
+          # Build-time headers/libraries come from the registry packages'
+          # native build hooks: window needs wayland-protocols (XML),
+          # wayland-scanner + wayland-client.pc (libwayland-dev), and the X11
+          # headers; moui's Linux backend compiles against glib/gio; the Skia
+          # release link needs fontconfig/freetype/harfbuzz and zlib.
           sudo apt-get install -y --no-install-recommends \
             openssh-server openssh-client tmux jq xvfb xauth \
+            wayland-protocols libwayland-dev \
+            libx11-dev libxext-dev libxrandr-dev \
+            libglib2.0-dev zlib1g-dev \
             libfontconfig1-dev libfreetype-dev libharfbuzz-dev \
             libvulkan1 mesa-vulkan-drivers
           # Non-root sshd still needs the privilege-separation directory.
