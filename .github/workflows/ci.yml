@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build-test-acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # The MoUI skia package runs a node prebuild step; the repo README
+          # uses Node 26. setup-node resolves the current 26.x.
+          node-version: "26"
+
+      # The spec asked for moonbitlang/setup@v1, but no public repository with
+      # that name exists (GitHub returns 404), so it cannot be used. This is
+      # the MoonBit setup action listed in moonbitlang/awesome-moonbit; it
+      # wraps the official installer. Its default channel is `latest`; the
+      # locally recorded 0.1.20261119 is a nightly build without a downloadable
+      # pinned archive, so the default is used and recorded by the next step.
+      - name: Setup MoonBit
+        uses: hustcer/setup-moonbit@v1
+
+      - name: Record toolchain versions
+        run: |
+          moon version --all
+          node --version
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            openssh-server openssh-client tmux jq xvfb xauth \
+            libfontconfig1-dev libfreetype-dev libharfbuzz-dev \
+            libvulkan1 mesa-vulkan-drivers
+          # Non-root sshd still needs the privilege-separation directory.
+          sudo mkdir -p /run/sshd
+
+      - name: Build
+        run: moon build --target native
+
+      - name: Test
+        run: moon test --target native
+
+      - name: Smoke
+        run: |
+          for script in machine workspace task agent_ssh agent; do
+            echo "::group::scripts/${script}_smoke.sh"
+            bash "scripts/${script}_smoke.sh"
+            echo "::endgroup::"
+          done
+
+      - name: Acceptance
+        run: bash scripts/acceptance.sh
