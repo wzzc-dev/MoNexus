@@ -246,7 +246,9 @@ credentials. Without a login the readiness probe fails and the Inbox shows a
 readiness Decision. The real adapter was verified on 2026-11-25
 (`@zed-industries/claude-code-acp 0.16.2`): the readiness probe passed and one
 real turn streamed the requested output with `stop_reason=end_turn`. Agent
-sessions are local-workspace only in V0.1.
+sessions are local-workspace only by default in V0.1; a gated round-1 PoC
+(`MONEXUS_AGENT_SSH=1`) can launch an SSH workspace's adapter over `ssh -T` —
+see `docs/usage.md` §4.
 
 ## Tasks, evidence and approvals
 
@@ -358,6 +360,7 @@ scripts/host_smoke.sh       # M1 host
 scripts/machine_smoke.sh    # M2 machines, temp sshd
 scripts/workspace_smoke.sh  # M3 workspace/worktree/lease/terminal, temp sshd
 scripts/agent_smoke.sh      # M4 ACP session/permission/memory, mock adapter
+scripts/agent_ssh_smoke.sh  # PoC: mock ACP over ssh -T, temp sshd + temp keys
 scripts/task_smoke.sh       # M5 tasks/runs/evidence/search, temp sshd
 scripts/recovery_smoke.sh   # M6 recovery matrix, fake ssh faults
 ```

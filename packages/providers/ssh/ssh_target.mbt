@@ -127,6 +127,24 @@ pub fn ssh_argv(
 }
 
 ///|
+/// The argv for a duplex stdio process. `-T` forces "no PTY", so the remote
+/// command's stdin/stdout/stderr stay raw byte pipes: a protocol line written
+/// to stdin reaches the remote process unchanged and its stdout/stderr come
+/// back on separate local pipes. This is transport-only; nothing here knows
+/// what protocol travels over the pipes (architecture §6.1/§6.3).
+pub fn ssh_stdio_argv(
+  target : SshTarget,
+  remote_command : String,
+) -> Array[String] {
+  let base = ssh_argv(target, remote_command)
+  let argv : Array[String] = ["ssh", "-T"]
+  for index in 1..<base.length() {
+    argv.push(base[index])
+  }
+  argv
+}
+
+///|
 /// `ssh -G` argv: read-only resolution of the effective configuration. It
 /// never opens a network connection. `ConnectTimeout` is irrelevant here but
 /// harmless; `target_options` is reused so the recorded values match what a

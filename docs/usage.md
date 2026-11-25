@@ -160,11 +160,28 @@ Real ACP adapter:
 - Verified on 2026-11-25 with `@zed-industries/claude-code-acp 0.16.2`: the
   readiness probe passed, and one real turn streamed the requested output with
   `stop_reason=end_turn`.
-- Agent sessions are local-workspace only in V0.1; remote agent sessions are
-  not supported yet (Agent over SSH is a PoC, see
+- Agent sessions are local-workspace only by default in V0.1; remote agent
+  sessions are not supported yet (Agent over SSH is a gated PoC, see
   [ADR-0011](adr/0011-agent-over-ssh.md)). Transcripts are kept in memory
   (bounded); sessions/decisions/artifacts persist but transcript text does not
   survive a host restart.
+
+Remote agent PoC (round 1, not full remote-agent support):
+
+- An SSH workspace/worktree still gets the local-only error unless the host
+  process is started with `MONEXUS_AGENT_SSH=1`. With the gate on, the agent
+  process is launched through `ssh -T` (no PTY) using the machine's stored
+  identity, dedicated known-hosts file and host-key policy.
+- The remote cwd is the workspace/worktree path. The remote command is a
+  fixed `sh -c` script with positional parameters, so paths and arguments are
+  never interpolated into shell text. The remote machine uses its own
+  login/runtime; the host does not copy model credentials or keys.
+- stderr is captured separately in `<state>/logs/agent-<session>.stderr.log`
+  (redacted, mode 0600) and in the session record's `stderr_tail`. It never
+  reaches the ACP stdout transcript.
+- Still missing for real remote agents: `agent.probe` is local-only,
+  `agent.resume` does not reconstruct an SSH launch, and `env` from
+  `agent.start` is not forwarded over SSH.
 
 ## 5. Projects, tasks, Runs and evidence
 
@@ -281,6 +298,7 @@ monexus host rpc --method audit.list --params '{"limit":100}'
 | `MONEXUS_STATE_DIR` | state directory (default `$HOME/.monexus`) |
 | `MONEXUS_HOST_BIN`, `MONEXUS_DESKTOP_BIN` | override component binaries in the launcher |
 | `MONEXUS_MAX_PARALLEL` | per-machine Run limit (default 4) |
+| `MONEXUS_AGENT_SSH=1` | opt in to the round-1 remote-agent PoC: SSH-backed `agent.start` launches the adapter over `ssh -T` instead of returning the local-only error |
 | `MONEXUS_RECOVERY_POLL_MS` | durable Run poll interval |
 | `MONEXUS_RECOVERY_UNVERIFIABLE_MS` | transport-error window before `unverifiable` |
 | `MONEXUS_LINK_TRACE=1` | desktop stdout trace of link connecting/online/offline |

@@ -1,5 +1,6 @@
 import {
   "monexus/contracts" @contracts,
+  "monexus/providers/ssh" @ssh,
   "moonbitlang/async",
   "moonbitlang/async/fs",
   "moonbitlang/async/process",

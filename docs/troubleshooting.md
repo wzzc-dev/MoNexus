@@ -224,7 +224,10 @@ text is in memory only.
 
 **A workspace-backed agent is rejected.** V0.1 agents run only on local
 workspaces. Use a local machine record (`--kind local`) or an empty/`local`
-target; SSH-backed agent sessions are out of scope.
+target. The round-1 remote-agent PoC is gated: start the host with
+`MONEXUS_AGENT_SSH=1` to let `agent.start` launch an SSH workspace's adapter
+over `ssh -T` (see `docs/usage.md` §4). This is a PoC — `agent.probe`,
+`agent.resume` and `agent.start` env forwarding are still local-only.
 
 ## Acceptance and tests
 

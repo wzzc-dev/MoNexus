@@ -14,6 +14,12 @@
 //   * MOCK_ACP_FAIL=boom makes initialize fail with a generic error;
 //   * MOCK_ACP_LOAD=0 advertises loadSession=false.
 //
+// Opt-in flags used by scripts/agent_ssh_smoke.sh (default behaviour is
+// unchanged, so the existing smokes see the same bytes):
+//   * --stderr writes MOCK-STDERR-READY at startup and
+//     MOCK-CANCEL-RECEIVED on session/cancel to stderr only;
+//   * --cwd streams a `CWD=<process.cwd()>` chunk in the first prompt.
+//
 // Kept in JavaScript on purpose: test-only, never linked into monexus-host.
 
 import readline from "node:readline";
@@ -21,9 +27,20 @@ import readline from "node:readline";
 const failMode = process.env.MOCK_ACP_FAIL || "";
 const advertiseLoad = process.env.MOCK_ACP_LOAD !== "0";
 const sessionId = process.env.MOCK_ACP_SESSION_ID || "mock-session-1";
+const flags = new Set(process.argv.slice(2));
+const stderrEnabled = flags.has("--stderr");
+const cwdEnabled = flags.has("--cwd");
 
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const stderrLine = (text) => {
+  if (stderrEnabled) process.stderr.write(text + "\n");
+};
+
+stderrLine("MOCK-STDERR-READY cwd=" + process.cwd());
+// Credential-looking value used by the SSH smoke to prove the host redacts
+// stderr before it reaches the log or the session record.
+stderrLine("MOCK-AUTH api_key=VALUE-987654321");
 
 const pendingReplies = new Map();
 let promptCount = 0;
@@ -93,6 +110,11 @@ async function handlePrompt(id, params) {
   promptCount += 1;
   const text = (params?.prompt ?? []).map((block) => block?.text ?? "").join(" ");
   await sendChunk("MOCK#" + promptCount + " start");
+  if (cwdEnabled) {
+    await sendChunk(
+      " CWD=" + process.cwd() + " TTY=" + (process.stdout.isTTY ? "yes" : "no"),
+    );
+  }
   await sendThought("checking injected context");
   await sendChunk(" CTX");
   if (text.includes("[MoNexus agent context]")) await sendChunk(" BLOCK_SEEN");
@@ -154,7 +176,9 @@ for await (const line of rl) {
   } else if (method === "session/prompt") {
     queue = queue.then(() => handlePrompt(id, params));
   } else if (method === "session/cancel") {
-    // No long-running work in the mock.
+    // No long-running work in the mock; with --stderr the reception itself is
+    // the evidence that the notification crossed the transport.
+    stderrLine("MOCK-CANCEL-RECEIVED session=" + (params?.sessionId ?? ""));
   } else if (method === undefined && id !== undefined) {
     const resolver = pendingReplies.get(id);
     if (resolver) {

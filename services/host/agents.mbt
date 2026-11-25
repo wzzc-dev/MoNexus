@@ -824,29 +824,72 @@ async fn handle_agent_probe(
 }
 
 ///|
-/// Resolve which directory the agent should run in. M4 keeps agent processes
-/// local: an SSH workspace is rejected rather than pretending a remote cwd is
-/// a local one.
+/// Where one agent process runs and how it is launched. `launcher` is chosen
+/// from the workspace/worktree machine: Local for the host's own machine, SSH
+/// for a registered non-local one. The SSH choice is gated by
+/// `MONEXUS_AGENT_SSH=1` (PoC round 1); without it the M4 local-only error is
+/// preserved verbatim. This is the only place the agent runtime learns the
+/// transport, and the SSH branch only supplies an `SshTarget` — no ACP.
+struct AgentTarget {
+  cwd : String
+  workspace_id : String
+  worktree_id : String
+  launcher : @agent.ProcessLauncher
+}
+
+///|
+async fn agent_launcher_for_machine(
+  state : HostState,
+  machine_id : String,
+) -> Result[@agent.ProcessLauncher, @contracts.RpcError] {
+  state.mutex.acquire()
+  let record_result = state.store.get_machine(machine_id)
+  state.mutex.release()
+  match record_result {
+    Ok(Some(record)) =>
+      if record.kind == @contracts.MACHINE_KIND_LOCAL {
+        Ok(@agent.ProcessLauncher::Local)
+      } else {
+        Ok(@agent.ProcessLauncher::Ssh(machine_target(record)))
+      }
+    Ok(None) => Err(agent_not_found("machine not found: " + machine_id))
+    Err(message) => Err(agent_internal("cannot read machine: " + message))
+  }
+}
+
+///|
+/// Resolve which directory the agent should run in and how to launch it.
+/// V0.1 keeps remote agents behind `MONEXUS_AGENT_SSH=1`: without the gate an
+/// SSH workspace/worktree is rejected rather than pretending a remote cwd is a
+/// local one. Remote cwd is the workspace/worktree path on the remote machine.
 async fn agent_target_dir(
   state : HostState,
   params : Map[String, @json.Json],
-) -> Result[(String, String, String), @contracts.RpcError] {
+) -> Result[AgentTarget, @contracts.RpcError] {
   let explicit_cwd = @contracts.agent_cwd_param(params)
   let workspace_id = @contracts.agent_workspace_param(params)
   let worktree_id = @contracts.agent_worktree_param(params)
   let mut cwd = explicit_cwd.trim().to_owned()
   let mut resolved_workspace = workspace_id
+  let mut launcher = @agent.ProcessLauncher::Local
   if worktree_id != "" {
     let record = match lookup_worktree(state, worktree_id) {
       Ok(value) => value
       Err(error) => return Err(error)
     }
     if !machine_is_local(state, record.machine_id) {
-      return Err(
-        agent_unsupported(
-          "agent sessions currently run only on local worktrees",
-        ),
-      )
+      if !@agent.agent_ssh_enabled() {
+        return Err(
+          agent_unsupported(
+            "agent sessions currently run only on local worktrees",
+          ),
+        )
+      }
+      launcher = match
+        agent_launcher_for_machine(state, record.machine_id) {
+        Ok(value) => value
+        Err(error) => return Err(error)
+      }
     }
     if cwd == "" {
       cwd = record.path
@@ -860,11 +903,18 @@ async fn agent_target_dir(
       Err(error) => return Err(error)
     }
     if !machine_is_local(state, record.machine_id) {
-      return Err(
-        agent_unsupported(
-          "agent sessions currently run only on local workspaces",
-        ),
-      )
+      if !@agent.agent_ssh_enabled() {
+        return Err(
+          agent_unsupported(
+            "agent sessions currently run only on local workspaces",
+          ),
+        )
+      }
+      launcher = match
+        agent_launcher_for_machine(state, record.machine_id) {
+        Ok(value) => value
+        Err(error) => return Err(error)
+      }
     }
     if cwd == "" {
       cwd = record.root
@@ -876,7 +926,50 @@ async fn agent_target_dir(
       None => "."
     }
   }
-  Ok((cwd, resolved_workspace, worktree_id))
+  Ok({ cwd, workspace_id: resolved_workspace, worktree_id, launcher })
+}
+
+///|
+/// Create (truncate) the per-session stderr log. The file is separate from the
+/// ACP stdout transcript and 0600; the drain callback appends redacted lines.
+async fn open_agent_stderr_log(state : HostState, session_id : String) -> Unit {
+  @fs.write_file(
+    state.state_dir + "/logs/agent-" + session_id + ".stderr.log",
+    "",
+    create_mode=@fs.CreateMode::CreateOrTruncate,
+    permission=0o600,
+  ) catch {
+    _ => ()
+  }
+}
+
+///|
+/// Record one stderr line. It never enters the ACP transcript: it is redacted,
+/// kept in the capped `stderr_tail` on the session record, and appended to
+/// `logs/agent-<id>.stderr.log` (architecture §6.1: stderr is diagnostics, not
+/// protocol data).
+async fn record_agent_stderr(
+  state : HostState,
+  session_id : String,
+  stderr_tail : Ref[String],
+  line : String,
+) -> Unit {
+  let redacted = @contracts.redact_secrets(line)
+  let combined = stderr_tail.val + redacted + "\n"
+  stderr_tail.val = if combined.length() > AGENT_STDERR_CAP {
+    combined.substring(start=combined.length() - AGENT_STDERR_CAP)
+  } else {
+    combined
+  }
+  @fs.write_file(
+    state.state_dir + "/logs/agent-" + session_id + ".stderr.log",
+    redacted + "\n",
+    create_mode=@fs.CreateMode::OpenOrCreate,
+    permission=0o600,
+    append=true,
+  ) catch {
+    _ => ()
+  }
 }
 
 ///|
@@ -928,7 +1021,10 @@ async fn handle_agent_start(
       return
     }
   }
-  let (cwd, workspace_id, worktree_id) = target
+  let cwd = target.cwd
+  let workspace_id = target.workspace_id
+  let worktree_id = target.worktree_id
+  let launcher = target.launcher
   let home = match ensure_agent_home(state, agent_id) {
     Ok(value) => value
     Err(message) => {
@@ -971,6 +1067,13 @@ async fn handle_agent_start(
       return
     }
   }
+  // The session id is known before the spawn so the separate stderr log can
+  // be named after it. The session record itself is still written only after
+  // a successful ACP handshake.
+  let now = @async.now()
+  let timestamp = @contracts.format_rfc3339(now)
+  let session_id = @contracts.new_id("agt", now)
+  open_agent_stderr_log(state, session_id)
   let spec = @agent.AgentSpec::new(
     agent_id~,
     mode~,
@@ -980,17 +1083,17 @@ async fn handle_agent_start(
     env=@contracts.agent_env_from_json(request.params),
   )
   let stderr_tail : Ref[String] = Ref("")
-  // The runtime is created after the handshake; stderr is collected through a
-  // plain Ref so the drain callback stays synchronous.
+  // stderr is drained on its own pipe: never mixed into the ACP stdout
+  // transcript, redacted, capped on the record and appended to the log file.
   let process = match
-    @agent.spawn_agent(group, spec, fn(line) {
-      let combined = stderr_tail.val + line + "\n"
-      stderr_tail.val = if combined.length() > AGENT_STDERR_CAP {
-        combined.substring(start=combined.length() - AGENT_STDERR_CAP)
-      } else {
-        combined
-      }
-    }) {
+    @agent.spawn_agent(
+      group,
+      spec,
+      async fn(line) {
+        record_agent_stderr(state, session_id, stderr_tail, line)
+      },
+      launcher=launcher,
+    ) {
     Ok(value) => value
     Err(message) => {
       let readiness = @contracts.AgentReadiness::new(
@@ -1087,9 +1190,6 @@ async fn handle_agent_start(
       }
     }
   }
-  let now = @async.now()
-  let timestamp = @contracts.format_rfc3339(now)
-  let session_id = @contracts.new_id("agt", now)
   let (display_command, display_args) = default_agent_exe(
     mode,
     @contracts.agent_command_param(request.params),
@@ -1494,13 +1594,26 @@ async fn handle_agent_stop(
   let runtime = state.agent_sessions.get(session_id)
   state.mutex.release()
   match runtime {
-    Some(value) =>
+    Some(value) => {
+      // ACP cancel first, then close: a local adapter or a remote one behind
+      // `ssh -T` both see the notification on the same duplex stdin before
+      // `interrupt()` tears the process down. A short grace period lets the
+      // adapter flush its own stderr before the pipes close.
+      if value.acp_session_id != "" {
+        ignore(
+          value.process.write_json(
+            @agent.acp_cancel_notification(value.acp_session_id),
+          ),
+        )
+        @async.sleep(250)
+      }
       finalize_agent_session(
         state,
         value,
         @contracts.AGENT_STOP_CANCELLED,
         "stopped by owner",
       )
+    }
     None => {
       // Idempotent for an already-finished session, not-found otherwise.
       state.mutex.acquire()
@@ -1646,14 +1759,12 @@ async fn handle_agent_resume(
     env=Map([]),
   )
   let stderr_tail : Ref[String] = Ref("")
+  // PoC round 1 resumes local sessions only: the session record carries no
+  // machine id, so the launcher cannot be reconstructed here. A remote session
+  // record whose command is not present locally fails cleanly at spawn.
   let process = match
-    @agent.spawn_agent(group, spec, fn(line) {
-      let combined = stderr_tail.val + line + "\n"
-      stderr_tail.val = if combined.length() > AGENT_STDERR_CAP {
-        combined.substring(start=combined.length() - AGENT_STDERR_CAP)
-      } else {
-        combined
-      }
+    @agent.spawn_agent(group, spec, async fn(line) {
+      record_agent_stderr(state, session_id, stderr_tail, line)
     }) {
     Ok(value) => value
     Err(message) => {
