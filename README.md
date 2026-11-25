@@ -143,14 +143,15 @@ fail), event cursor stability, `search.sessions`, local + SSH runs on one
 task in parallel, host-restart projection reads, and illegal transitions.
 See `docs/m5.md` for the schedule/evidence/event design and M5 limitations.
 
-`recovery_smoke.sh` uses a temp state dir, an isolated `TMUX_TMPDIR` and a
-fake `ssh` on `PATH` that executes remote commands locally and can be
-switched to `disconnect` via a mode file. It proves desktop exit, host
-`SIGKILL` reattach, missing-session `lost` + one retry, short SSH drops that
-do not fail a Run, remote silence → `unverifiable` + Decision (never
-auto-retried), duplicate dispatch/answer idempotency, retry exhaustion,
-policy deny/approval, audit field completeness and secret-free
-artifacts/audit. See `docs/m6.md`.
+`recovery_smoke.sh` uses a temp state dir, an isolated `TMUX_TMPDIR` with
+`remain-on-exit on`, and a fake `ssh` on `PATH` that executes remote commands
+locally and can be switched to `disconnect` via a mode file. It proves desktop
+exit, host `SIGKILL` reattach, missing-session `lost` + one retry,
+`remain-on-exit` dead panes without an exit marker → `lost` (never an
+infinite `running`), short SSH drops that do not fail a Run, remote silence →
+`unverifiable` + Decision (never auto-retried), duplicate dispatch/answer
+idempotency, retry exhaustion, policy deny/approval, audit field completeness
+and secret-free artifacts/audit. See `docs/m6.md`.
 
 `machine_smoke.sh` starts an ephemeral non-root sshd on a random loopback
 port and injects a fake `ssh` for error classification. Every `add` passes an
@@ -331,6 +332,10 @@ runtime `libvulkan.so.1` must still be installed.)
   records `execution_failed`, not the command stop reasons.
 - Command-mode Runs without tmux (`durable=direct`) are unverifiable after a
   host restart by design.
+- tmux session names use the last 12 characters of the Run id; hosts sharing
+  one tmux server and reset id counters can collide, and the pre-start
+  cleanup would kill the same-named leftover (safe for our own crashes, not
+  for two live hosts on one server).
 - Owner-declared command text is stored verbatim (it is the program and the
   retry source); credentials must come from the machine account, and
   `agent_env` names that look secret are redacted.
