@@ -243,7 +243,10 @@ A real ACP session needs Node, network access for the first
 Claude Code account on the host machine. The host spawns the adapter with
 `env -u CLAUDECODE` and reuses the machine's login; it never reads or logs
 credentials. Without a login the readiness probe fails and the Inbox shows a
-readiness Decision. Agent sessions are local-workspace only in V0.1.
+readiness Decision. The real adapter was verified on 2026-11-25
+(`@zed-industries/claude-code-acp 0.16.2`): the readiness probe passed and one
+real turn streamed the requested output with `stop_reason=end_turn`. Agent
+sessions are local-workspace only in V0.1.
 
 ## Tasks, evidence and approvals
 
@@ -336,6 +339,14 @@ the **installed** `bin/monexus` / `monexus-host` / `monexus-desktop` against
 - the desktop reconnect scenario runs the real window under `xvfb-run` when
   no physical display exists.
 
+Those substitutes are the script's, not the whole V0.1 record. On 2026-11-25
+a real **Debian 13 x86_64** machine was verified separately: `machine
+add`/probe online with a Linux x86_64 profile, remote workspace
+read/write/git/terminal, and parallel local + remote Runs `2/2 runs
+succeeded` with all evidence verified. **Ubuntu has not been separately
+verified; do not read the Debian result as Ubuntu.** RISC-V is out of V0.1
+scope.
+
 The script prints one `PASS`/`FAIL`/`SKIP` row per requirement (packaging plus
 items a–h) and a `SUMMARY checks=... failed=... result=...` line; it exits
 non-zero on any failure. The verified run and the per-item architecture §14
@@ -401,13 +412,22 @@ spikes/m0/                    frozen M0 spike
 
 - Packaging is verified for Linux x86_64 only. The launcher is a POSIX shell
   script; there is no Windows build, installer, auto-update or code signing.
+- Remote machine verification covers a real **Debian 13 x86_64** machine
+  (machine add/probe online, remote workspace read/write/git/terminal,
+  parallel local + remote Runs `2/2` with evidence verified). Ubuntu has not
+  been separately verified — Debian is not Ubuntu — and RISC-V is out of V0.1
+  scope.
 - The window needs Wayland/X11. Headless machines use `--headless`, tests, or
   `xvfb-run`; there is no built-in virtual display.
 - Building from source needs MoonBit + Node; the packaged binaries do not
   need Node at runtime.
 - A real ACP session needs Node, a first-run npx download and a logged-in
-  account; agent sessions and their in-memory transcripts are local-only and
-  do not survive a host restart (session/decision/artifact records do).
+  account. The real adapter (`claude-code-acp 0.16.2`) was verified locally
+  on 2026-11-25 (readiness plus one turn, `stop_reason=end_turn`). Agent
+  sessions and their in-memory transcripts are local-only and do not survive
+  a host restart (session/decision/artifact records do); remote agent
+  sessions are not supported in V0.1, and the Agent-over-SSH design is
+  PoC-only ([ADR-0011](docs/adr/0011-agent-over-ssh.md)).
 - Durable command Runs need `tmux` on the target. Without it the host uses a
   synchronous fallback and such a Run is `unverifiable` after a host restart.
 - Probing is manual (Machines page/CLI); there is no background probe loop.

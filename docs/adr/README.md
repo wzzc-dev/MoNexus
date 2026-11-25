@@ -14,3 +14,4 @@
 | [0008](0008-ssh-access.md) | SSH 接入与远端执行 | Accepted |
 | [0009](0009-ops-agent.md) | 机管 Agent（`ops`）作为 V0.1 种子角色 | Accepted |
 | [0010](0010-m7-launcher-packaging.md) | M7 启动器、打包、首次运行与验收 | Accepted |
+| [0011](0011-agent-over-ssh.md) | Agent over SSH：ACP over `ssh -T` stdio（PoC 先行） | Accepted |

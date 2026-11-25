@@ -157,9 +157,14 @@ Real ACP adapter:
 - The machine must be logged in to Claude Code. The host spawns the adapter
   with `env -u CLAUDECODE` and never reads/logs credentials.
 - If readiness fails, the Inbox receives a readiness Decision.
-- Agent sessions are local-workspace only in V0.1. Transcripts are kept in
-  memory (bounded); sessions/decisions/artifacts persist but transcript text
-  does not survive a host restart.
+- Verified on 2026-11-25 with `@zed-industries/claude-code-acp 0.16.2`: the
+  readiness probe passed, and one real turn streamed the requested output with
+  `stop_reason=end_turn`.
+- Agent sessions are local-workspace only in V0.1; remote agent sessions are
+  not supported yet (Agent over SSH is a PoC, see
+  [ADR-0011](adr/0011-agent-over-ssh.md)). Transcripts are kept in memory
+  (bounded); sessions/decisions/artifacts persist but transcript text does not
+  survive a host restart.
 
 ## 5. Projects, tasks, Runs and evidence
 
