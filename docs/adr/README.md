@@ -17,3 +17,4 @@
 | [0011](0011-agent-over-ssh.md) | Agent over SSH：ACP over `ssh -T` stdio（PoC 先行） | Accepted |
 | [0012](0012-paired-remote-runtime.md) | 配对远端 runtime（A1）：控制面在主控，执行面下沉 | Accepted |
 | [0013](0013-environment-recipes.md) | 环境配方（A2）：Docker 后端的 WorkspaceProvider 实现 | Proposed |
+| [0014](0014-triggers.md) | 触发器（A3）：事件、日程与 webhook 只创建 Task | Accepted |
