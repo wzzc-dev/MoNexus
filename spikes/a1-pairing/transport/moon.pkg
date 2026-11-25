@@ -1,0 +1,23 @@
+import {
+  "monexus/a1-pairing/protocol" @protocol,
+  "moonbitlang/async" @async,
+  "moonbitlang/async/fs" @fs,
+  "moonbitlang/async/io" @io,
+  "moonbitlang/async/process" @process,
+  "moonbitlang/async/socket" @socket,
+  "moonbitlang/async/tls" @tls,
+  "moonbitlang/core/encoding/utf8" @utf8,
+  "moonbitlang/core/json",
+}
+
+supported_targets = "native"
+
+import {
+  "monexus/contracts" @contracts,
+  "moonbitlang/async" @async,
+  "moonbitlang/async/fs" @fs,
+  "moonbitlang/async/socket" @socket,
+  "moonbitlang/async/tls" @tls,
+  "moonbitlang/core/encoding/utf8" @utf8,
+  "moonbitlang/core/json",
+} for "test"
