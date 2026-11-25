@@ -978,7 +978,9 @@ fn inbox_page(model : Model) -> @moui.View[Msg] {
       960.0,
     ),
   ]
-  if inbox.message != "" {
+  // `inbox.message` carries the same needs/waiting/handled counts already shown
+  // in the stat cards above, so only surface transient status text here.
+  if inbox.message != "" && !inbox.message.has_prefix("needs you: ") {
     lines.push(ui_meta(inbox.message))
   }
   let queue : Array[@moui.View[Msg]] = []
@@ -1485,7 +1487,7 @@ fn settings_page(model : Model) -> @moui.View[Msg] {
   let local_host : Array[@moui.View[Msg]] = [
     ui_section("Local host"),
     ui_muted_wrapped(
-      "Start or reuse the host and open this window with `monexus`. Headless machines: `monexus start --headless`.",
+      "Start or reuse the host with monexus. Headless machines: monexus start --headless.",
       960.0,
     ),
   ]
