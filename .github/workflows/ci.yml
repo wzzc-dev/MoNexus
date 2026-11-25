@@ -43,6 +43,11 @@ jobs:
           moon version --all
           node --version
 
+      # The setup action installs the toolchain but no registry index; without
+      # this, moon build cannot resolve mooncakes dependencies.
+      - name: Update MoonBit registry
+        run: moon update
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
