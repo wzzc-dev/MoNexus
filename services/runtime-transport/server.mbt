@@ -308,6 +308,39 @@ async fn PrimaryServer::send_json(
 }
 
 ///|
+/// Connection poll bound. Authenticated reads wait at most this long before
+/// re-checking heartbeat deadline and channel closure, so revocation and
+/// shutdown are visible without closing a TLS object from another task.
+const CONNECTION_POLL_MS : Int64 = 100L
+
+///|
+async fn PrimaryServer::send_frame(
+  self : PrimaryServer,
+  channel : SessionChannel?,
+  stream : TlsStream,
+  value : @json.Json,
+) -> Bool {
+  match channel {
+    Some(active) =>
+      match active.send(value) {
+        Ok(_) => true
+        Err(message) => {
+          self.state.log_line("send failed: " + safe_detail(message))
+          false
+        }
+      }
+    None => self.send_json(stream, value)
+  }
+}
+
+///|
+fn drain_notification_json() -> @json.Json {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("reason", @contracts.json_string("owner_requested"))
+  @contracts.RpcNotification::new(METHOD_DRAIN, params).to_json()
+}
+
+///|
 async fn PrimaryServer::handle_connection(
   self : PrimaryServer,
   tcp : @socket.Tcp,
@@ -321,88 +354,129 @@ async fn PrimaryServer::handle_connection(
     }
   }
   let source = source_host(stream.peer())
-  let mut session_id = ""
-  let mut authenticated = false
-  let mut drain_sent = false
-  defer stream.close()
-  while true {
-    let timeout_ms = if authenticated {
-      timeout_ms_of(
-        self.config.heartbeat_interval_ms *
-        self.config.heartbeat_max_missed.to_int64(),
-      )
-    } else {
-      timeout_ms_of(self.config.hello_timeout_ms)
-    }
-    let attempt : Result[@json.Json, String]? = @async.with_timeout_opt(
-      timeout_ms,
-      () => {
-        let frame = stream.read() catch {
-          error => return Err(safe_error(error))
-        }
-        Ok(frame)
-      },
-    )
-    match attempt {
-      None => {
+  let channel_ref : Ref[SessionChannel?] = Ref(None)
+  // The connection owns a task group so registered handlers can run while the
+  // read loop keeps reading: a handler that asks the node to run something
+  // awaits a response frame that only this loop can deliver.
+  @async.with_task_group(async fn(group : @async.TaskGroup[Unit]) -> Unit {
+    let mut session_id = ""
+    let mut authenticated = false
+    let mut drain_sent = false
+    let mut last_activity = @async.now()
+    let mut budget_ms = self.config.hello_timeout_ms
+    while true {
+      match channel_ref.val {
+        Some(active) =>
+          if active.is_closed() {
+            break
+          }
+        None => ()
+      }
+      let now_ms = @async.now()
+      let remaining = last_activity + budget_ms - now_ms
+      if remaining <= 0L {
         if authenticated {
           self.state.audit.record(
             "runtime.heartbeat_timeout",
             "",
             "timeout",
             "session_id=" + session_id,
-            @async.now(),
+            now_ms,
           )
-          self.state.log_line(
-            "heartbeat timeout session_id=" + session_id,
-          )
+          self.state.log_line("heartbeat timeout session_id=" + session_id)
         } else {
           self.state.log_line("unauthenticated connection timed out")
         }
         break
       }
-      Some(Err(message)) => {
-        self.state.log_line("connection read failed: " + message)
-        break
-      }
-      Some(Ok(frame)) => {
-        let outcome = self.handle_frame(
-          stream,
-          frame,
-          source,
-          session_id,
-          authenticated,
-          drain_sent,
-        )
-        session_id = outcome.session_id
-        authenticated = outcome.authenticated
-        drain_sent = outcome.drain_sent
-        if outcome.close {
+      let wait_ms = timeout_ms_of(
+        if remaining > CONNECTION_POLL_MS {
+          CONNECTION_POLL_MS
+        } else {
+          remaining
+        },
+      )
+      let attempt : Result[@json.Json, String]? = @async.with_timeout_opt(
+        wait_ms,
+        () => {
+          let frame = stream.read() catch {
+            error => return Err(safe_error(error))
+          }
+          Ok(frame)
+        },
+      )
+      match attempt {
+        None => continue
+        Some(Err(message)) => {
+          self.state.log_line("connection read failed: " + message)
           break
         }
-        if !drain_sent && self.state.is_draining() {
-          let params : Map[String, @json.Json] = Map([])
-          params.set("reason", @contracts.json_string("owner_requested"))
-          let notification = @contracts.RpcNotification::new(
-            METHOD_DRAIN,
-            params,
+        Some(Ok(frame)) => {
+          last_activity = @async.now()
+          let outcome = self.handle_frame(
+            group,
+            channel_ref.val,
+            stream,
+            frame,
+            source,
+            session_id,
+            authenticated,
+            drain_sent,
           )
-          if !self.send_json(stream, notification.to_json()) {
+          session_id = outcome.session_id
+          authenticated = outcome.authenticated
+          drain_sent = outcome.drain_sent
+          if authenticated && channel_ref.val is None && session_id != "" {
+            match self.state.session_info(session_id) {
+              Some(session) => {
+                let created = SessionChannel::new(
+                  session.runtime_id,
+                  session.session_id,
+                  stream,
+                )
+                self.state.attach_channel(created)
+                channel_ref.val = Some(created)
+              }
+              None => ()
+            }
+          }
+          if authenticated {
+            budget_ms = self.config.heartbeat_interval_ms *
+              self.config.heartbeat_max_missed.to_int64()
+          }
+          if outcome.close {
             break
           }
-          drain_sent = true
+          if !drain_sent && self.state.is_draining() {
+            if !self.send_frame(channel_ref.val, stream, drain_notification_json()) {
+              break
+            }
+            drain_sent = true
+          }
         }
       }
     }
-  }
-  if authenticated {
-    self.state.close_session(session_id)
-  }
+    // Fail outstanding requests and unregister before the group waits for
+    // handler children, so a handler blocked on a node response can finish.
+    match channel_ref.val {
+      Some(active) => {
+        active.close()
+        self.state.detach_channel(active)
+      }
+      None => ()
+    }
+    if authenticated {
+      self.state.close_session(session_id)
+    }
+  })
+  stream.close()
 }
 
 ///|
 async fn PrimaryServer::handle_frame(
   self : PrimaryServer,
+  group : @async.TaskGroup[Unit],
+  channel : SessionChannel?,
   stream : TlsStream,
   frame : @json.Json,
   source : String,
@@ -412,35 +486,62 @@ async fn PrimaryServer::handle_frame(
 ) -> FrameOutcome {
   match @contracts.parse_request(frame) {
     Ok(value) => {
-      self.handle_request(stream, value, source, session_id, authenticated, drain_sent)
-    }
-    Err(_) => {
-      let notification = match @contracts.parse_notification(frame) {
-        Ok(value) => value
-        Err(message) => {
-          self.state.log_line("protocol error: " + message)
-          return {
-            session_id,
-            authenticated,
-            drain_sent,
-            close: true,
-          }
-        }
-      }
-      self.handle_notification(
+      self.handle_request(
+        group,
+        channel,
         stream,
-        notification,
+        value,
+        source,
         session_id,
         authenticated,
         drain_sent,
       )
     }
+    Err(_) =>
+      match @contracts.parse_notification(frame) {
+        Ok(value) => {
+          self.handle_notification(
+            channel,
+            stream,
+            value,
+            session_id,
+            authenticated,
+            drain_sent,
+          )
+        }
+        Err(_) =>
+          match @contracts.parse_response(frame) {
+            Ok(response) => {
+              // Response frames are answers to primary→node requests.
+              // Routing requests first keeps a request frame from being
+              // mistaken for a response (a request has an id but no result).
+              match channel {
+                Some(active) => {
+                  let _ = active.deliver(response)
+                }
+                None => self.state.log_line("unexpected response frame")
+              }
+              outcome_continue(session_id, drain_sent)
+            }
+            Err(message) => {
+              self.state.log_line("protocol error: " + message)
+              {
+                session_id,
+                authenticated,
+                drain_sent,
+                close: true,
+              }
+            }
+          }
+      }
   }
 }
 
 ///|
 async fn PrimaryServer::handle_request(
   self : PrimaryServer,
+  group : @async.TaskGroup[Unit],
+  channel : SessionChannel?,
   stream : TlsStream,
   request : @contracts.RpcRequest,
   source : String,
@@ -452,11 +553,12 @@ async fn PrimaryServer::handle_request(
   let method = request.method
   match method {
     m if m == METHOD_PAIR => {
-      let sent = self.handle_pair(stream, id, request.params, source)
+      let sent = self.handle_pair(channel, stream, id, request.params, source)
       { session_id, authenticated, drain_sent, close: !sent }
     }
     m if m == METHOD_HELLO => {
       self.handle_hello(
+        channel,
         stream,
         id,
         request.params,
@@ -472,7 +574,7 @@ async fn PrimaryServer::handle_request(
           id,
           protocol_error(ERR_UNAUTHORIZED, "unauthorized"),
         )
-        let _ = self.send_json(stream, response.to_json())
+        let _ = self.send_frame(channel, stream, response.to_json())
         return {
           session_id,
           authenticated,
@@ -485,6 +587,8 @@ async fn PrimaryServer::handle_request(
       match self.state.heartbeat(session_id) {
         Ok(cursor) => {
           self.handle_authenticated_request(
+            group,
+            channel,
             stream,
             request,
             source,
@@ -495,7 +599,7 @@ async fn PrimaryServer::handle_request(
         }
         Err(failure) => {
           let response = rpc_error_response(id, auth_failure_error(failure))
-          let _ = self.send_json(stream, response.to_json())
+          let _ = self.send_frame(channel, stream, response.to_json())
           outcome_close(session_id, drain_sent)
         }
       }
@@ -506,6 +610,7 @@ async fn PrimaryServer::handle_request(
 ///|
 async fn PrimaryServer::handle_pair(
   self : PrimaryServer,
+  channel : SessionChannel?,
   stream : TlsStream,
   id : String,
   params : Map[String, @json.Json],
@@ -515,28 +620,28 @@ async fn PrimaryServer::handle_pair(
     Ok(value) => value
     Err(message) => {
       let response = rpc_error_response(id, invalid_params_error(message))
-      return self.send_json(stream, response.to_json())
+      return self.send_frame(channel, stream, response.to_json())
     }
   }
   let runtime_id = match params_string(params, "runtime_id") {
     Ok(value) => value
     Err(message) => {
       let response = rpc_error_response(id, invalid_params_error(message))
-      return self.send_json(stream, response.to_json())
+      return self.send_frame(channel, stream, response.to_json())
     }
   }
   let protocol_version = match params_int(params, "protocol_version") {
     Ok(value) => value
     Err(message) => {
       let response = rpc_error_response(id, invalid_params_error(message))
-      return self.send_json(stream, response.to_json())
+      return self.send_frame(channel, stream, response.to_json())
     }
   }
   let capabilities = match params_string_array(params, "capabilities") {
     Ok(value) => value
     Err(message) => {
       let response = rpc_error_response(id, invalid_params_error(message))
-      return self.send_json(stream, response.to_json())
+      return self.send_frame(channel, stream, response.to_json())
     }
   }
   match
@@ -549,11 +654,11 @@ async fn PrimaryServer::handle_pair(
     ) {
     Ok(grant) => {
       let response = rpc_result_response(id, pair_grant_json(grant))
-      self.send_json(stream, response.to_json())
+      self.send_frame(channel, stream, response.to_json())
     }
     Err(failure) => {
       let response = rpc_error_response(id, pair_failure_error(failure))
-      self.send_json(stream, response.to_json())
+      self.send_frame(channel, stream, response.to_json())
     }
   }
 }
@@ -561,6 +666,7 @@ async fn PrimaryServer::handle_pair(
 ///|
 async fn PrimaryServer::handle_hello(
   self : PrimaryServer,
+  channel : SessionChannel?,
   stream : TlsStream,
   id : String,
   params : Map[String, @json.Json],
@@ -574,7 +680,7 @@ async fn PrimaryServer::handle_hello(
     Ok(value) => value
     Err(message) => {
       let response = rpc_error_response(id, invalid_params_error(message))
-      let _ = self.send_json(stream, response.to_json())
+      let _ = self.send_frame(channel, stream, response.to_json())
       return {
         session_id: "",
         authenticated,
@@ -587,7 +693,7 @@ async fn PrimaryServer::handle_hello(
     Ok(value) => value
     Err(message) => {
       let response = rpc_error_response(id, invalid_params_error(message))
-      let _ = self.send_json(stream, response.to_json())
+      let _ = self.send_frame(channel, stream, response.to_json())
       return {
         session_id: "",
         authenticated,
@@ -605,7 +711,7 @@ async fn PrimaryServer::handle_hello(
           id,
           protocol_error(ERR_UNSUPPORTED_VERSION, "unsupported protocol version"),
         )
-        let _ = self.send_json(stream, response.to_json())
+        let _ = self.send_frame(channel, stream, response.to_json())
         return {
           session_id: "",
           authenticated,
@@ -615,7 +721,7 @@ async fn PrimaryServer::handle_hello(
       }
     Err(message) => {
       let response = rpc_error_response(id, invalid_params_error(message))
-      let _ = self.send_json(stream, response.to_json())
+      let _ = self.send_frame(channel, stream, response.to_json())
       return {
         session_id: "",
         authenticated,
@@ -635,7 +741,7 @@ async fn PrimaryServer::handle_hello(
     Ok(value) => value
     Err(failure) => {
       let response = rpc_error_response(id, auth_failure_error(failure))
-      let _ = self.send_json(stream, response.to_json())
+      let _ = self.send_frame(channel, stream, response.to_json())
       return {
         session_id: "",
         authenticated,
@@ -664,7 +770,7 @@ async fn PrimaryServer::handle_hello(
     ("draining", @contracts.json_bool(self.state.is_draining())),
   ])
   let response = rpc_result_response(id, result)
-  if !self.send_json(stream, response.to_json()) {
+  if !self.send_frame(channel, stream, response.to_json()) {
     return {
       session_id: "",
       authenticated: false,
@@ -683,6 +789,8 @@ async fn PrimaryServer::handle_hello(
 ///|
 async fn PrimaryServer::handle_authenticated_request(
   self : PrimaryServer,
+  group : @async.TaskGroup[Unit],
+  channel : SessionChannel?,
   stream : TlsStream,
   request : @contracts.RpcRequest,
   source : String,
@@ -699,7 +807,7 @@ async fn PrimaryServer::handle_authenticated_request(
         id,
         protocol_error(ERR_REVOKED, "credential revoked"),
       )
-      let _ = self.send_json(stream, response.to_json())
+      let _ = self.send_frame(channel, stream, response.to_json())
       return outcome_close(session_id, drain_sent)
     }
   }
@@ -711,7 +819,7 @@ async fn PrimaryServer::handle_authenticated_request(
         ("draining", @contracts.json_bool(self.state.is_draining())),
       ]),
     )
-    let _ = self.send_json(stream, response.to_json())
+    let _ = self.send_frame(channel, stream, response.to_json())
     return outcome_continue(session_id, drain_sent)
   }
   if method == METHOD_BYE {
@@ -720,7 +828,7 @@ async fn PrimaryServer::handle_authenticated_request(
       id,
       @contracts.json_object([("ok", @contracts.json_bool(true))]),
     )
-    let _ = self.send_json(stream, response.to_json())
+    let _ = self.send_frame(channel, stream, response.to_json())
     return {
       session_id,
       authenticated: true,
@@ -733,7 +841,7 @@ async fn PrimaryServer::handle_authenticated_request(
       Ok(value) => value
       Err(message) => {
         let response = rpc_error_response(id, invalid_params_error(message))
-        let _ = self.send_json(stream, response.to_json())
+        let _ = self.send_frame(channel, stream, response.to_json())
         return outcome_continue(session_id, drain_sent)
       }
     }
@@ -742,12 +850,12 @@ async fn PrimaryServer::handle_authenticated_request(
       Ok(value) => value
       Err(failure) => {
         let response = rpc_error_response(id, auth_failure_error(failure))
-        let _ = self.send_json(stream, response.to_json())
+        let _ = self.send_frame(channel, stream, response.to_json())
         return outcome_continue(session_id, drain_sent)
       }
     }
     let response = rpc_result_response(id, pair_grant_json(grant))
-    let _ = self.send_json(stream, response.to_json())
+    let _ = self.send_frame(channel, stream, response.to_json())
     return outcome_continue(session_id, drain_sent)
   }
   if method == METHOD_EVENT {
@@ -762,19 +870,19 @@ async fn PrimaryServer::handle_authenticated_request(
           (self.state.now)(),
         )
         let response = rpc_error_response(id, invalid_params_error(message))
-        let _ = self.send_json(stream, response.to_json())
+        let _ = self.send_frame(channel, stream, response.to_json())
         return outcome_continue(session_id, drain_sent)
       }
     }
     match self.state.accept_event(session.runtime_id, event) {
       Ok(ack) => {
         let response = rpc_result_response(id, ack.to_json())
-        let _ = self.send_json(stream, response.to_json())
+        let _ = self.send_frame(channel, stream, response.to_json())
         return outcome_continue(session_id, drain_sent)
       }
       Err(EventMalformed(message)) => {
         let response = rpc_error_response(id, invalid_params_error(message))
-        let _ = self.send_json(stream, response.to_json())
+        let _ = self.send_frame(channel, stream, response.to_json())
         return outcome_continue(session_id, drain_sent)
       }
       Err(EventStorage(_)) => {
@@ -782,7 +890,7 @@ async fn PrimaryServer::handle_authenticated_request(
           id,
           @contracts.RpcError::new(@contracts.ERR_INTERNAL, "internal error"),
         )
-        let _ = self.send_json(stream, response.to_json())
+        let _ = self.send_frame(channel, stream, response.to_json())
         return outcome_close(session_id, drain_sent)
       }
     }
@@ -799,26 +907,37 @@ async fn PrimaryServer::handle_authenticated_request(
       id,
       @contracts.json_object([("ok", @contracts.json_bool(true))]),
     )
-    let _ = self.send_json(stream, response.to_json())
+    let _ = self.send_frame(channel, stream, response.to_json())
     return outcome_continue(session_id, drain_sent)
   }
   if reserved_method(method) {
     let response = rpc_error_response(id, method_not_found_error(method))
-    let _ = self.send_json(stream, response.to_json())
+    let _ = self.send_frame(channel, stream, response.to_json())
     return outcome_continue(session_id, drain_sent)
   }
-  let result = self.dispatch_registered(session, request)
-  match result {
-    Ok(value) => {
-      let response = rpc_result_response(id, value)
-      if !self.send_json(stream, response.to_json()) {
-        return outcome_close(session_id, drain_sent)
-      }
+  // Handlers run in child tasks: a handler that issues a runtime request to
+  // the node waits for a response frame that only the read loop can deliver.
+  // Responses are matched by request id, so out-of-order completion is safe.
+  match channel {
+    Some(active) => {
+      group.spawn_bg(() => {
+        let result = self.dispatch_registered(session, request)
+        match result {
+          Ok(value) => active.respond(request.id, value)
+          Err(error) => active.respond_error(request.id, error)
+        }
+      }, allow_failure=true)
       outcome_continue(session_id, drain_sent)
     }
-    Err(error) => {
-      let response = rpc_error_response(id, error)
-      let _ = self.send_json(stream, response.to_json())
+    None => {
+      let response = rpc_error_response(
+        id,
+        @contracts.RpcError::new(
+          @contracts.ERR_INTERNAL,
+          "session channel is not ready",
+        ),
+      )
+      let _ = self.send_frame(channel, stream, response.to_json())
       outcome_continue(session_id, drain_sent)
     }
   }
@@ -880,6 +999,7 @@ async fn PrimaryServer::dispatch_registered(
 ///|
 async fn PrimaryServer::handle_notification(
   self : PrimaryServer,
+  channel : SessionChannel?,
   stream : TlsStream,
   notification : @contracts.RpcNotification,
   session_id : String,
@@ -927,7 +1047,7 @@ async fn PrimaryServer::handle_notification(
           METHOD_ACK,
           params,
         )
-        if !self.send_json(stream, ack_notification.to_json()) {
+        if !self.send_frame(channel, stream, ack_notification.to_json()) {
           return outcome_close(session_id, drain_sent)
         }
         outcome_continue(session_id, drain_sent)
@@ -943,7 +1063,7 @@ async fn PrimaryServer::handle_notification(
     let params : Map[String, @json.Json] = Map([])
     params.set("cursor", @contracts.json_int64(cursor))
     let ack_notification = @contracts.RpcNotification::new(METHOD_ACK, params)
-    if !self.send_json(stream, ack_notification.to_json()) {
+    if !self.send_frame(channel, stream, ack_notification.to_json()) {
       return outcome_close(session_id, drain_sent)
     }
     outcome_continue(session_id, drain_sent)

@@ -13,5 +13,6 @@ members = [
   "./services/pty-runtime",
   "./services/git-runtime",
   "./services/runtime-transport",
+  "./services/runtime-node",
   "./apps/desktop",
 ]

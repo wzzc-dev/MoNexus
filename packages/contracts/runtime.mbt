@@ -1,0 +1,135 @@
+///|
+/// Runtime method contracts (A1.2b).
+///
+/// The paired runtime transport reserves `runtime.pair`, `runtime.hello`,
+/// `runtime.heartbeat`, `runtime.rotate`, `runtime.probe`, `runtime.bye`,
+/// `runtime.event`, `runtime.ack`, `runtime.drain` and `runtime.replay_gap`.
+/// The methods below are the application layer layered on top: the primary
+/// sends them over the duplex session channel, the node dispatches them to the
+/// runtime execution core (`monexus/runtime`).
+///
+/// Every mutating method takes `client_request_id` in `params`. A retry with
+/// the same id returns the recorded result without executing again, both at
+/// the primary (durable handler cache) and at the node (bounded in-memory
+/// cache plus the runtime's own durable `(client_request_id -> run_id)`
+/// mapping). Read methods are idempotent by construction.
+
+///|
+pub const METHOD_RUNTIME_EXEC_START : String = "runtime.exec.start"
+
+///|
+pub const METHOD_RUNTIME_EXEC_CANCEL : String = "runtime.exec.cancel"
+
+///|
+pub const METHOD_RUNTIME_EXEC_STATUS : String = "runtime.exec.status"
+
+///|
+pub const METHOD_RUNTIME_FS_READ : String = "runtime.fs.read"
+
+///|
+pub const METHOD_RUNTIME_FS_WRITE : String = "runtime.fs.write"
+
+///|
+pub const METHOD_RUNTIME_FS_LIST : String = "runtime.fs.list"
+
+///|
+pub const METHOD_RUNTIME_FS_STAT : String = "runtime.fs.stat"
+
+///|
+pub const METHOD_RUNTIME_PTY_OPEN : String = "runtime.pty.open"
+
+///|
+pub const METHOD_RUNTIME_PTY_INPUT : String = "runtime.pty.input"
+
+///|
+pub const METHOD_RUNTIME_PTY_RESIZE : String = "runtime.pty.resize"
+
+///|
+pub const METHOD_RUNTIME_PTY_CLOSE : String = "runtime.pty.close"
+
+///|
+pub const METHOD_RUNTIME_PTY_STATUS : String = "runtime.pty.status"
+
+///|
+pub const METHOD_RUNTIME_GIT_STATUS : String = "runtime.git.status"
+
+///|
+pub const METHOD_RUNTIME_GIT_DIFF : String = "runtime.git.diff"
+
+///|
+pub const METHOD_RUNTIME_GIT_LOG : String = "runtime.git.log"
+
+///|
+pub const METHOD_RUNTIME_GIT_SHOW : String = "runtime.git.show"
+
+///|
+pub const METHOD_RUNTIME_GIT_BRANCHES : String = "runtime.git.branches"
+
+///|
+pub const METHOD_RUNTIME_GIT_BRANCH_CREATE : String = "runtime.git.branch_create"
+
+///|
+pub const METHOD_RUNTIME_GIT_CHECKOUT : String = "runtime.git.checkout"
+
+///|
+pub const METHOD_RUNTIME_GIT_WORKTREES : String = "runtime.git.worktrees"
+
+///|
+pub const METHOD_RUNTIME_GIT_WORKTREE_ADD : String = "runtime.git.worktree_add"
+
+///|
+pub const METHOD_RUNTIME_GIT_WORKTREE_REMOVE : String =
+  "runtime.git.worktree_remove"
+
+///|
+pub const METHOD_RUNTIME_GIT_READ_OUTPUT : String = "runtime.git.read_output"
+
+///|
+/// Every application method the node registers. A1.3b (policy) and A1.4
+/// (remote ACP) dispatch through these names; they must not drift.
+pub fn runtime_application_methods() -> Array[String] {
+  [
+    METHOD_RUNTIME_EXEC_START,
+    METHOD_RUNTIME_EXEC_CANCEL,
+    METHOD_RUNTIME_EXEC_STATUS,
+    METHOD_RUNTIME_FS_READ,
+    METHOD_RUNTIME_FS_WRITE,
+    METHOD_RUNTIME_FS_LIST,
+    METHOD_RUNTIME_FS_STAT,
+    METHOD_RUNTIME_PTY_OPEN,
+    METHOD_RUNTIME_PTY_INPUT,
+    METHOD_RUNTIME_PTY_RESIZE,
+    METHOD_RUNTIME_PTY_CLOSE,
+    METHOD_RUNTIME_PTY_STATUS,
+    METHOD_RUNTIME_GIT_STATUS,
+    METHOD_RUNTIME_GIT_DIFF,
+    METHOD_RUNTIME_GIT_LOG,
+    METHOD_RUNTIME_GIT_SHOW,
+    METHOD_RUNTIME_GIT_BRANCHES,
+    METHOD_RUNTIME_GIT_BRANCH_CREATE,
+    METHOD_RUNTIME_GIT_CHECKOUT,
+    METHOD_RUNTIME_GIT_WORKTREES,
+    METHOD_RUNTIME_GIT_WORKTREE_ADD,
+    METHOD_RUNTIME_GIT_WORKTREE_REMOVE,
+    METHOD_RUNTIME_GIT_READ_OUTPUT,
+  ]
+}
+
+///|
+/// Methods that change node state and therefore require a policy snapshot
+/// (A1.3b). Reads (status/list/stat/read/diff/log/show/branches/worktrees/
+/// read_output) are allowed with no snapshot; writes, exec starts, PTY
+/// input/resize/close and git branch/worktree mutations fail closed.
+pub fn runtime_method_mutates(method : String) -> Bool {
+  method == METHOD_RUNTIME_EXEC_START ||
+  method == METHOD_RUNTIME_EXEC_CANCEL ||
+  method == METHOD_RUNTIME_FS_WRITE ||
+  method == METHOD_RUNTIME_PTY_OPEN ||
+  method == METHOD_RUNTIME_PTY_INPUT ||
+  method == METHOD_RUNTIME_PTY_RESIZE ||
+  method == METHOD_RUNTIME_PTY_CLOSE ||
+  method == METHOD_RUNTIME_GIT_BRANCH_CREATE ||
+  method == METHOD_RUNTIME_GIT_CHECKOUT ||
+  method == METHOD_RUNTIME_GIT_WORKTREE_ADD ||
+  method == METHOD_RUNTIME_GIT_WORKTREE_REMOVE
+}

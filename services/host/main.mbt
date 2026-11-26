@@ -22,6 +22,7 @@ async fn run_host_command(args : Array[String]) -> (Int32, String) {
     "status" => status_command(args[2:].to_owned())
     "subscribe" => subscribe_command(args[2:].to_owned())
     "machine" => machine_command(args[2:].to_owned())
+    "runtime" | "--runtime" => runtime_command(args[2:].to_owned())
     "rpc" => rpc_command(args[2:].to_owned())
     _ =>
       (
@@ -52,7 +53,7 @@ fn usage_text() -> String {
     "  monexus-host status [--state-dir DIR]",
     "  monexus-host subscribe [--state-dir DIR] [--since SEQ]",
     "      [--timeout-ms N] [--max-events N]",
-    "  monexus-host machine add [--state-dir DIR] [--kind ssh|local] --host HOST",
+    "  monexus-host machine add [--state-dir DIR] [--kind ssh|local|runtime] --host HOST",
     "      [--name NAME] [--port N] [--user USER] [--identity FILE]",
     "      [--use-ssh-config true|false]",
     "      [--host-key-policy accept-new|yes|no|config]",
@@ -62,6 +63,8 @@ fn usage_text() -> String {
     "      [--timeout-seconds N]",
     "  monexus-host machine remove --id ID [--state-dir DIR]",
     "  monexus-host rpc --method METHOD [--state-dir DIR] [--params JSON]",
+    "  monexus-host runtime pair|serve|status [--runtime-id ID] ...",
+    "      (see `monexus-host runtime help`; also `--runtime ...`)",
     "",
     "`serve` writes DIR/host.json (mode 0600), binds a random loopback port",
     "and serves JSON-RPC 2.0 over WebSocket. Default DIR: $MONEXUS_STATE_DIR,",
@@ -404,7 +407,7 @@ fn profile_lines(profile : @contracts.MachineProfile) -> Array[String] {
 fn machine_usage() -> String {
   [
     "usage:",
-    "  monexus-host machine add [--state-dir DIR] [--kind ssh|local] --host HOST",
+    "  monexus-host machine add [--state-dir DIR] [--kind ssh|local|runtime] --host HOST",
     "      [--name NAME] [--port N] [--user USER] [--identity FILE]",
     "      [--use-ssh-config true|false] [--host-key-policy POLICY]",
     "      [--known-hosts-file FILE]",
@@ -412,6 +415,8 @@ fn machine_usage() -> String {
     "  monexus-host machine probe --id ID [--state-dir DIR] [--timeout-seconds N]",
     "  monexus-host machine remove --id ID [--state-dir DIR]",
     "  monexus-host rpc --method METHOD [--state-dir DIR] [--params JSON]",
+    "  monexus-host runtime pair|serve|status [--runtime-id ID] ...",
+    "      (see `monexus-host runtime help`; also `--runtime ...`)",
     "",
     "POLICY is accept-new (default), yes, no or config.",
   ].join("\n")
@@ -438,15 +443,21 @@ async fn machine_add_command(args : Array[String]) -> (Int32, String) {
   let (pairs, _) = parse_pairs(args)
   let state_dir = pair_last(pairs, "--state-dir", @client.default_state_dir())
   let kind = pair_last(pairs, "--kind", @contracts.MACHINE_KIND_SSH)
-  if kind != @contracts.MACHINE_KIND_SSH && kind != @contracts.MACHINE_KIND_LOCAL {
-    return (2, "monexus-host: machine add --kind must be ssh or local\n" + machine_usage())
+  if kind != @contracts.MACHINE_KIND_SSH &&
+    kind != @contracts.MACHINE_KIND_LOCAL &&
+    kind != @contracts.MACHINE_KIND_RUNTIME {
+    return (
+      2,
+      "monexus-host: machine add --kind must be ssh, local or runtime\n" +
+      machine_usage(),
+    )
   }
   let host = if kind == @contracts.MACHINE_KIND_LOCAL {
     "localhost"
   } else {
     pair_last(pairs, "--host", "")
   }
-  if kind == @contracts.MACHINE_KIND_SSH && host == "" {
+  if kind != @contracts.MACHINE_KIND_LOCAL && host == "" {
     return (2, "monexus-host: machine add needs --host\n" + machine_usage())
   }
   let client = match connect_client(state_dir) {
@@ -462,7 +473,11 @@ async fn machine_add_command(args : Array[String]) -> (Int32, String) {
     }),
     host=host,
     kind~,
-    port=pair_int(pairs, "--port", 22),
+    port=if kind == @contracts.MACHINE_KIND_RUNTIME {
+      0
+    } else {
+      pair_int(pairs, "--port", 22)
+    },
     user=pair_last(pairs, "--user", ""),
     identity=pair_last(pairs, "--identity", ""),
     use_ssh_config=pair_bool(pairs, "--use-ssh-config", true),
@@ -583,6 +598,8 @@ fn rpc_usage() -> String {
   [
     "usage:",
     "  monexus-host rpc --method METHOD [--state-dir DIR] [--params JSON]",
+    "  monexus-host runtime pair|serve|status [--runtime-id ID] ...",
+    "      (see `monexus-host runtime help`; also `--runtime ...`)",
     "",
     "Sends one JSON-RPC request over the authenticated WebSocket and prints",
     "the raw result as JSON. client_request_id is added when absent, so M3",

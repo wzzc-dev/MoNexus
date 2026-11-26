@@ -119,6 +119,14 @@ pub struct PrimaryState {
   now : () -> Int64
   mutex : @async.Mutex
   draining : Ref[Bool]
+  /// Live duplex channels keyed by runtime_id. A runtime has at most one
+  /// active session; a new hello closes the previous channel. Not durable:
+  /// channels are connection-scoped like sessions.
+  channels : Map[String, SessionChannel]
+  /// Bounded tap of accepted events, so the primary-side machine provider can
+  /// observe run progress without a second durable store. The outbox remains
+  /// the node's only durable log.
+  recent_events : Array[(String, WireEvent)]
 }
 
 ///|
@@ -162,6 +170,8 @@ pub async fn PrimaryState::open_with_clock(
     now,
     mutex: @async.Mutex::Mutex(),
     draining: Ref(false),
+    channels: Map([]),
+    recent_events: [],
   }
   match snapshot {
     Some(value) => {
@@ -800,16 +810,19 @@ pub async fn PrimaryState::heartbeat(
       } else {
         self.sessions.remove(session_id)
         self.reject_auth(session.runtime_id, "credential_replaced", now_ms)
+        self.drop_channel(session.runtime_id)
         return Err(AuthRevoked)
       }
     None => {
       self.sessions.remove(session_id)
       self.reject_auth(session.runtime_id, "credential_gone", now_ms)
+      self.drop_channel(session.runtime_id)
       return Err(AuthRevoked)
     }
   }
   if record.revoked {
     self.sessions.remove(session_id)
+    self.drop_channel(session.runtime_id)
     return Err(AuthRevoked)
   }
   match record.expires_at_ms {
@@ -817,6 +830,7 @@ pub async fn PrimaryState::heartbeat(
       if expires_at_ms <= now_ms {
         self.revoke_record_locked(record, "expired", now_ms)
         let _ = self.persist_locked()
+        self.drop_channel(session.runtime_id)
         return Err(AuthRevoked)
       }
     None => ()
@@ -878,6 +892,11 @@ pub async fn PrimaryState::revoke(
     Ok(_) => ()
     Err(message) => return Err(message)
   }
+  // Revocation drops a live channel immediately: outstanding requests fail
+  // and the connection loop stops on its next poll. This is intentionally
+  // after the durable write so a crash cannot leave a revoked credential
+  // usable.
+  self.drop_channel(runtime_id)
   Ok(1)
 }
 
@@ -1028,6 +1047,10 @@ pub async fn PrimaryState::accept_event(
     next_cursor.to_string(),
     now_ms,
   )
+  self.recent_events.push((runtime_id, event))
+  while self.recent_events.length() > MAX_AUDIT_EVENTS {
+    let _ = self.recent_events.remove(0)
+  }
   Ok({ cursor: next_cursor, duplicate: false })
 }
 
@@ -1052,6 +1075,109 @@ pub fn PrimaryState::cursor_for(self : PrimaryState, runtime_id : String) -> Int
     Some(record) => record.cursor
     None => 0L
   }
+}
+
+///|
+/// Register the duplex channel for a freshly authenticated session. A runtime
+/// has at most one live session: the previous channel is closed, so a stale
+/// connection cannot keep answering requests.
+pub fn PrimaryState::attach_channel(
+  self : PrimaryState,
+  channel : SessionChannel,
+) -> Unit {
+  let runtime_id = channel.runtime_id()
+  match self.channels.get(runtime_id) {
+    Some(previous) =>
+      if previous.session_id() != channel.session_id() {
+        previous.close()
+        self.audit.record(
+          "runtime.session_replaced",
+          runtime_id,
+          "ok",
+          "session_id=" + channel.session_id(),
+          (self.now)(),
+        )
+      }
+    None => ()
+  }
+  self.channels.set(runtime_id, channel)
+}
+
+///|
+/// The live channel a primary-side provider can send runtime requests on.
+pub fn PrimaryState::channel_for(
+  self : PrimaryState,
+  runtime_id : String,
+) -> SessionChannel? {
+  match self.channels.get(runtime_id) {
+    Some(channel) =>
+      if channel.is_sealed() {
+        None
+      } else {
+        Some(channel)
+      }
+    None => None
+  }
+}
+
+///|
+pub fn PrimaryState::detach_channel(
+  self : PrimaryState,
+  channel : SessionChannel,
+) -> Unit {
+  let runtime_id = channel.runtime_id()
+  match self.channels.get(runtime_id) {
+    Some(current) =>
+      if current.session_id() == channel.session_id() {
+        self.channels.remove(runtime_id)
+      }
+    None => ()
+  }
+}
+
+///|
+/// Close and forget a runtime's channel. Used by revocation and credential
+/// expiry; closing fails every outstanding request immediately.
+pub fn PrimaryState::drop_channel(
+  self : PrimaryState,
+  runtime_id : String,
+) -> Unit {
+  match self.channels.get(runtime_id) {
+    Some(channel) => {
+      self.channels.remove(runtime_id)
+      channel.seal()
+      self.audit.record(
+        "runtime.channel_closed",
+        runtime_id,
+        "ok",
+        "session_id=" + channel.session_id(),
+        (self.now)(),
+      )
+    }
+    None => ()
+  }
+}
+
+///|
+pub fn PrimaryState::channel_count(self : PrimaryState) -> Int {
+  self.channels.length()
+}
+
+///|
+/// Accepted events with `seq > after_seq`, oldest first. Bounded tap for the
+/// primary-side run tracker; the node's durable outbox remains authoritative.
+pub fn PrimaryState::events_since(
+  self : PrimaryState,
+  runtime_id : String,
+  after_seq : Int64,
+) -> Array[WireEvent] {
+  let out : Array[WireEvent] = []
+  for entry in self.recent_events {
+    if entry.0 == runtime_id && entry.1.seq > after_seq {
+      out.push(entry.1)
+    }
+  }
+  out
 }
 
 ///|
