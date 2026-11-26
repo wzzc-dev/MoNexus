@@ -201,6 +201,22 @@ async fn host_wait_policy_ack(
 }
 
 ///|
+/// One scenario at a time per process.
+///
+/// The native driver schedules up to ten test bodies at once in this process
+/// (`moonbit_test_driver_internal_max_concurrent_tests`), and every scenario
+/// here starts a TLS server, a paired node, and the PTY/process machinery
+/// that all share process-wide state: the upstream server `SSL_CTX`
+/// singleton, the async runtime's thread pool and event loop. The transport
+/// suite serializes its end-to-end tests for the same reason (`e2e_test_lock`
+/// in `transport_e2e_test.mbt`). Eight scenarios overlapping here also
+/// compete for the 100 ms connection poll and the 2 s approval channel wait:
+/// a 300-iteration stress run on 2026-11-27 produced a
+/// "denied decision reported as unavailable" panic under that overlap. This
+/// changes scheduling only; every assertion still runs.
+let e2e_test_lock : Lazy[@async.Mutex] = Lazy(() => @async.Mutex::Mutex())
+
+///|
 /// Run one scenario: PKI, primary server, paired node host and a live
 /// provider channel. `body` runs while the session is connected; afterwards
 /// the primary drains so `node_serve` stops cleanly.
@@ -216,6 +232,9 @@ async fn host_run_scenario(
   body : async (NodeHarness) -> Unit,
   sandbox_home~ : Bool = false,
 ) -> Unit {
+  let lock = e2e_test_lock.force()
+  lock.acquire()
+  defer lock.release()
   let pki = host_make_pki()
   defer @fs.rmdir(pki.dir, recursive=true)
   let base = @fs.tmpdir(prefix=prefix)
