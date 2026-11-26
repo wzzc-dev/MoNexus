@@ -403,3 +403,42 @@ test "risk: decisions expose the contracts verdict shape" {
   assert_eq(verdict.action, decision.action)
   assert_eq(verdict.reason, decision.reason)
 }
+
+///|
+/// Regression (A1.5): the read-only fast path must not trust argv[0] by
+/// basename when argv[0] is a path. A workspace-written executable named
+/// `ls` (or `cat`, or `git`) is arbitrary code and must not be allowed as a
+/// low-risk read-only command.
+test "risk: path-qualified argv[0] never rides the read-only fast path" {
+  let context = online_context(test_snapshot())
+  let bare = @policy.evaluate(
+    context,
+    ws_request(@policy.PolicyOperation::Exec, ["ls", "-la"]),
+  )
+  assert_eq(bare.kind.label(), "allow")
+  assert_eq(bare.risk, @contracts.RISK_LOW)
+  let vectors : Array[Array[String]] = [
+    ["/home/user/ws/ls", "-la"],
+    ["./ls"],
+    ["../bin/cat", "README.md"],
+    ["/tmp/agent-tools/git", "status"],
+    ["/home/user/ws/find", ".", "-name", "*.txt"],
+  ]
+  for argv in vectors {
+    let decision = @policy.evaluate(
+      context,
+      ws_request(@policy.PolicyOperation::Exec, argv),
+    )
+    assert_false(decision.is_allowed())
+    assert_eq(decision.kind.label(), "approval_required")
+    assert_true(decision.needs_primary())
+    assert_true(decision.reason.contains("not explicitly allowed"))
+  }
+  // The same path is still just a read-only *operation* when the caller names
+  // an fs/git read method; the operation label, not argv[0], decides there.
+  let fs_read = @policy.evaluate(
+    context,
+    ws_request(@policy.PolicyOperation::FsRead, ["/home/user/ws/ls"]),
+  )
+  assert_true(fs_read.is_allowed())
+}

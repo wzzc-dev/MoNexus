@@ -951,9 +951,59 @@ async fn agent_target_dir(
   let explicit_cwd = @contracts.agent_cwd_param(params)
   let workspace_id = @contracts.agent_workspace_param(params)
   let worktree_id = @contracts.agent_worktree_param(params)
+  let explicit_machine = @contracts.agent_machine_param(params).trim().to_owned()
   let mut cwd = explicit_cwd.trim().to_owned()
   let mut resolved_workspace = workspace_id
   let mut launcher = @agent.ProcessLauncher::Local
+  // A1.5: an explicit machine makes the target unambiguous. Runtime machines
+  // have no workspace record (the provider surface only opens local/SSH
+  // roots), so the agent path selects them directly and maps the primary-side
+  // absolute cwd into the node's rooted workspace. The launcher applies the
+  // same mapping again as a no-op for the already-relative value.
+  if explicit_machine != "" {
+    state.mutex.acquire()
+    let record_result = state.store.get_machine(explicit_machine)
+    let roots = state.runtime_workspace_roots
+    state.mutex.release()
+    let record = match record_result {
+      Ok(Some(value)) => value
+      Ok(None) =>
+        return Err(agent_not_found("machine not found: " + explicit_machine))
+      Err(message) =>
+        return Err(agent_internal("cannot read machine: " + message))
+    }
+    if record.kind == @contracts.MACHINE_KIND_RUNTIME {
+      launcher = match agent_launcher_for_machine(state, record.id) {
+        Ok(value) => value
+        Err(error) => return Err(error)
+      }
+      if cwd == "" {
+        cwd = "."
+      } else {
+        let mapped = match
+          @provider_runtime_agent.runtime_agent_cwd(cwd, roots) {
+          Ok(value) => value
+          Err(message) => return Err(agent_invalid(message))
+        }
+        cwd = if mapped == "" { "." } else { mapped }
+      }
+    } else if record.kind == @contracts.MACHINE_KIND_LOCAL {
+      launcher = @agent.ProcessLauncher::Local
+    } else {
+      if !@agent.agent_ssh_enabled() {
+        return Err(
+          agent_unsupported(
+            "agent sessions currently run only on local worktrees",
+          ),
+        )
+      }
+      launcher = match agent_launcher_for_machine(state, record.id) {
+        Ok(value) => value
+        Err(error) => return Err(error)
+      }
+    }
+    return Ok({ cwd, workspace_id: resolved_workspace, worktree_id, launcher })
+  }
   if worktree_id != "" {
     let record = match lookup_worktree(state, worktree_id) {
       Ok(value) => value
@@ -2189,6 +2239,15 @@ async fn handle_decision_list(
 }
 
 ///|
+///|
+/// A runtime approval Decision is answered through the decision store that the
+/// runtime wait loop polls; it has no ACP session to deliver to. Telling it
+/// apart from an agent permission Decision keeps `decision.respond` honest.
+fn is_runtime_approval_decision(record : @contracts.DecisionRecord) -> Bool {
+  record.machine_id != "" && record.action.has_prefix("runtime.")
+}
+
+///|
 async fn handle_decision_respond(
   state : HostState,
   sink : Sink,
@@ -2300,6 +2359,11 @@ async fn handle_decision_respond(
   state.mutex.release()
   let mut delivery_error = ""
   let mut delivered = false
+  // Runtime approval Decisions belong to the node transport, not to an ACP
+  // session: the host's runtime wait loop polls the decision store, so an
+  // answer recorded here is delivered by construction. Reporting an ACP
+  // delivery failure for them would mislabel a successful approval.
+  let runtime_approval = is_runtime_approval_decision(record)
   match pending {
     Some(value) => {
       let reply = if option_id != "" {
@@ -2320,7 +2384,9 @@ async fn handle_decision_respond(
       }
     }
     None =>
-      if record.kind == @contracts.DECISION_KIND_PERMISSION {
+      if runtime_approval {
+        delivered = true
+      } else if record.kind == @contracts.DECISION_KIND_PERMISSION {
         delivery_error = "agent session is no longer running; ACP reply not delivered"
       }
   }

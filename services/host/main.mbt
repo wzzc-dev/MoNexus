@@ -50,6 +50,10 @@ fn usage_text() -> String {
     "  monexus-host version | --version",
     "  monexus-host serve [--state-dir DIR] [--heartbeat-ms N] [--port N]",
     "      [--trigger-enabled true|false]  (default: $MONEXUS_TRIGGER_ENABLED, off)",
+    "      [--runtime-listen HOST:PORT --runtime-cert FILE --runtime-key FILE]",
+    "      [--runtime-state-dir DIR] [--runtime-policy FILE]",
+    "      [--runtime-workspace-root DIR ...] [--runtime-wait-ms N]",
+    "      [--runtime-approval-ttl-ms N]",
     "  monexus-host status [--state-dir DIR]",
     "  monexus-host subscribe [--state-dir DIR] [--since SEQ]",
     "      [--timeout-ms N] [--max-events N]",
@@ -139,6 +143,17 @@ fn pair_last(
 }
 
 ///|
+fn pair_all(pairs : Array[(String, String)], key : String) -> Array[String] {
+  let out : Array[String] = []
+  for pair in pairs {
+    if pair.0 == key {
+      out.push(pair.1)
+    }
+  }
+  out
+}
+
+///|
 fn pair_int(
   pairs : Array[(String, String)],
   key : String,
@@ -158,6 +173,18 @@ fn pair_int64(
   match pair_last_opt(pairs, key) {
     Some(value) => Some(@string.parse_int64(value) catch { _ => 0L })
     None => None
+  }
+}
+
+///|
+fn pair_int64_or(
+  pairs : Array[(String, String)],
+  key : String,
+  default : Int64,
+) -> Int64 {
+  match pair_last_opt(pairs, key) {
+    Some(value) => @string.parse_int64(value) catch { _ => default }
+    None => default
   }
 }
 
@@ -184,6 +211,18 @@ async fn serve_command(args : Array[String]) -> (Int32, String) {
     heartbeat_ms=pair_int(pairs, "--heartbeat-ms", 1_000),
     port=pair_int(pairs, "--port", 0),
     trigger_enabled=pair_bool(pairs, "--trigger-enabled", env_default),
+    runtime_listen=pair_last(pairs, "--runtime-listen", ""),
+    runtime_cert=pair_last(pairs, "--runtime-cert", ""),
+    runtime_key=pair_last(pairs, "--runtime-key", ""),
+    runtime_state_dir=pair_last(pairs, "--runtime-state-dir", ""),
+    runtime_policy=pair_last(pairs, "--runtime-policy", ""),
+    runtime_workspace_roots=pair_all(pairs, "--runtime-workspace-root"),
+    runtime_wait_ms=pair_int64_or(pairs, "--runtime-wait-ms", 2_000L),
+    runtime_approval_ttl_ms=pair_int64_or(
+      pairs,
+      "--runtime-approval-ttl-ms",
+      60_000L,
+    ),
   )
   @signal.set_global_cancellation_signals(
     [@signal.SIGINT, @signal.SIGTERM],

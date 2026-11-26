@@ -73,6 +73,10 @@ Notes:
 - `--kind local` is a V0.1 addition. It records `kind=local`, probes local
   capabilities instead of SSH, and lets agents run in a workspace that is
   attached to a registered local machine. The default remains `ssh`.
+- `--kind runtime` registers a V0.2 paired node (ADR-0012). Its `--host` is
+  the runtime id the node used when pairing, not a hostname; the node dials
+  out to the primary and has no inbound port. Setup, revoke, drain and
+  switching back to SSH are covered in §10.
 - `--host-key-policy` accepts `accept-new` (default), `yes`, `no` or `config`.
   `accept-new` records a first-seen key in the chosen known-hosts file;
   `strict` behavior belongs to `yes`. Use a dedicated known-hosts file for
@@ -160,11 +164,15 @@ Real ACP adapter:
 - Verified on 2026-11-25 with `@zed-industries/claude-code-acp 0.16.2`: the
   readiness probe passed, and one real turn streamed the requested output with
   `stop_reason=end_turn`.
-- Agent sessions are local-workspace only by default in V0.1; remote agent
-  sessions are not supported yet (Agent over SSH is a gated PoC, see
-  [ADR-0011](adr/0011-agent-over-ssh.md)). Transcripts are kept in memory
-  (bounded); sessions/decisions/artifacts persist but transcript text does not
-  survive a host restart.
+- Agent sessions run on a local machine, or on a V0.2 paired runtime machine
+  selected with `machine_id` (see §10). For a runtime machine the primary-side
+  absolute cwd is mapped into the node's `--runtime-workspace-root`; an
+  absolute path outside those roots is rejected, and a cwd equal to a root
+  becomes `.`.
+- SSH-backed remote agent sessions are still a gated PoC behind
+  `MONEXUS_AGENT_SSH=1` (ADR-0011); they are not part of the V0.2 runtime
+  path. Transcripts are kept in memory (bounded); sessions/decisions/artifacts
+  persist but transcript text does not survive a host restart.
 
 Remote agent PoC (rounds 1–2, not full remote-agent support):
 
@@ -558,11 +566,245 @@ For an incident:
    contain the HMAC secret; never copy the 0600 key file into an incident
    bundle, and rotate by adding a new key before revoking the old one.
 
-## 10. Environment variables
+## 10. Paired remote runtime
+
+V0.2 adds a second kind of execution plane: a **runtime node** dials out to
+the primary host over pinned TLS and executes `machine.exec`, `machine.fs`,
+`machine.pty`, `machine.git` and ACP agent sessions. There is no inbound port
+on the node and no plaintext fallback. The trust model and failure semantics
+are in [ADR-0012](adr/0012-paired-remote-runtime.md); the acceptance matrix
+below is `scripts/runtime_e2e.sh`.
+
+### 10.1 Install and check
+
+The primary needs a TLS leaf certificate and key, a CA bundle the node will
+trust, and the leaf's SHA-256 pin. The pin is computed over the DER form:
+
+```bash
+openssl x509 -in leaf.pem -outform DER | openssl dgst -sha256 -hex
+# use the hex value after "= " as --pin
+```
+
+Start the primary with the runtime listener (both `--runtime-cert` and
+`--runtime-key` are required; there is no plaintext mode):
+
+```bash
+monexus-host serve --state-dir /var/lib/monexus \
+  --runtime-listen 0.0.0.0:7443 \
+  --runtime-cert /etc/monexus/leaf.pem --runtime-key /etc/monexus/leaf.key \
+  --runtime-state-dir /var/lib/monexus/rt \
+  --runtime-policy /etc/monexus/policy.json \
+  --runtime-workspace-root /srv/monexus-workspace \
+  --runtime-wait-ms 2000 --runtime-approval-ttl-ms 120000
+```
+
+`--runtime-workspace-root` may be repeated; it defines the primary-side
+directories that map into the node's workspace. Agent starts with a
+primary-side absolute `cwd` outside those roots are rejected.
+
+There is no separate `doctor` subcommand. Check a node and the pairing with:
+
+```bash
+monexus-host runtime status --runtime-id node-a \
+  --state-base /var/lib/monexus-runtime
+# runtime=node-a state_dir=... workspace=... paired=yes token=...
+monexus-host machine probe --state-dir /var/lib/monexus --id mch_...
+monexus-host rpc --state-dir /var/lib/monexus --method runtime.audit --params '{}'
+```
+
+`runtime status` reports `paired=yes` only when a token exists; it prints the
+token path, never the token. `machine probe` reports `status=online` and the
+node profile, including `policy=snapshot` and the workspace roots.
+
+### 10.2 Pair, serve and attach
+
+```bash
+# 1. Primary: mint a one-time 128-bit code (shown once, never audited).
+monexus-host rpc --state-dir /var/lib/monexus \
+  --method runtime.pairing.create --params '{}'
+# -> {"code":"...", ...}
+
+# 2. Node: exchange the code and store a 0600 token under
+#    <state-base>/<runtime-id>/.
+monexus-host runtime pair --runtime-id node-a \
+  --primary primary.example.com:7443 \
+  --ca /etc/monexus/ca.pem --pin <leaf-sha256> \
+  --code <one-time-code> --state-base /var/lib/monexus-runtime
+
+# 3. Node: dial out and serve. This process has no listening socket.
+monexus-host runtime serve --runtime-id node-a \
+  --primary primary.example.com:7443 \
+  --ca /etc/monexus/ca.pem --pin <leaf-sha256> \
+  --state-base /var/lib/monexus-runtime --heartbeat-ms 300 --backoff-ms 300
+
+# 4. Primary: register the node as a machine (host is the runtime id).
+monexus-host machine add --state-dir /var/lib/monexus \
+  --kind runtime --host node-a --name node-a
+```
+
+Wrong, expired, replayed or already-used codes are rejected with the same
+shape of error, audited as `runtime.pairing_rejected`, and enroll nothing. A
+pin mismatch is refused before a credential is sent. Re-pairing the same
+runtime id rotates the credential and revokes the previous one; using the old
+token afterwards is audited as `runtime.auth_rejected`.
+
+### 10.3 Policy and approvals
+
+The node runs the A1.3b policy gate itself. The primary publishes its snapshot
+on attach; the node acknowledges it (`runtime.status.installed_policies`).
+A read-only command allowed by the snapshot runs without a Decision. A
+high-risk or not-explicitly-allowed command creates a `permission` Decision on
+the primary:
+
+- the Decision is bound to the machine, run and a `sha256:<64 hex>` command
+  digest, and shows the command to the owner;
+- `approve` is one-time and only for that digest; `deny` never executes;
+- if the owner does not answer before `--runtime-approval-ttl-ms`, the
+  Decision expires and the operation fails — there is no offline allow;
+- if the primary is unreachable, the operation waits and then reports
+  `unreachable`/`unverifiable`; it does not run on a cached approval.
+
+A path-qualified `argv[0]` (for example `/tmp/ws/ls`) is never treated as the
+read-only builtin `ls`; it goes through the same approval path. This was a
+classifier bug fixed with a regression test during A1.5 (see
+`services/policy/risk_test.mbt`).
+
+### 10.4 Exec, files, PTY, git and agents
+
+```bash
+monexus-host rpc --method machine.exec --params '{
+  "machine_id":"mch_...","argv":["printf","hello"],"run_id":"run-1",
+  "client_request_id":"crid-1"}'
+monexus-host rpc --method machine.exec.status --params '{
+  "machine_id":"mch_...","run_id":"run-1"}'
+monexus-host rpc --method machine.fs --params '{
+  "machine_id":"mch_...","op":"read","path":"README.md"}'
+monexus-host rpc --method machine.pty --params '{
+  "machine_id":"mch_...","op":"open","argv":["sh"],"rows":24,"cols":80}'
+monexus-host rpc --method machine.git --params '{
+  "machine_id":"mch_...","op":"status"}'
+```
+
+`machine.exec` returns `stdout`/`stderr` separately, the exit code, `status`,
+`stop_reason`, `timed_out`, `run_id` and `started_at`. A timeout finalizes as
+`cancelled` with `stop_reason=timeout` and is never a success. Filesystem
+paths are node-relative; writes are atomically recorded and persisted.
+`machine.git` is read-only (status/diff/log/show/branches). `machine.pty`
+streams bytes through the node and keeps a status snapshot; it does **not**
+surface the shell exit code (use exec when the code matters).
+
+For an agent on a runtime machine, pass `machine_id` in `agent.start` (and a
+`cwd` under a `--runtime-workspace-root`); the host registers the runtime ACP
+launcher when the node attaches, so the process start and its approval use the
+same Decision path:
+
+```bash
+monexus-host rpc --method agent.start --params '{
+  "machine_id":"mch_...","agent_id":"claude","mode":"acp",
+  "cwd":"/srv/monexus-workspace","prompt":"hello"}'
+```
+
+### 10.5 Idempotency and restarts
+
+Every mutating call carries `client_request_id`; the primary caches responses
+for a bounded window and the node keeps a durable idempotency record. To
+retry, send the **same** id and parameters. A replay returns the original
+`run_id`/`started_at` and does not start a second process. Note that
+`monexus-host rpc` generates a fresh id each time and therefore cannot replay;
+use a client that pins `client_request_id` (the harness uses
+`tests/runtime/rpc_client.mjs`).
+
+- **Node restart:** Runs that were still executing are finalized as `lost`
+  with `success=false`; they never become success. Completed Runs and fs
+  idempotency records are recovered from the node's durable event log.
+- **Primary restart:** the node reconnects with backoff and catches up from
+  its outbox cursor; completed Runs remain queryable. In a local drill,
+  killing the primary while a node was connected left the listener port in
+  `TIME-WAIT` and an immediate rebind on the same port failed; stop the node
+  first (or restart on a new port) and let it reconnect.
+- **No reattach:** live PTY sessions and in-flight child processes are not
+  resumed after a node restart. Start a new session after the node is back.
+
+### 10.6 Revoke, drain and switching back to SSH
+
+```bash
+monexus-host rpc --state-dir /var/lib/monexus --method runtime.revoke \
+  --params '{"runtime_id":"node-a","reason":"rotate"}'
+monexus-host rpc --state-dir /var/lib/monexus --method runtime.drain \
+  --params '{}'
+```
+
+Revoking removes the credential immediately; a serving node exits within a
+heartbeat and logs `revoked`, and `machine probe` no longer reports it online.
+Re-pair with a new one-time code to re-enroll. Draining answers
+`{"draining":true}` and lets nodes exit cleanly (`drained`).
+
+To go back to SSH, revoke/drain the runtime node, remove its machine record
+(`machine remove --id mch_...`), and add an SSH machine as in §2. Runtime and
+SSH machine records and providers are separate: registering a local or SSH
+machine does not change a runtime node's attachment, and the existing SSH
+smoke/acceptance suites remain green.
+
+### 10.7 Clearing node state and logs
+
+Stop the node first, then remove its per-runtime directory:
+
+```bash
+rm -rf /var/lib/monexus-runtime/node-a
+```
+
+That directory holds the token, identity, outbox, idempotency store, PTY
+snapshots and the node workspace (all owner-only). On the primary, the
+transport state lives under `--runtime-state-dir` (0600 JSON); revoke the
+runtime before deleting it so no credential is orphaned. Node logs are
+operator-managed (stdout/stderr of `runtime serve`); the primary audit and
+`<state>/logs` contain no pairing code, bearer token or command text. Never
+copy the token file or a pairing code into a report.
+
+### 10.8 Known limits and verification
+
+- **No reattach** after a node restart; unfinished Runs are `lost` (above).
+- **PTY exit codes are not surfaced**; use exec for exit status.
+- **Primary crash rebind:** stop the node before an immediate same-port
+  restart if the listener is still in `TIME-WAIT`.
+- **Packaging:** macOS packaging is not claimed; Ubuntu was not separately
+  verified in this environment; RISC-V is out of scope. The A1.5 evidence was
+  produced on Linux x86_64. Do not cite this section as Ubuntu or macOS
+  validation.
+- **Real ACP model turn:** the harness runs a mock ACP agent by default. With
+  `M4_REAL_ACP=1` (and a logged-in adapter under the node's HOME) it also
+  attempts one real model turn. Without that dependency the row is recorded as
+  `SKIP`/unverified, never as a pass.
+- **Isolation:** `scripts/runtime_e2e.sh` runs the primary and node as
+  separate processes with throwaway HOMEs, state dirs and workspace in one
+  kernel network namespace; CI is unprivileged, so it does not claim namespace
+  isolation. It asserts the node has no listening socket when `ss` is
+  available. The same commands apply on two real hosts.
+- **Acceptance evidence:** `scripts/runtime_e2e.sh` covers the ADR-0012
+  verification items: pairing/transport security (A), exec/streams/timeout/
+  path escape, fs, PTY, git (B), reconnect, lost Runs and primary/node restart
+  (C), real ACP opt-in (E), revoke/drain (D) and log redaction (F); the SSH
+  regression stays in `scripts/agent_smoke.sh`,
+  `scripts/agent_ssh_smoke.sh` and `scripts/acceptance.sh`. Run the harness
+  with:
+
+  ```bash
+  export PATH="$HOME/.moon/bin:$PATH"
+  scripts/runtime_e2e.sh
+  M4_REAL_ACP=1 scripts/runtime_e2e.sh   # also attempt a real model turn
+  ```
+
+  The A1.5 validation run on 2026-11-27 (Linux x86_64, Node 26) reported
+  `129 passed, 1 skipped, 0 failed` and exited 0; the skipped row was the real
+  ACP model turn (`M4_REAL_ACP` not set). CI runs the same command as the
+  `Runtime e2e` step in `.github/workflows/ci.yml`.
+
+## 11. Environment variables
 
 | variable | purpose |
 | --- | --- |
 | `MONEXUS_STATE_DIR` | state directory (default `$HOME/.monexus`) |
+| `MONEXUS_RUNTIME_DIR` | default node state base for `runtime pair/serve/status` (default `$HOME/.monexus/runtime`); overridden by `--state-base` |
 | `MONEXUS_THEME=light\|dark` | desktop startup appearance used when no Settings choice has been saved (illegal or missing → dark) |
 | `MONEXUS_CONFIG_DIR` | desktop preference directory (default `$XDG_CONFIG_HOME/monexus`, else `$HOME/.config/monexus`); the theme choice is `theme.json` |
 | `MONEXUS_HOST_BIN`, `MONEXUS_DESKTOP_BIN` | override component binaries in the launcher |
@@ -583,6 +825,8 @@ For an incident:
 | `TMUX_TMPDIR` | isolate the tmux server used by tests |
 | `ACCEPTANCE_SKIP_PACKAGE=1` | acceptance uses repo binaries instead of a tarball |
 | `M7_REAL_ACP=1` | acceptance also probes a real ACP adapter |
+| `M4_REAL_ACP=1` | runtime e2e harness also attempts a real ACP model turn (otherwise recorded as unverified) |
+| `RUNTIME_E2E_KEEP=1` | keep the runtime e2e harness work directory, state dirs and logs |
 
 ### Theme preference
 

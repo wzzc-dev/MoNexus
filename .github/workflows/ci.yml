@@ -82,3 +82,6 @@ jobs:
 
       - name: Acceptance
         run: bash scripts/acceptance.sh
+
+      - name: Runtime e2e
+        run: bash scripts/runtime_e2e.sh

@@ -9,6 +9,24 @@ pub(all) struct HostOptions {
   /// method answers `unsupported`, `/hooks/*` answers the uniform 401, and no
   /// dispatcher or scheduler is started.
   trigger_enabled : Bool
+  /// Paired-runtime primary endpoint (A1.5). Empty disables the runtime
+  /// listener; there is no plaintext fallback when it is enabled.
+  runtime_listen : String
+  runtime_cert : String
+  runtime_key : String
+  /// Transport state dir (0700). Empty uses `<state_dir>/runtime`.
+  runtime_state_dir : String
+  /// Optional policy snapshot JSON to publish at startup and after restart.
+  runtime_policy : String
+  /// Primary-side workspace roots mapped onto node workspaces. An absolute
+  /// agent cwd below one of these is passed to the node as a relative path.
+  runtime_workspace_roots : Array[String]
+  /// How long an operation waits for a live runtime channel before ending
+  /// unverifiable. Zero means fail immediately.
+  runtime_wait_ms : Int64
+  /// How long a runtime high-risk approval Decision stays answerable. The
+  /// provider caps this at the policy core's grant ceiling.
+  runtime_approval_ttl_ms : Int64
 }
 
 ///|
@@ -18,8 +36,30 @@ pub fn HostOptions::new(
   port~ : Int = 0,
   version~ : String = HOST_VERSION,
   trigger_enabled~ : Bool = false,
+  runtime_listen~ : String = "",
+  runtime_cert~ : String = "",
+  runtime_key~ : String = "",
+  runtime_state_dir~ : String = "",
+  runtime_policy~ : String = "",
+  runtime_workspace_roots~ : Array[String] = [],
+  runtime_wait_ms~ : Int64 = 2_000L,
+  runtime_approval_ttl_ms~ : Int64 = 60_000L,
 ) -> HostOptions {
-  { state_dir, heartbeat_ms: heartbeat_ms.max(50), port, version, trigger_enabled, }
+  {
+    state_dir,
+    heartbeat_ms: heartbeat_ms.max(50),
+    port,
+    version,
+    trigger_enabled,
+    runtime_listen,
+    runtime_cert,
+    runtime_key,
+    runtime_state_dir,
+    runtime_policy,
+    runtime_workspace_roots,
+    runtime_wait_ms: runtime_wait_ms.max(0L),
+    runtime_approval_ttl_ms: runtime_approval_ttl_ms.max(1_000L),
+  }
 }
 
 ///|
@@ -75,6 +115,24 @@ pub struct HostState {
   /// transport attach layer (or a test harness) fills this; an empty entry
   /// fails `agent.start` honestly instead of pretending the machine is local.
   runtime_agent_launchers : Map[String, @agent.RemoteLauncher]
+  /// Primary-side paired-runtime state, when the runtime listener is enabled.
+  /// It owns live channels and the durable transport store.
+  runtime_primary : Ref[@transport.PrimaryState?]
+  /// Decoded policy snapshot published by this primary. It is re-announced
+  /// whenever a new runtime channel attaches, because the node only learns
+  /// policy from `runtime.policy.update` notifications and a publication made
+  /// before the session existed reaches nobody.
+  runtime_policy_snapshot : Ref[@policy.PolicySnapshot?]
+  /// The running TLS listener. Kept so `runtime.status` can report its port
+  /// and shutdown can close it.
+  runtime_server : Ref[@transport.PrimaryServer?]
+  /// Attached runtime providers keyed by host machine id. The provider holds
+  /// pending approval bindings across reconnects, so it is created once per
+  /// live machine rather than per request.
+  runtime_machines : Map[String, @provider_runtime.RuntimeMachine]
+  runtime_workspace_roots : Array[String]
+  runtime_wait_ms : Int64
+  runtime_approval_ttl_ms : Int64
   dispatching : Ref[Bool]
   trigger_enabled : Bool
   trigger_buckets : Map[String, @contracts.TriggerRateBucket]
@@ -209,6 +267,13 @@ fn HostState::new(
     agent_sessions: Map([]),
     agent_transcripts: Map([]),
     runtime_agent_launchers: Map([]),
+    runtime_primary: Ref(None),
+    runtime_policy_snapshot: Ref(None),
+    runtime_server: Ref(None),
+    runtime_machines: Map([]),
+    runtime_workspace_roots: options.runtime_workspace_roots,
+    runtime_wait_ms: options.runtime_wait_ms,
+    runtime_approval_ttl_ms: options.runtime_approval_ttl_ms,
     dispatching: Ref(false),
     trigger_enabled: options.trigger_enabled,
     trigger_buckets: Map([]),

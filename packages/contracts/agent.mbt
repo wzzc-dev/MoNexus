@@ -916,6 +916,7 @@ pub fn agent_start_params(
   prompt : String,
   memory_limit : Int,
   env : Map[String, String],
+  machine_id~ : String = "",
 ) -> Map[String, @json.Json] {
   Map([
     ("client_request_id", json_string(client_request_id)),
@@ -926,6 +927,7 @@ pub fn agent_start_params(
     ("cwd", json_string(cwd)),
     ("workspace_id", json_string(workspace_id)),
     ("worktree_id", json_string(worktree_id)),
+    ("machine_id", json_string(machine_id)),
     ("prompt", json_string(prompt)),
     ("memory_limit", json_int(memory_limit)),
     ("env", agent_env_json(env)),
@@ -1093,6 +1095,11 @@ pub fn agent_workspace_param(params : Map[String, @json.Json]) -> String {
 ///|
 pub fn agent_worktree_param(params : Map[String, @json.Json]) -> String {
   string_field_or(params, "worktree_id", "")
+}
+
+///|
+pub fn agent_machine_param(params : Map[String, @json.Json]) -> String {
+  string_field_or(params, "machine_id", "")
 }
 
 ///|

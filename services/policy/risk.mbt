@@ -347,8 +347,24 @@ fn builtin_high_reason(tokens : Array[String], text : String) -> String? {
 }
 
 ///|
+/// A program name that the read-only fast path may trust by basename. A
+/// path-qualified argv[0] (`/tmp/ws/ls`, `./ls`, `../bin/ps`) names an
+/// arbitrary executable — possibly one the Agent wrote into the workspace —
+/// so its basename must never earn the read-only classification. The caller
+/// must resolve/approve it like any other program.
+fn is_bare_program_name(token : String) -> Bool {
+  !token.contains("/") && !token.contains("\\")
+}
+
+///|
 fn is_read_only_argv(argv : Array[String]) -> Bool {
   if argv.length() == 0 {
+    return false
+  }
+  // argv[0] is the program the runtime will execute. Only a bare command name
+  // is matched by basename; otherwise a workspace-written file named `ls`
+  // would ride the low-risk read-only path.
+  if !is_bare_program_name(argv[0]) {
     return false
   }
   let tokens : Array[String] = []

@@ -560,3 +560,25 @@ async test "runtime machine requires a registered paired launcher, never SSH" {
     Err(error) => assert_true(error.message.contains("machine not found"))
   }
 }
+
+///|
+test "runtime approval decisions are not ACP deliveries" {
+  let base = @contracts.DecisionRecord::new(
+    id="dec_runtime_test",
+    kind=@contracts.DECISION_KIND_PERMISSION,
+    title="Runtime approval needed: runtime.process.start",
+    detail="",
+    session_id="",
+    agent_id="",
+    options=[],
+    created_at="2026-01-01T00:00:00.000Z",
+  )
+  let runtime = {
+    ..base,
+    action: "runtime.process.start",
+    machine_id: "mch_runtime_test",
+  }
+  assert_true(is_runtime_approval_decision(runtime))
+  let agent = { ..base, action: "fs.write", machine_id: "" }
+  assert_false(is_runtime_approval_decision(agent))
+}

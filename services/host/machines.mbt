@@ -197,10 +197,13 @@ async fn handle_machine_add(
     }
   }
   let is_local = spec.kind == @contracts.MACHINE_KIND_LOCAL
+  let is_runtime = spec.kind == @contracts.MACHINE_KIND_RUNTIME
   // `ssh -G` is local and fast; recording the effective values at add time
   // makes the explicit target auditable even before the first probe. The
-  // local machine has no SSH target, so it is probed in-process instead.
-  let (effective, effective_error) = if is_local {
+  // local machine has no SSH target, so it is probed in-process instead, and
+  // a paired runtime machine is reached over its pinned transport (its
+  // `host` field carries the runtime id, not an SSH target).
+  let (effective, effective_error) = if is_local || is_runtime {
     (Map([]), "")
   } else {
     let target = machine_target_of_spec(spec)
@@ -492,20 +495,17 @@ async fn handle_machine_probe(
     }
   }
   // A paired runtime answers `runtime.probe` over its pinned transport, not
-  // over SSH. This host does not embed the transport session yet (A1.2b
-  // provides the provider; A1.3b/A1.4 wire it into the host), so report the
-  // honest state instead of attempting an SSH probe against a runtime id.
+  // over SSH. The live channel is attached by the runtime host loop; without
+  // one this reports `unreachable` and never claims the node was probed.
   if existing.kind == @contracts.MACHINE_KIND_RUNTIME {
     state.mutex.release()
-    send_machine_error(
+    handle_runtime_machine_probe(
       state,
       sink,
       request,
       client_request_id,
-      @contracts.machine_error(
-        @contracts.MACHINE_ERR_UNREACHABLE,
-        "runtime machine requires a live paired transport session; no runtime channel is attached to this host",
-      ),
+      machine_id,
+      timeout_seconds,
     )
     return
   }
