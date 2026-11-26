@@ -254,6 +254,88 @@ pub async fn pair_with_primary(
 }
 
 ///|
+/// What the node serves for the primary (A1.2b).
+///
+/// The transport owns pairing, hello, heartbeat and event publication. The
+/// application layer owns the actual runtime methods: it registers exec/fs/
+/// PTY/git handlers and supplies the profile answered by the reserved
+/// `runtime.probe` method. `outbox` is the durable event source.
+pub struct NodeService {
+  handlers : HandlerRegistry
+  probe : async () -> @json.Json
+  outbox : OutboxPort
+}
+
+///|
+pub fn NodeService::new(
+  handlers~ : HandlerRegistry,
+  probe~ : async () -> @json.Json,
+  outbox~ : OutboxPort,
+) -> NodeService {
+  { handlers, probe, outbox }
+}
+
+///|
+/// A service with no application methods; `runtime.probe` reports only the
+/// protocol version and an empty capability list.
+pub fn NodeService::empty(outbox : OutboxPort) -> NodeService {
+  {
+    handlers: HandlerRegistry::new(),
+    probe: () =>
+      @contracts.json_object([
+        ("protocol_version", @contracts.json_int(PROTOCOL_VERSION)),
+        ("capabilities", @contracts.json_string_array([])),
+      ]),
+    outbox,
+  }
+}
+
+///|
+/// Serialized frame writer shared by the serve loop and handler tasks.
+struct NodeWriter {
+  stream : TlsStream
+  mutex : @async.Mutex
+}
+
+///|
+fn node_writer(stream : TlsStream) -> NodeWriter {
+  { stream, mutex: @async.Mutex::Mutex() }
+}
+
+///|
+async fn NodeWriter::send(
+  self : NodeWriter,
+  value : @json.Json,
+) -> Result[Unit, String] {
+  self.mutex.acquire()
+  defer self.mutex.release()
+  self.stream.write(value) catch {
+    error => return Err(safe_error(error))
+  }
+  Ok(())
+}
+
+///|
+async fn NodeWriter::respond(
+  self : NodeWriter,
+  id : String,
+  result : @json.Json,
+) -> Unit {
+  let response : @contracts.RpcResponse = { id, result: Some(result), error: None }
+  let _ = self.send(response.to_json())
+}
+
+///|
+async fn NodeWriter::respond_error(
+  self : NodeWriter,
+  id : String,
+  error : @contracts.RpcError,
+) -> Unit {
+  let response : @contracts.RpcResponse = { id, result: None, error: Some(error) }
+  let _ = self.send(response.to_json())
+}
+
+///|
 /// One authenticated session on a live pinned TLS connection.
 pub struct NodeSession {
   stream : TlsStream
@@ -406,19 +488,78 @@ fn heartbeat_wait_ms(
 }
 
 ///|
-async fn NodeSession::serve(
+/// Serve one runtime request from the primary. Registered handlers run in
+/// child tasks so the read loop can keep processing heartbeats, acks and
+/// other requests. Dispatch is serialized so duplicate requests observed on
+/// one session cannot interleave.
+async fn[X] NodeSession::serve_request(
+  self : NodeSession,
+  writer : NodeWriter,
+  service : NodeService,
+  group : @async.TaskGroup[X],
+  dispatch_mutex : @async.Mutex,
+  request : @contracts.RpcRequest,
+) -> Unit {
+  let id = request.id
+  if request.method == METHOD_PROBE {
+    writer.respond(id, (service.probe)())
+    return
+  }
+  if reserved_method(request.method) {
+    writer.respond_error(id, method_not_found_error(request.method))
+    return
+  }
+  let handler = match service.handlers.lookup(request.method) {
+    Some(value) => value
+    None => {
+      writer.respond_error(id, method_not_found_error(request.method))
+      return
+    }
+  }
+  let client_request_id = match
+    @contracts.string_field(request.params, "client_request_id") {
+    Some(value) =>
+      if value == "" || value.length() > MAX_CLIENT_REQUEST_ID_LEN {
+        ""
+      } else {
+        value
+      }
+    None => ""
+  }
+  group.spawn_bg(() => {
+    dispatch_mutex.acquire()
+    defer dispatch_mutex.release()
+    let handler_request : HandlerRequest = {
+      runtime_id: self.runtime_id,
+      session_id: self.session_id,
+      rpc_method: request.method,
+      params: request.params,
+      client_request_id,
+    }
+    match (handler)(handler_request) {
+      Ok(value) => writer.respond(id, value)
+      Err(error) => writer.respond_error(id, error)
+    }
+  }, allow_failure=true)
+}
+
+///|
+async fn[X] NodeSession::serve(
   self : NodeSession,
   config : NodeConfig,
-  outbox : OutboxPort,
+  service : NodeService,
+  group : @async.TaskGroup[X],
 ) -> SessionEnd {
+  let writer = node_writer(self.stream)
+  let dispatch_mutex = @async.Mutex::Mutex()
   let mut in_flight : OutboxEvent? = None
   let mut heartbeat_serial = 0
   let mut next_heartbeat = @async.now() + self.heartbeat_interval_ms
   while true {
     match in_flight {
       None => {
-        let cursor = (outbox.cursor)()
-        let pending = match (outbox.pending)(cursor, 1) {
+        let cursor = (service.outbox.cursor)()
+        let pending = match (service.outbox.pending)(cursor, 1) {
           Ok(value) => value
           Err(message) => return SessionEnd::SessionLost(message)
         }
@@ -426,10 +567,10 @@ async fn NodeSession::serve(
           let event = pending[0]
           let params = event.to_wire().to_params(self.runtime_id)
           let notification = @contracts.RpcNotification::new(METHOD_EVENT, params)
-          self.stream.write(notification.to_json()) catch {
-            error => return SessionEnd::SessionLost(safe_error(error))
+          match writer.send(notification.to_json()) {
+            Ok(_) => in_flight = Some(event)
+            Err(message) => return SessionEnd::SessionLost(message)
           }
-          in_flight = Some(event)
         }
       }
       Some(_) => ()
@@ -440,8 +581,9 @@ async fn NodeSession::serve(
       let id = "hb-" + heartbeat_serial.to_string()
       let params : Map[String, @json.Json] = Map([])
       let request = @contracts.RpcRequest::new(id, METHOD_HEARTBEAT, params)
-      self.stream.write(request.to_json()) catch {
-        error => return SessionEnd::SessionLost(safe_error(error))
+      match writer.send(request.to_json()) {
+        Ok(_) => ()
+        Err(message) => return SessionEnd::SessionLost(message)
       }
       next_heartbeat = now_ms + self.heartbeat_interval_ms
     }
@@ -463,85 +605,110 @@ async fn NodeSession::serve(
       None => continue
       Some(Err(message)) => return SessionEnd::SessionLost(message)
       Some(Ok(frame)) => {
-        match @contracts.parse_notification(frame) {
-          Ok(notification) => {
-            if notification.method == METHOD_ACK {
-              let cursor = @contracts.int64_field_or(
-                notification.params,
-                "cursor",
-                0L,
-              )
-              match (outbox.ack_through)(cursor) {
-                Ok(_) => ()
-                Err(message) => return SessionEnd::SessionLost(message)
-              }
-              match in_flight {
-                Some(event) =>
-                  if event.seq <= cursor {
-                    in_flight = None
-                  }
-                None => ()
-              }
-            } else if notification.method == METHOD_DRAIN {
-              return SessionEnd::SessionDrained
-            } else if notification.method == METHOD_BYE {
-              return SessionEnd::SessionDrained
-            } else if notification.method == METHOD_REPLAY_GAP {
-              ()
-            } else {
-              ()
-            }
+        // Requests are parsed first: a request frame also carries an id, so
+        // `parse_response` would accept it with an empty result.
+        match @contracts.parse_request(frame) {
+          Ok(request) => {
+            self.serve_request(
+              writer,
+              service,
+              group,
+              dispatch_mutex,
+              request,
+            )
           }
-          Err(_) => {
-            let response = match @contracts.parse_response(frame) {
-              Ok(value) => value
-              Err(message) => {
-                return SessionEnd::SessionLost(
-                  "invalid frame: " + safe_detail(message),
-                )
-              }
-            }
-            match response.error {
-              Some(error) => {
-                let mapped = node_error_from_rpc(error)
-                match mapped {
-                  NodeRevoked => return SessionEnd::SessionRevoked
-                  NodeUnauthorized => return SessionEnd::SessionUnauthorized
-                  _ => {
-                    let detail = match mapped {
-                      NodeTransport(message) => message
-                      NodeProtocol(message) => message
-                      _ => "heartbeat failed"
-                    }
-                    return SessionEnd::SessionLost(detail)
+          Err(_) =>
+            match @contracts.parse_notification(frame) {
+              Ok(notification) => {
+                if notification.method == METHOD_ACK {
+                  let cursor = @contracts.int64_field_or(
+                    notification.params,
+                    "cursor",
+                    0L,
+                  )
+                  match (service.outbox.ack_through)(cursor) {
+                    Ok(_) => ()
+                    Err(message) => return SessionEnd::SessionLost(message)
                   }
+                  match in_flight {
+                    Some(event) =>
+                      if event.seq <= cursor {
+                        in_flight = None
+                      }
+                    None => ()
+                  }
+                } else if notification.method == METHOD_DRAIN {
+                  return SessionEnd::SessionDrained
+                } else if notification.method == METHOD_BYE {
+                  return SessionEnd::SessionDrained
+                } else if notification.method == METHOD_REPLAY_GAP {
+                  ()
+                } else {
+                  ()
                 }
               }
-              None => {
-                match response.result {
-                  Some(result) => {
-                    let cursor = match @contracts.as_object(result) {
-                      Some(object) =>
-                        @contracts.int64_field_or(object, "ack_cursor", 0L)
-                      None => 0L
-                    }
-                    match (outbox.ack_through)(cursor) {
-                      Ok(_) => ()
-                      Err(message) => return SessionEnd::SessionLost(message)
-                    }
-                    match in_flight {
-                      Some(event) =>
-                        if event.seq <= cursor {
-                          in_flight = None
+              Err(_) =>
+                match @contracts.parse_response(frame) {
+                  Ok(response) => {
+                    if response.id.has_prefix("hb-") {
+                      match response.error {
+                        Some(error) => {
+                          let mapped = node_error_from_rpc(error)
+                          match mapped {
+                            NodeRevoked => return SessionEnd::SessionRevoked
+                            NodeUnauthorized =>
+                              return SessionEnd::SessionUnauthorized
+                            _ => {
+                              let detail = match mapped {
+                                NodeTransport(message) => message
+                                NodeProtocol(message) => message
+                                _ => "heartbeat failed"
+                              }
+                              return SessionEnd::SessionLost(detail)
+                            }
+                          }
                         }
-                      None => ()
+                        None =>
+                          match response.result {
+                            Some(result) => {
+                              let cursor = match @contracts.as_object(result) {
+                                Some(object) =>
+                                  @contracts.int64_field_or(
+                                    object,
+                                    "ack_cursor",
+                                    0L,
+                                  )
+                                None => 0L
+                              }
+                              match (service.outbox.ack_through)(cursor) {
+                                Ok(_) => ()
+                                Err(message) =>
+                                  return SessionEnd::SessionLost(message)
+                              }
+                              match in_flight {
+                                Some(event) =>
+                                  if event.seq <= cursor {
+                                    in_flight = None
+                                  }
+                                None => ()
+                              }
+                            }
+                            None => ()
+                          }
+                      }
+                    } else {
+                      // A late/duplicate response to an earlier request: drop
+                      // it. The matching request already timed out.
+                      ()
                     }
                   }
-                  None => ()
+                  Err(message) => {
+                    return SessionEnd::SessionLost(
+                      "invalid frame: " + safe_detail(message),
+                    )
+                  }
                 }
-              }
             }
-          }
         }
       }
     }
@@ -608,12 +775,16 @@ pub fn backoff_delay_ms(
 }
 
 ///|
-/// Run the node: pair already done, token in hand. Reconnects with backoff and
-/// publishes outbox events until drain, revocation or the attempt budget.
-pub async fn node_run(
+/// Run the node: pairing already done, token in hand. Reconnects with backoff
+/// and serves runtime requests plus event publication until drain, revocation
+/// or the attempt budget. `group` must outlive the reconnect loop: it owns
+/// processes started by `runtime.exec.start`, which continue across a
+/// disconnect and are reported through the durable outbox on reconnect.
+pub async fn[X] node_serve(
   config : NodeConfig,
   token : String,
-  outbox : OutboxPort,
+  service : NodeService,
+  group : @async.TaskGroup[X],
 ) -> NodeRunOutcome {
   if !is_safe_id(config.runtime_id) {
     return NodeRunOutcome::Stopped("invalid runtime_id")
@@ -624,11 +795,11 @@ pub async fn node_run(
   let mut attempts = 0
   while true {
     attempts = attempts + 1
-    let last_ack = (outbox.cursor)()
+    let last_ack = (service.outbox.cursor)()
     let connected = connect_session(config, token, last_ack)
     match connected {
       Ok(session) => {
-        match session.serve(config, outbox) {
+        match session.serve(config, service, group) {
           SessionDrained => {
             session.stream.close()
             return NodeRunOutcome::Drained
@@ -668,4 +839,16 @@ pub async fn node_run(
   } nobreak {
     NodeRunOutcome::Stopped("node loop ended unexpectedly")
   }
+}
+
+///|
+/// Publish-only node used by pairing-only deployments and transport tests.
+pub async fn node_run(
+  config : NodeConfig,
+  token : String,
+  outbox : OutboxPort,
+) -> NodeRunOutcome {
+  @async.with_task_group(async fn(group : @async.TaskGroup[NodeRunOutcome]) -> NodeRunOutcome {
+    node_serve(config, token, NodeService::empty(outbox), group)
+  })
 }

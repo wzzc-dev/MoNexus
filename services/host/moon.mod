@@ -13,5 +13,7 @@ import {
   "monexus/host-client@0.1.0",
   "monexus/machines@0.1.0",
   "monexus/providers@0.1.0",
+  "monexus/runtime-node@0.1.0",
+  "monexus/runtime-transport@0.1.0",
   "moonbitlang/async@0.22.7",
 }

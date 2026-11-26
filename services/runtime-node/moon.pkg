@@ -1,0 +1,18 @@
+import {
+  "monexus/contracts" @contracts,
+  "monexus/git-runtime" @git_runtime,
+  "monexus/runtime" @runtime,
+  "monexus/pty-runtime" @pty_runtime,
+  "monexus/runtime-transport" @transport,
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "moonbitlang/async/process",
+  "moonbitlang/core/env",
+  "moonbitlang/core/json",
+}
+
+supported_targets = "native"
+
+import {
+  "monexus/providers/runtime" @provider_runtime,
+} for "test"

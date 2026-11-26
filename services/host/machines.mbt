@@ -491,6 +491,24 @@ async fn handle_machine_probe(
       return
     }
   }
+  // A paired runtime answers `runtime.probe` over its pinned transport, not
+  // over SSH. This host does not embed the transport session yet (A1.2b
+  // provides the provider; A1.3b/A1.4 wire it into the host), so report the
+  // honest state instead of attempting an SSH probe against a runtime id.
+  if existing.kind == @contracts.MACHINE_KIND_RUNTIME {
+    state.mutex.release()
+    send_machine_error(
+      state,
+      sink,
+      request,
+      client_request_id,
+      @contracts.machine_error(
+        @contracts.MACHINE_ERR_UNREACHABLE,
+        "runtime machine requires a live paired transport session; no runtime channel is attached to this host",
+      ),
+    )
+    return
+  }
   state.mutex.release()
   let is_local = is_local_machine(existing)
   let (ssh_effective, ssh_effective_error) = if is_local {

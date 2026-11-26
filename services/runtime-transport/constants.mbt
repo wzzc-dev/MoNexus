@@ -185,6 +185,11 @@ pub const ERR_APPROVAL_INVALID : Int = 1008
 pub const ERR_PATH_DENIED : Int = 1009
 
 ///|
+/// A method result would not fit the 64 KiB frame limit even after bounding.
+/// The node refuses rather than emitting a frame the peer must reject.
+pub const ERR_RESULT_TOO_LARGE : Int = 1010
+
+///|
 /// JSON-RPC method names in the runtime namespace.
 pub const METHOD_PAIR : String = "runtime.pair"
 

@@ -45,6 +45,12 @@ pub const MACHINE_KIND_SSH : String = "ssh"
 pub const MACHINE_KIND_LOCAL : String = "local"
 
 ///|
+/// A paired MoNexus runtime node (`monexus-host --runtime`). It has no SSH
+/// target: the host stores the runtime id in `host`, and probe/exec/fs/PTY/git
+/// travel over the paired pinned-TLS session rather than ACP or ssh.
+pub const MACHINE_KIND_RUNTIME : String = "runtime"
+
+///|
 pub const MACHINE_STATUS_UNKNOWN : String = "unknown"
 
 ///|
@@ -512,8 +518,37 @@ pub fn parse_machine_add(
       known_hosts_file: "",
     })
   }
+  if kind == MACHINE_KIND_RUNTIME {
+    let runtime_id = match string_field(params, "host") {
+      Some(value) => value.trim().to_owned()
+      None => return Err("missing runtime id")
+    }
+    if !is_valid_host(runtime_id) {
+      return Err("invalid runtime id: unexpected characters")
+    }
+    let name = match string_field(params, "name") {
+      Some(value) =>
+        if value.trim() == "" {
+          runtime_id
+        } else {
+          value.trim().to_owned()
+        }
+      None => runtime_id
+    }
+    return Ok({
+      kind,
+      name,
+      host: runtime_id,
+      port: 0,
+      user: "",
+      identity: "",
+      use_ssh_config: false,
+      host_key_policy: MACHINE_HOST_KEY_POLICY_ACCEPT_NEW,
+      known_hosts_file: "",
+    })
+  }
   if kind != MACHINE_KIND_SSH {
-    return Err("invalid kind: expected ssh or local")
+    return Err("invalid kind: expected ssh, local or runtime")
   }
   let host = match string_field(params, "host") {
     Some(value) => value.trim().to_owned()

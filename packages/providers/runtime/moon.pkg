@@ -1,0 +1,7 @@
+import {
+  "monexus/contracts" @contracts,
+  "monexus/runtime-transport" @transport,
+  "moonbitlang/core/json",
+}
+
+supported_targets = "native"
