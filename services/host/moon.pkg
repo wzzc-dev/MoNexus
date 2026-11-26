@@ -14,15 +14,18 @@ import {
   "moonbitlang/async/aqueue",
   "moonbitlang/async/fs",
   "moonbitlang/async/http",
+  "moonbitlang/async/io",
   "moonbitlang/async/process",
   "moonbitlang/async/signal",
   "moonbitlang/async/socket",
   "moonbitlang/async/websocket",
   "moonbitlang/core/env",
   "moonbitlang/core/encoding/hex",
+  "moonbitlang/core/encoding/utf8",
   "moonbitlang/core/json",
   "moonbitlang/core/random",
   "moonbitlang/core/string",
+  "moonbitlang/x/time",
 }
 
 supported_targets = "native"

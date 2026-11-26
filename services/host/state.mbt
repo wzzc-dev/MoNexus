@@ -5,8 +5,9 @@ pub(all) struct HostOptions {
   heartbeat_ms : Int
   port : Int
   version : String
-  /// A3.0 feature flag (ADR-0014 §7). Default off: every `trigger.*` method
-  /// answers `unsupported` and no dispatcher is started.
+  /// Trigger feature flag (ADR-0014 §7). Default off: every `trigger.*`
+  /// method answers `unsupported`, `/hooks/*` answers the uniform 401, and no
+  /// dispatcher or scheduler is started.
   trigger_enabled : Bool
 }
 
@@ -32,6 +33,15 @@ struct Sink {
 ///|
 /// Host-wide mutable state, guarded by `mutex`. All fields that change at
 /// runtime live here so connection handlers can share them safely.
+///|
+/// Coalescing state for webhook `rate_limited` audit events: at most one per
+/// trigger per minute, with `suppressed_count` for the rest (§4.5).
+struct TriggerWebhookAuditState {
+  last_ms : Int64
+  suppressed : Int
+}
+
+///|
 pub struct HostState {
   host_id : String
   version : String
@@ -54,6 +64,8 @@ pub struct HostState {
   dispatching : Ref[Bool]
   trigger_enabled : Bool
   trigger_buckets : Map[String, @contracts.TriggerRateBucket]
+  webhook_inflight : Map[String, Int]
+  webhook_audit : Map[String, TriggerWebhookAuditState]
 }
 
 ///|
@@ -165,6 +177,8 @@ fn HostState::new(
     dispatching: Ref(false),
     trigger_enabled: options.trigger_enabled,
     trigger_buckets: Map([]),
+    webhook_inflight: Map([]),
+    webhook_audit: Map([]),
   }
 }
 

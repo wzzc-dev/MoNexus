@@ -345,7 +345,118 @@ monexus host rpc --method audit.list --params '{"limit":100}'
   poll and silence windows (used by acceptance/tests; defaults 120 ms and
   15 s).
 
-## 9. Environment variables
+## 9. Schedule and webhook triggers
+
+Trigger dispatch is opt-in. Start the host with `--trigger-enabled true` (or
+`MONEXUS_TRIGGER_ENABLED=1`); the default is off. When off, every `trigger.*`
+RPC returns `unsupported` and `POST /hooks/<trigger_id>` returns the same
+uniform 401 as an unknown key; the rest of the host behaves as before. A
+trigger can only create a planned Task — `start_run=true` is still answered
+with `unsupported` (A3.2).
+
+### Schedule triggers
+
+Create one with `trigger.create` and `"type":"schedule"`. `source` accepts
+exactly these shapes:
+
+| `schedule_kind` | fields |
+| --- | --- |
+| `every` | `interval_minutes` 1..1440, optional `timezone`, `jitter_s` 0..300, `missed` |
+| `daily` | `at` `HH:MM`, optional `timezone`, `jitter_s` 0..300, `missed` |
+| `weekly` | `weekday` 1..7 (ISO, Monday=1), `at` `HH:MM`, optional `timezone`, `jitter_s` 0..300, `missed` |
+
+Cron syntax and unknown/extra fields are rejected. `missed` is `skip` (default)
+or `coalesce_once`.
+
+`timezone` accepts `UTC` (also the empty default), a fixed offset `±HH:MM`
+within `-12:00..+14:00`, an IANA name such as `Europe/Berlin`, or `local`.
+`local` is resolved once at creation to a concrete IANA zone and frozen; it is
+never stored as `local`. IANA zones are read from `$MONEXUS_TZDATA_DIR`, else
+`/usr/share/zoneinfo`; an invalid, unreadable or unresolvable zone rejects
+creation with `unsupported` instead of silently falling back to UTC.
+
+The UTC anchor is the creation time truncated to the minute. `every` fires at
+`anchor + k*interval` and ignores DST entirely. `daily`/`weekly` use local
+wall-clock time: a nonexistent local time in a DST gap resolves to the first
+valid instant after the jump, and a repeated local time uses the earlier
+occurrence. `jitter_s` adds a deterministic 0..`jitter_s` delay derived from
+`(trigger_id, scheduled slot)`, so it is stable across restarts.
+
+One scheduler loop ticks every second and claims at most 100 due triggers per
+tick. A claim is a compare-and-swap on `(id, next_fire_at)` plus a unique fire
+key `slot:<scheduled_for_ms>`; concurrent ticks cannot create a second Task for
+the same slot. Missed windows are applied once at startup: `skip` advances to
+the next future slot and records `trigger.rejected` with
+`reason=missed_window` and `missed_count`; `coalesce_once` creates at most one
+Task for the latest missed slot (`coalesced=true`). Slots older than the
+90-day ledger are always skipped. If the wall clock is more than five minutes
+behind the persisted tick, the tick is rejected with `reason=clock_skew` and
+the projection is clamped forward.
+
+### Webhook triggers
+
+`POST /hooks/<trigger_id>` on the existing loopback HTTP server is the only
+webhook route. It is split before the `/ws` bearer check: `/ws` still requires
+the owner bearer token, `/hooks/*` never accepts it, and every other path is
+404. Only `POST` with `Content-Type: application/json` is accepted.
+
+Required headers:
+
+- `X-Monexus-Key-Id: whk_...`
+- `X-Monexus-Timestamp`: Unix milliseconds (an RFC3339 UTC value is also
+  accepted)
+- `X-Monexus-Nonce`: 16..64 characters, unique per request
+- `X-Monexus-Delivery-Id`: optional, 1..64 characters, preferred dedupe key
+- `X-Monexus-Signature: v1=<lowercase hex HMAC-SHA256>`
+
+The signed bytes are exactly:
+`monexus-webhook-v1\n<key_id>\n<trigger_id>\n<timestamp>\n<nonce>\n<raw_body>`,
+and the HMAC key is the raw 32-byte secret from the key file. A missing or
+malformed header, an unknown/disabled/revoked/expired key, a bad signature, a
+stale timestamp or a replay all return the same
+`401 {"accepted":false,"error":"unauthorized"}`; the distinguishing reason is
+only written to the `trigger.rejected` audit event. Timestamps must be within
+±300 s by default (±900 s cap).
+
+A repeated `X-Monexus-Delivery-Id` (or, without one, a repeated nonce) returns
+`202` with the original `task_id` and `"duplicate":true`. Reusing a nonce with a
+different body is a 401 with a `nonce_reuse` audit reason. Nonces are persisted
+for the freshness window plus 120 s.
+
+Only fields declared in `source.payload_fields` (max 8, dot paths of at most
+two segments, scalar values, each truncated to 512 characters) become
+`{{name}}` template variables. Objects and arrays are rejected, recursion is
+never performed, and no payload field can set the command, argv, environment,
+agent, workspace, project, verification, machine, policy, approval or
+`start_run`. The raw body is never persisted; audit records contain only its
+length and SHA-256.
+
+Limits (ADR-0014 §4.5): request body 64 KiB default (256 KiB cap), read
+timeout 5 s default (10 s cap), 8 concurrent requests per trigger, and
+per-trigger / per-key / global token buckets. Over-limit requests get `413` or
+`429` with `Retry-After`; rate-limit audit events coalesce to at most one per
+trigger per minute and carry `suppressed_count`.
+
+### Key management and TLS
+
+`trigger.source.add` (`{"trigger_id":..., "name":...}`) creates a `whk_<ULID>`
+key and returns `{"key_id":..., "secret":...}` exactly once. The secret is 32
+bytes of CSPRNG output stored as lowercase hex at
+`<state-dir>/secrets/webhook/<key_id>.key`, with directory mode `0700` and file
+mode `0600`; only the relative path is stored in the database, and the secret
+never appears in events, logs or audit detail. A trigger may have at most 8
+active keys. `trigger.source.revoke` (`{"key_id":...}`) is immediate and
+idempotent for new requests and never touches Tasks that already exist.
+Rotate by adding a new key, deploying it, then revoking the old one.
+
+The host serves loopback HTTP only and does not terminate TLS. Put a TLS
+reverse proxy in front (or keep the host unreachable from other machines),
+forward the original method, path and raw body bytes unchanged, preserve
+`Content-Length`, disable caching and body rewriting, and do not rely on
+forwarding headers: the host ignores `X-Forwarded-*` and never trusts a claimed
+client address. Protect or do not expose `/ws` through the same proxy.
+
+## 10. Environment variables
 
 | variable | purpose |
 | --- | --- |
@@ -355,6 +466,14 @@ monexus host rpc --method audit.list --params '{"limit":100}'
 | `MONEXUS_HOST_BIN`, `MONEXUS_DESKTOP_BIN` | override component binaries in the launcher |
 | `MONEXUS_MAX_PARALLEL` | per-machine Run limit (default 4) |
 | `MONEXUS_AGENT_SSH=1` | opt in to the round-1 remote-agent PoC: SSH-backed `agent.start` launches the adapter over `ssh -T` instead of returning the local-only error |
+| `MONEXUS_TRIGGER_ENABLED=1` | default for `--trigger-enabled` (triggers stay off unless enabled) |
+| `MONEXUS_TZDATA_DIR` | tzdata directory for IANA schedule timezones (default `/usr/share/zoneinfo`) |
+| `MONEXUS_WEBHOOK_BODY_LIMIT` | webhook body limit in bytes (default 65536, cap 262144) |
+| `MONEXUS_WEBHOOK_FRESHNESS_S` | webhook timestamp freshness window in seconds (default 300, cap 900) |
+| `MONEXUS_WEBHOOK_READ_TIMEOUT_MS` | webhook request read timeout (default 5000, cap 10000) |
+| `MONEXUS_WEBHOOK_RATE_TRIGGER_PER_MIN` | per-trigger webhook rate (default 60, cap 600) |
+| `MONEXUS_WEBHOOK_RATE_KEY_PER_MIN` | per-key webhook rate (default 120, cap 1200) |
+| `MONEXUS_WEBHOOK_RATE_GLOBAL_PER_MIN` | global webhook rate (default 300, cap 3000) |
 | `MONEXUS_RECOVERY_POLL_MS` | durable Run poll interval |
 | `MONEXUS_RECOVERY_UNVERIFIABLE_MS` | transport-error window before `unverifiable` |
 | `MONEXUS_LINK_TRACE=1` | desktop stdout trace of link connecting/online/offline |

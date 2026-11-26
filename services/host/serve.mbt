@@ -260,6 +260,17 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
         return Err("cannot read trigger cursor: " + message)
       }
     }
+    // Apply the missed-slot policy exactly once before the schedule loop
+    // starts (ADR-0014 §3.4). A startup failure leaves the host unserved
+    // rather than silently skipping the reconciliation.
+    match trigger_schedule_startup(state) {
+      Ok(_) => ()
+      Err(message) => {
+        state.store.close()
+        lock.close()
+        return Err("cannot reconcile schedule triggers: " + message)
+      }
+    }
   }
   // ACP processes do not survive a host restart (M0), so close every session
   // that was live and expire its pending decisions before serving clients.
@@ -292,6 +303,11 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
         no_wait=true,
         allow_failure=true,
         async fn() { trigger_loop(state) },
+      )
+      group.spawn_bg(
+        no_wait=true,
+        allow_failure=true,
+        async fn() { trigger_schedule_loop(state) },
       )
     }
     // M6: settle or reattach every Run that survived a restart before any

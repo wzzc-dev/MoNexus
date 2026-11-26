@@ -169,8 +169,8 @@ fn request_id(prefix : String) -> String {
 ///|
 async fn serve_command(args : Array[String]) -> (Int32, String) {
   let (pairs, _) = parse_pairs(args)
-  // A3.0 is off by default (ADR-0014 §7). The environment variable is only a
-  // default; an explicit `--trigger-enabled` wins.
+  // Triggers are off by default (ADR-0014 §7). The environment variable is
+  // only a default; an explicit `--trigger-enabled` wins.
   let env_default = match @env.get_env_var("MONEXUS_TRIGGER_ENABLED") {
     Some(value) =>
       match value.to_lower() {

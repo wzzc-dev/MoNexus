@@ -1,5 +1,5 @@
 ///|
-/// Trigger contracts (ADR-0014, A3.0).
+/// Trigger contracts (ADR-0014, A3.0 events; A3.1 schedule and webhook).
 ///
 /// A trigger is a host-owned object that can only *create a Task* through the
 /// existing Task/Run path. It never executes commands, never writes a
@@ -8,9 +8,10 @@
 /// rendering, canonical config hashing, rate buckets and payload builders live
 /// here so the host and the tests share one definition.
 ///
-/// A3.0 implements event triggers only. `schedule` and `webhook` types exist
-/// for forward compatibility (ADR-0014 §3–§4, A3.1); creating one returns
-/// `unsupported` and no dispatcher for them exists.
+/// A3.0 implemented event triggers; A3.1 adds schedule and webhook triggers
+/// (ADR-0014 §3–§4). Schedule syntax, timezone handling, HMAC signing and the
+/// untrusted payload surface live in `trigger_schedule.mbt` and
+/// `trigger_webhook.mbt`; this file holds the shared record vocabulary.
 
 // ---------------------------------------------------------------------------
 // Object vocabulary
@@ -120,8 +121,9 @@ pub const METHOD_TRIGGER_DISABLE : String = "trigger.disable"
 pub const METHOD_TRIGGER_FIRE : String = "trigger.fire"
 
 ///|
-/// Declared for forward compatibility with ADR-0014 §4.3 / A3.1. A3.0 hosts
-/// answer `unsupported`; no key material or webhook route exists yet.
+/// `trigger.source.add` for a webhook trigger (ADR-0014 §4.3): creates a
+/// `whk_` key and returns the secret exactly once. With the trigger flag off
+/// it answers `unsupported` like every `trigger.*` method.
 pub const METHOD_TRIGGER_SOURCE_ADD : String = "trigger.source.add"
 
 ///|
@@ -270,9 +272,10 @@ pub fn trigger_target_from_json(json : @json.Json) -> TriggerTarget? {
 }
 
 ///|
-/// Trigger source configuration. `event_*` fields drive A3.0 matching; the
-/// schedule and webhook fields are persisted for forward compatibility and
-/// are never wired in A3.0.
+/// Trigger source configuration. `event_*` fields drive event matching;
+/// schedule fields drive the UTC slot computation and webhook fields declare
+/// the only payload keys that may become template variables. Any other
+/// privileged field is rejected by the host validator.
 pub(all) struct TriggerSource {
   event_type : String
   subject_prefix : String
@@ -347,12 +350,19 @@ pub fn trigger_source_from_json(json : @json.Json) -> TriggerSource? {
     Some(value) => value
     None => return None
   }
+  // ADR-0014 §3.1 examples spell the schedule discriminator `kind`; A3.0
+  // contracts already persist `schedule_kind`. Accept `kind` as an input
+  // alias and keep `schedule_kind` canonical.
+  let schedule_kind = match string_field(object, "schedule_kind") {
+    Some(value) if value != "" => value
+    _ => string_field_or(object, "kind", "")
+  }
   Some({
     event_type: string_field_or(object, "event_type", ""),
     subject_prefix: string_field_or(object, "subject_prefix", ""),
     correlation_id: string_field_or(object, "correlation_id", ""),
     ignore_self: bool_field_or(object, "ignore_self", true),
-    schedule_kind: string_field_or(object, "schedule_kind", ""),
+    schedule_kind,
     interval_minutes: int_field_or(object, "interval_minutes", 0),
     at: string_field_or(object, "at", ""),
     weekday: int_field_or(object, "weekday", 0),
@@ -362,6 +372,38 @@ pub fn trigger_source_from_json(json : @json.Json) -> TriggerSource? {
     payload_fields: string_array_field(object, "payload_fields"),
     allowed_cidrs: string_array_field(object, "allowed_cidrs"),
   })
+}
+
+///|
+/// Exact field allowlist per trigger type. Unknown fields are configuration
+/// errors, not ignored extensions (ADR-0014 §3.1, §4).
+pub fn trigger_source_allowed_keys(kind : String) -> Array[String] {
+  match kind {
+    TRIGGER_TYPE_EVENT => [
+      "event_type", "subject_prefix", "correlation_id", "ignore_self",
+      "payload_fields",
+    ]
+    TRIGGER_TYPE_SCHEDULE => [
+      "kind", "schedule_kind", "interval_minutes", "at", "weekday", "timezone",
+      "jitter_s", "missed",
+    ]
+    TRIGGER_TYPE_WEBHOOK => ["payload_fields", "allowed_cidrs"]
+    _ => []
+  }
+}
+
+///|
+pub fn trigger_source_unknown_key(
+  kind : String,
+  object : Map[String, @json.Json],
+) -> String? {
+  let allowed = trigger_source_allowed_keys(kind)
+  for key, _ in object {
+    if !allowed.contains(key) {
+      return Some(key)
+    }
+  }
+  None
 }
 
 ///|
@@ -538,6 +580,8 @@ pub(all) struct TriggerRecord {
   next_fire_at : String
   last_fired_at : String
   dedupe_hits : Int
+  resolved_tz : String
+  anchor_ms : Int64
 }
 
 ///|
@@ -559,6 +603,8 @@ pub fn TriggerRecord::new(
   next_fire_at~ : String = "",
   last_fired_at~ : String = "",
   dedupe_hits~ : Int = 0,
+  resolved_tz~ : String = "",
+  anchor_ms~ : Int64 = 0L,
 ) -> TriggerRecord {
   {
     id,
@@ -579,6 +625,8 @@ pub fn TriggerRecord::new(
     next_fire_at,
     last_fired_at,
     dedupe_hits,
+    resolved_tz,
+    anchor_ms,
   }
 }
 
@@ -604,6 +652,8 @@ pub fn TriggerRecord::to_json(self : TriggerRecord) -> @json.Json {
     ("next_fire_at", json_string(self.next_fire_at)),
     ("last_fired_at", json_string(self.last_fired_at)),
     ("dedupe_hits", json_int(self.dedupe_hits)),
+    ("resolved_tz", json_string(self.resolved_tz)),
+    ("anchor_ms", json_int64(self.anchor_ms)),
   ])
 }
 
@@ -667,6 +717,8 @@ pub fn trigger_record_from_json(json : @json.Json) -> TriggerRecord? {
     next_fire_at: string_field_or(object, "next_fire_at", ""),
     last_fired_at: string_field_or(object, "last_fired_at", ""),
     dedupe_hits: int_field_or(object, "dedupe_hits", 0),
+    resolved_tz: string_field_or(object, "resolved_tz", ""),
+    anchor_ms: int64_field_or(object, "anchor_ms", 0L),
   })
 }
 
@@ -810,10 +862,13 @@ pub fn trigger_type_known(kind : String) -> Bool {
 }
 
 ///|
-/// A3.0 implements event triggers only; the type exists so the RPC can tell
-/// "not enabled yet" (`unsupported`) apart from "unknown" (`invalid`).
+/// All three ADR-0014 trigger types are wired as of A3.1. Unknown types are
+/// `invalid`; this predicate keeps the RPC able to answer `unsupported` for a
+/// future type that is known but not enabled.
 pub fn trigger_type_wired(kind : String) -> Bool {
-  kind == TRIGGER_TYPE_EVENT
+  kind == TRIGGER_TYPE_EVENT ||
+  kind == TRIGGER_TYPE_SCHEDULE ||
+  kind == TRIGGER_TYPE_WEBHOOK
 }
 
 ///|
@@ -1577,6 +1632,10 @@ pub fn trigger_rejected_payload(
   event_id~ : String = "",
   delivery_id~ : String = "",
   suppressed_count~ : Int = 0,
+  key_id~ : String = "",
+  fire_key~ : String = "",
+  missed_count~ : Int = 0,
+  next_fire_at~ : String = "",
 ) -> @json.Json {
   let entries : Array[(String, @json.Json)] = [
     ("trigger_id", json_string(trigger_id)),
@@ -1592,6 +1651,20 @@ pub fn trigger_rejected_payload(
   }
   if suppressed_count > 0 {
     entries.push(("suppressed_count", json_int(suppressed_count)))
+  }
+  if key_id != "" {
+    entries.push(("key_id", json_string(key_id)))
+  }
+  if fire_key != "" {
+    entries.push(("fire_key", json_string(fire_key)))
+  }
+  if missed_count > 0 {
+    entries.push(("missed_count", json_int(missed_count)))
+  }
+  if next_fire_at != "" {
+    // Persisted by projection replay for missed_window/clock_skew so an
+    // internal advance is not lost when no `trigger.fired` exists.
+    entries.push(("next_fire_at", json_string(next_fire_at)))
   }
   json_object(entries)
 }
@@ -1709,11 +1782,21 @@ pub fn trigger_get_result(
   record : TriggerRecord,
   fires : Array[TriggerFire],
   now_ms : Int64,
+  webhook_keys~ : Array[WebhookKeyRecord] = [],
 ) -> @json.Json {
-  json_object([
+  let entries : Array[(String, @json.Json)] = [
     ("trigger", record.to_public_json(now_ms)),
     ("recent_fires", json_array(fires.map(fn(fire) { fire.to_json() }))),
-  ])
+  ]
+  if record.kind == TRIGGER_TYPE_WEBHOOK {
+    entries.push(
+      (
+        "webhook_keys",
+        json_array(webhook_keys.map(fn(key) { webhook_key_record_to_json(key) })),
+      ),
+    )
+  }
+  json_object(entries)
 }
 
 ///|
