@@ -655,9 +655,21 @@ async test "pty sessions and git methods run through the paired transport" {
       let session_id = "sess-1"
       // Script files avoid the `sh -c` high-risk pattern, which would require
       // an owner approval on this scenario's policy.
+      //
+      // With `ring_events=1` a `runtime.pty.gap` is published exactly when two
+      // ring events are published between two pump drains, so the child has to
+      // outrun the 10 ms pump on purpose: `seq 1 4000` produces more than one
+      // 4096-byte terminal read even if the reader wakes only once, and the
+      // following tail writes every 2 ms (two or more events per pump poll).
+      // A single small burst is not enough: whether the terminal returns it as
+      // one read or as several is up to the kernel, which is what made this
+      // test flaky in CI.
       host_sh(
         h.workspace,
-        "printf 'sleep 0.4\\nseq 1 200\\n' > pty.sh\n" +
+        "printf '%s\\n' 'sleep 0.4' 'seq 1 4000' 'i=0' " +
+        "'while [ \"$i\" -lt 48 ]; do' " +
+        "'  printf \"tick-%s\\n\" \"$i\"' '  sleep 0.002' '  i=$((i+1))' 'done' " +
+        "> pty.sh\n" +
         "printf 'echo should-not-run\\n' > dup-pty.sh\n",
       )
       tracker.begin(session_id, "pty", "pty-1")
@@ -738,24 +750,47 @@ async test "pty sessions and git methods run through the paired transport" {
         @async.sleep(20)
       }
       assert_eq(tracker.get(session_id).unwrap().phase.text(), "succeeded")
-      // Gap events carry the transcript range and offsets, so no output seq
-      // is silently lost.
+      // Every output/gap event must form one contiguous sequence range and one
+      // contiguous transcript range: a gap continues the previous sequence,
+      // its transcript offsets continue the published cursor, and the next
+      // output continues the gap. That is what lets a primary page the
+      // transcript for evicted output instead of silently losing it.
       let mut gap_count = 0
       let mut typed_twice = false
       let mut spawned_again = false
       let mut output_text = ""
+      let mut covered_seq = 0L
+      let mut log_end = 0L
       for event in h.state.events_since(h.runtime_id, 0L) {
         if event.run_id != session_id {
           continue
         }
         if event.kind == "runtime.pty.gap" {
           gap_count = gap_count + 1
-          assert_true(host_int64(event.payload, "to_seq") >= host_int64(event.payload, "from_seq"))
-          assert_true(host_int64(event.payload, "log_bytes") >= 0L)
+          let from_seq = host_int64(event.payload, "from_seq")
+          let to_seq = host_int64(event.payload, "to_seq")
+          let log_offset = host_int64(event.payload, "log_offset")
+          let log_bytes = host_int64(event.payload, "log_bytes")
+          assert_eq(from_seq, covered_seq + 1L)
+          assert_true(to_seq >= from_seq)
+          assert_eq(log_offset, log_end)
+          assert_true(log_bytes >= 0L)
+          covered_seq = to_seq
+          log_end = log_offset + log_bytes
         } else if event.kind == "runtime.pty.output" {
+          let pty_seq = host_int64(event.payload, "pty_seq")
+          let log_offset = host_int64(event.payload, "log_offset")
+          let log_bytes = host_int64(event.payload, "log_bytes")
+          assert_eq(pty_seq, covered_seq + 1L)
+          assert_eq(log_offset, log_end)
+          assert_true(log_bytes >= 0L)
+          covered_seq = pty_seq
+          log_end = log_offset + log_bytes
           output_text = output_text + host_string(event.payload, "data")
         }
       }
+      // The producer above outruns the 10 ms pump by construction, so an
+      // eviction before a drain (and with it a gap event) is not a race.
       assert_true(gap_count > 0)
       if host_count(output_text, "SECOND-TYPED") > 0 {
         typed_twice = true
@@ -770,6 +805,10 @@ async test "pty sessions and git methods run through the paired transport" {
         Err(error) => fail("pty status after exit failed: " + error.message)
       }
       assert_eq(final_status.status, @contracts.RUN_STATUS_SUCCEEDED)
+      // The published events account for every sequence the primitive
+      // produced and every byte it wrote to the transcript.
+      assert_eq(final_status.output_seq, covered_seq)
+      assert_eq(final_status.log_bytes, log_end)
       assert_true(final_status.log_bytes > 0L)
       let closed = match
         h.machine.pty_close(session_id, client_request_id="pty-close-1") {
