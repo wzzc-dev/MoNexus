@@ -311,6 +311,8 @@ Decision kinds and answers:
 | `permission` | ACP permission request | adapter-provided options |
 | `recovery` | lost/unverifiable/timeout/exhausted retry | `retry`, `fail`, `waive` |
 | `readiness` | agent probe failure | acknowledge/deny-style options |
+| `skill` | write-mode skill invocation (A4) | `approve`, `deny` |
+| `environment_approval` | environment create/start plan (A2) | `approve`, `deny` |
 
 A duplicate answer is rejected as a conflict (`decision is already
 answered`). The answer, actor, option and target are audited.
@@ -935,7 +937,536 @@ secret, then mirror the new metadata with
   Decision per `(agent, machine, binding, reason)`; they never auto-retry in a
   storm.
 
-## 12. Environment variables
+## 12. Skill packs (A4)
+
+Skill packs bundle instructions, resources and declared commands behind a
+signature and an owner allowlist. The host stores them immutably (content
+addressed), injects a frozen snapshot into an Agent session and exposes exactly
+one gateway tool, `skill.invoke`, whose only argument is an `entry_id`. The
+feature is off by default.
+
+### Opting in
+
+```bash
+monexus-host serve --skill-enabled true    # or MONEXUS_SKILL_ENABLED=1
+```
+
+While the feature is off, every `skill.*` method answers `unsupported` with
+`skill packs are disabled (skill.enabled=false)`, and a `skills` array passed
+to `agent.start` is ignored.
+
+### Bundle, manifest and signature
+
+A bundle is a plain directory (not a symlink) containing `skill.json` plus the
+declared files. `skill.json` must be a regular, non-executable file; every
+physical file must be declared and every declared file must exist. Import reads
+only a local directory and does not delete it afterwards.
+
+```text
+demo-skill/
+  skill.json
+  SKILL.md
+  notes/README.md
+```
+
+```json
+{
+  "schema_version": 1,
+  "name": "demo-skill",
+  "version": "1.0.0",
+  "description": "Report the repository status and summarise the conventions.",
+  "permissions": ["workspace.read", "git.read", "exec.readonly"],
+  "entry": {"path": "SKILL.md", "max_bytes": 4096},
+  "resources": [
+    {"path": "notes/README.md", "description": "House conventions"}
+  ],
+  "commands": [
+    {"id": "status", "argv": ["git", "status", "--porcelain"],
+     "mode": "read_only", "timeout_ms": 5000, "max_output_bytes": 8192}
+  ],
+  "source": {
+    "kind": "local_directory",
+    "path": "/home/me/demo-skill",
+    "author": "owner",
+    "created_at": "2026-11-27T00:00:00Z"
+  },
+  "signature": {"key_id": "owner-demo", "alg": "ed25519", "sig": "..."}
+}
+```
+
+The signature is over a domain-separated content hash, and the host recomputes
+it on import; the `skill.json` formatting above does not matter.
+
+- Canonical body: exactly the declared fields above except `signature` (and the
+  derived hash), object keys sorted, compact JSON, UTF-8.
+- `content_hash` = `"sha256:"` + SHA-256 of
+  `"monexus.skill.v1\n"` + canonical body + `"\n"` + one entry per physical
+  file except `skill.json`, sorted by path: `path + "\n"` + SHA-256 of its
+  bytes + `"\n"`.
+- Signed payload: the ASCII string `"monexus.skill.sig.v1\n"` followed by the
+  `content_hash`, signed with `ssh-keygen -Y sign -n monexus-skill-v1`.
+  `signature.sig` is the base64 SSHSIG body without armor or whitespace; the
+  public key is a bare `ssh-ed25519 <base64>` value.
+- `source.kind` is `local_directory` only. Entry text is at most 32 KiB,
+  resources at most 256 KiB each (64 resources), the bundle at most 4 MiB, and
+  at most 32 commands; each command has a timeout of at most 600000 ms and an
+  output cap of at most 1048576 bytes.
+
+There is no bundled signer command yet. A complete fixture that canonicalises,
+hashes and signs a bundle is in `services/host/skill_wbtest.mbt`; the canonical
+rules live in `packages/skills/canonical.mbt`. The essential signing step is:
+
+```bash
+printf 'monexus.skill.sig.v1\n%s' "$CONTENT_HASH" > payload
+ssh-keygen -q -Y sign -f owner_key -n monexus-skill-v1 payload
+# strip the BEGIN/END SSH SIGNATURE lines and newlines -> signature.sig
+```
+
+### Registering keys, importing, allowlisting
+
+```bash
+monexus host rpc --method skill.key.register --params '{
+  "key_id":"owner-demo",
+  "public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA..."}'
+# → {"key_id":"owner-demo"}
+
+monexus host rpc --method skill.import --params '{
+  "path":"/home/me/demo-skill"}'
+# → {"skill":{"name":"demo-skill","version":"1.0.0",
+#            "content_hash":"sha256:...","key_id":"owner-demo",
+#            "file_count":3,"total_bytes":...,"status":"pending"}}
+```
+
+`skill.import` accepts an optional `source` but only `local_directory` is
+supported; the source directory is not deleted after import. `file_count` and
+`total_bytes` include every physical file, including `skill.json`, while the
+content hash excludes it. A re-import of an already allowed, identical tuple
+stays `allowed`; any other import starts `pending`. Refusals produce a
+`skill.refused` event with a redacted source path and a stable reason code.
+
+Import alone does not make a bundle usable. The owner allows an exact tuple:
+
+```bash
+monexus host rpc --method skill.allow --params '{
+  "name":"demo-skill","version":"1.0.0","content_hash":"sha256:...",
+  "mode":"loaded","reason":"owner"}'
+# → {"name":"demo-skill","version":"1.0.0",
+#    "content_hash":"sha256:...","state":"allowed"}
+
+monexus host rpc --method skill.allowlist.revoke --params '{
+  "name":"demo-skill","version":"1.0.0","content_hash":"sha256:...",
+  "reason":"superseded"}'
+# → state="revoked"
+```
+
+`skill.allow` requires the tuple to be imported and its key registered and
+unrevoked; `mode` defaults to `loaded`. Revoking an allowlist entry marks the
+row `revoked` but does not remove Agent/Task bindings; a session started after
+the revocation re-checks the allowlist and refuses to start. Keys are managed
+with `skill.key.register` and `skill.key.revoke {"key_id":"..."}`; there is no
+trust-on-first-use, and `skill.doctor` re-verifies stored bundles against the
+current key set.
+
+### Binding to an Agent, Task or session
+
+```bash
+monexus host rpc --method skill.enable --params '{
+  "scope":"agent","scope_ref":"agt_...","name":"demo-skill",
+  "version":"1.0.0","content_hash":"sha256:...","mode":"loaded"}'
+# → {"binding":{"scope":"agent","scope_ref":"agt_...",
+#               "name":"demo-skill","version":"1.0.0",
+#               "content_hash":"sha256:...","mode":"loaded"}}
+```
+
+Scopes are `agent`, `task` and `session`. An `agent` scope reference must be a
+valid agent id; `task`/`session` references are non-empty ids of at most 128
+characters. The tuple must already be allowed. `loaded` injects the entry text
+and materialises the entry and resources into the session; `available` adds a
+one-line card only and cannot be invoked.
+
+Bindings can also be requested for one `agent.start` call through a top-level
+`skills` array (at most 64 entries, each an exact
+`name`/`version`/`content_hash`/`mode` tuple; a malformed array fails the whole
+request). Session bindings outrank Task bindings, which outrank Agent bindings.
+For the same name, a differing version or hash is refused as `skill_conflict`;
+any loaded declaration wins over available. A session holds at most 8 loaded
+and 32 available skills.
+
+### Session injection and the gateway
+
+At `agent.start` the host re-verifies the allowlist row, manifest tuple,
+permission ceiling, duplicate entry ids, stored hash and signature, and skill
+dependencies. Any failure blocks the start; no partial session is created.
+Local loaded skills are copied to
+`<agent home>/sessions/<sid>/skills/<name>-<version>` (directories 0700, files
+0444) and injected before the prompt under the exact header
+`--- SKILLS (untrusted, enabled for this session) ---`. The default budget is
+8192 bytes (hard cap 32768); overflow is marked with
+`[skill entry truncated]`. The snapshot is frozen for the life of the session.
+
+A local session with loaded skills also receives a host-owned stdio MCP server
+named `monexus-skills` (`monexus-host skill-mcp --state-dir ... --session ...`)
+and a host-generated `MONEXUS_SKILL_TOKEN` in its environment. Do not set that
+variable yourself; it is a per-session capability and is never printed or
+audited. The gateway advertises exactly one tool, `skill.invoke`, whose input
+schema contains only the required string `entry_id`. The token is not exposed
+through RPC or logs, so the two calls below are mainly for tests and
+embedders:
+
+```bash
+monexus host rpc --method skill.tools --params '{"token":"<session token>"}'
+monexus host rpc --method skill.invoke --params '{
+  "token":"<session token>","entry_id":"<entry id>"}'
+# → {"invocation":{"name":"demo-skill","version":"1.0.0",
+#    "content_hash":"sha256:...","entry_id":"...","exit_code":0,
+#    "output":"...","truncated":false,"decision_id":""}}
+```
+
+A non-zero `exit_code` is a normal result. Through MCP, `tools/call` returns
+the output as text with `(exit_code=N)` appended and sets `isError` when the
+exit code is non-zero.
+
+### Permissions, Decisions and execution limits
+
+Declared permissions are intersected with the Agent's ceiling. The default
+ceiling is `workspace.read`, `git.read`, `exec.readonly`; the available
+permissions are `workspace.read`, `workspace.write`, `git.read`, `git.write`,
+`exec.readonly` and `exec.workspace`. A per-Agent ceiling is set with:
+
+```bash
+monexus host rpc --method skill.permissions.set --params '{
+  "agent_id":"agt_...",
+  "permissions":["workspace.read","git.read"]}'
+```
+
+A `write`-mode command always raises a Decision of kind `skill` with
+`approve`/`deny` options; the call waits up to 5 minutes, then the Decision
+expires and the call fails as `decision_denied`. Policy-denied commands fail
+as `policy_denied`; critical commands are rejected before any Decision is
+raised. A command runs as the exact argv with a fixed `PATH`, `LANG=C`,
+`LC_ALL=C`, `HOME` set to the session skills directory and the session cwd.
+The first token may not be a shell/interpreter from the denylist, arguments may
+not start with `/` or `~`, and no argument may contain a `..` segment. Output
+is redacted and truncated to the command's `max_output_bytes`; the gateway
+allows 120 calls per 60 seconds per token.
+
+### Upgrade, disable, uninstall and doctor
+
+```bash
+monexus host rpc --method skill.upgrade --params '{
+  "scope":"agent","scope_ref":"agt_...",
+  "name":"demo-skill","version":"1.1.0","content_hash":"sha256:...",
+  "mode":"loaded"}'
+
+monexus host rpc --method skill.disable --params '{
+  "scope":"agent","scope_ref":"agt_...","name":"demo-skill"}'
+
+monexus host rpc --method skill.uninstall --params '{
+  "name":"demo-skill","version":"1.0.0","content_hash":"sha256:..."}'
+```
+
+`skill.upgrade` only rebinds an already imported and allowed tuple; it never
+downloads content, and returns the previous `old_version` alongside the new
+binding. `skill.disable` removes a binding (it also succeeds when the binding
+is already gone) but cannot recall text already injected; the gateway refuses
+new calls, as the response's `active_sessions_note` says. `skill.uninstall`
+revokes the allowlist row, removes bindings and drops live capabilities. When
+a live session still holds the tuple the stored row becomes `pending_delete`
+and is collected when that session finalises or on `skill.doctor`; the
+response reports `pending_delete` and `affected_sessions`. `skill.list`
+optionally filters by `scope`/`scope_ref` and returns `skills`, `allowlist` and
+`bindings`; `skill.get` returns one stored bundle plus its manifest and allow
+state; `skill.doctor` returns `{ok,checks,problems}`.
+
+Events and audits to watch: `skill.loaded` and `skill.context_truncated` at
+session start, `skill.imported`/`skill.refused` around import,
+`skill.allowlisted`, `skill.enabled`, `skill.upgraded`, `skill.uninstalled`,
+`skill.invoked` and `skill.invoke_denied` at call time; the corresponding
+audit entries include `skill.session.load` and `skill.invoke`.
+
+### Known limits
+
+- Import and upgrade are local-only: the host never downloads a bundle, and an
+  upgrade binds bytes already stored on the host.
+- Remote (SSH/runtime) sessions receive the injected, declarative skill text
+  only. This release does not wire `skill.invoke` or the MCP server to remote
+  sessions, so a remote Agent has no invocable skill capability even when the
+  injected header lists entries.
+- `skill.json` is metadata: it is excluded from the content hash and is not
+  materialised into the session; only the entry and declared resources are
+  copied.
+- Disable and uninstall cannot recall injected text. Revoking the allowlist is
+  not a binding cleanup; use `skill.disable`/`skill.uninstall` for that.
+- `skill.permissions.get` always reports `default:true` in this release, even
+  when a custom ceiling is set; read the `permissions` array instead.
+
+## 13. Environment recipes (A2)
+
+An environment recipe describes a Docker container: a digest-pinned image,
+mounts, resource limits, an environment-variable allowlist and three lifecycle
+hooks. Recipes are owner-signed and owner-approved; creating an environment
+always goes through a Decision. Environments can then be used directly
+(`environment.exec`) or attached to a Run.
+
+### Owner trust store
+
+Recipe signatures are checked against an owner trust store only; there is no
+trust-on-first-use, and a recipe cannot add a key. The store is read once at
+host startup from `MONEXUS_RECIPE_TRUST` or, by default,
+`<state-dir>/recipe_trust.json`; edit it and restart the host to apply changes.
+It must be a regular file (not a symlink) with mode `0600` or `0400`, and
+strict JSON with only the `keys` field:
+
+```json
+{
+  "keys": [
+    {
+      "key_id": "owner-demo",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...",
+      "added_at": "2026-11-27T00:00:00Z"
+    }
+  ]
+}
+```
+
+`key_id` is at most 64 characters of alphanumerics, `.`, `_`, `-` or `@`;
+`public_key` is a bare `ssh-ed25519` key without a comment; timestamps use
+`YYYY-MM-DDTHH:MM:SSZ`. An optional `revoked_at` retires a key. A missing or
+invalid store means no recipe can be imported, and the host still starts.
+
+### Recipe document and signature
+
+```json
+{
+  "schema_version": 1,
+  "name": "demo",
+  "version": "1.0.0",
+  "image": {
+    "ref": "nginx:alpine",
+    "digest": "sha256:<64 lowercase hex>"
+  },
+  "workdir": "/workspace",
+  "mounts": [
+    {"source": "workspace", "target": "/workspace", "mode": "rw"}
+  ],
+  "limits": {"cpu_millis": 1000, "memory_mb": 2048, "pids": 512},
+  "network": "none",
+  "lifecycle": {
+    "prepare": {"argv": ["/bin/true"], "timeout_s": 10},
+    "start": {"argv": ["/bin/true"], "timeout_s": 10},
+    "stop": {"argv": ["/bin/true"], "timeout_s": 10}
+  },
+  "source": {
+    "kind": "local_file",
+    "path": "/home/me/demo.recipe.json",
+    "author": "owner",
+    "created_at": "2026-11-27T00:00:00Z"
+  },
+  "signature": {"key_id": "owner-demo", "alg": "ed25519", "sig": "..."}
+}
+```
+
+- `image.digest` is mandatory and must be `sha256:` plus 64 lowercase hex
+  characters; a tag is display-only, and Docker pull/create always use the
+  digest. Unknown fields such as `privileged` or `ports`, and values such as
+  host networking, are rejected rather than ignored.
+- `mounts` holds exactly one `workspace` source and at most one `scratch`
+  source, with unique container targets; extra host paths must live under
+  those roots. `mode` defaults to `ro` but is written into canonical bytes, so
+  signers should spell it out.
+- All three lifecycle hooks are mandatory. Each has exactly one of `argv` or
+  `script`, plus `timeout_s` between 1 and 3600. `limits` defaults are 1000 CPU
+  millis, 2048 MB and 512 pids; `network` defaults to `none`.
+- If any environment values will be supplied, the recipe must declare an
+  `env_allowlist`; values are never taken from inline secret-named parameters.
+
+The signature is over the content hash of canonical bytes: the declared fields
+with keys sorted, compact JSON, and `signature` excluded. The signed payload is
+the ASCII `content_hash` (`sha256:` + SHA-256 of the canonical bytes) with no
+trailing newline, using namespace `monexus-recipe-v1`; `signature.sig` is the
+base64 SSHSIG body with no armor or whitespace. Verification shells out to
+`ssh-keygen -Y verify` (OpenSSH 8.0 or newer); a missing or unusable verifier
+fails closed. `scripts/agent_ssh_smoke.sh` contains a complete, working signer;
+the canonical and schema rules are in `packages/recipes/`.
+
+### Import, inspect, revoke
+
+```bash
+(umask 077; jq -n --arg text "$(cat demo.recipe.json)" \
+  '{recipe:$text,source:"inline"}' > /tmp/recipe-params.json)
+monexus host rpc --method recipe.import --params-file /tmp/recipe-params.json
+# → {"recipe":{"id":"rcp_...","name":"demo","version":"1.0.0",
+#    "content_hash":"sha256:...","key_id":"owner-demo",
+#    "state":"trusted",...}}
+
+monexus host rpc --method recipe.list
+monexus host rpc --method recipe.show --params '{"recipe":"demo@1.0.0"}'
+monexus host rpc --method recipe.revoke --params '{"recipe":"demo@1.0.0"}'
+```
+
+`recipe.import` takes the signed document as the `recipe` string; `source` is
+free-form metadata for the audit trail. Re-importing an identical hash is
+idempotent; the same `name@version` with different content is a `conflict`, and
+a revoked recipe cannot be re-imported. Every create and start re-verifies the
+stored recipe against the current trust store. A refused import produces a
+`recipe.refused` event with a reason code.
+
+### Create: plan, approval, retry
+
+`environment.create` takes `workspace_id` and a `recipe` reference of the form
+`name@version`, plus optional `worktree_id`, `machine_id`, `environment_id`,
+`env` (`[{"name":...,"value":...}]`), `mounts`, `ephemeral`, `ttl_s`,
+`approval_id` and `client_request_id`.
+
+The plan pins the exact environment id, mounts, env names, limits, network and
+user. Approval is required for a high-risk plan (bridge network, a writable
+extra mount, or a prepare hook) and in practice for every valid recipe, because
+the prepare hook is mandatory. The first call therefore returns an error whose
+`data` is:
+
+```json
+{"kind":"approval_required","decision_id":"dec_...",
+ "expires_at":"...","plan_digest":"sha256:...","environment_id":"env_..."}
+```
+
+Approve it through the normal Inbox flow, then retry with the proposed
+`environment_id` and the returned `approval_id`:
+
+```bash
+monexus host rpc --method decision.list --params '{"status":"pending"}'
+monexus host rpc --method decision.respond --params '{
+  "decision_id":"dec_...","option_id":"approve","text":"approved"}'
+
+monexus host rpc --method environment.create --params '{
+  "workspace_id":"wsp_...","recipe":"demo@1.0.0",
+  "environment_id":"env_...","approval_id":"dec_...",
+  "client_request_id":"env-create-1"}'
+# → {"environment":{"state":"running", ...}}
+```
+
+The approval lives 15 minutes and is burned only after the conflict check and
+lease acquisition; it is single-use. At most one lease exists per target, so a
+concurrent create is refused as `conflict`. `client_request_id` (and a repeat
+`environment_id`) make retries idempotent. The host writes a durable
+`environment.creating` event before touching Docker. A same-name container is
+adopted only on an exact plan match; otherwise create returns `conflict` and
+leaves it untouched.
+
+### Using an environment
+
+```bash
+monexus host rpc --method environment.exec --params '{
+  "environment_id":"env_...","exec_id":"exec-1",
+  "argv":["sh","-c","printf ok"],"timeout_s":60}'
+# → {"exec_id":"exec-1","exit_code":0,"stdout":"ok",
+#    "stderr":"","timed_out":false,"cancelled":false,"truncated":false}
+```
+
+`environment.exec` is argv-only (no shell unless you pass one), requires a
+unique `exec_id` of at most 128 characters, runs only while the environment is
+`running`, and defaults to a 600-second timeout (cap 3600). Results are cached
+per `(environment, exec_id)` while the host runs. `stop`/`destroy` cancel
+in-flight execs; a daemon or transport failure is returned as
+`{"__exec_error":{...}}` rather than a normal result. `stdout` and `stderr` are
+each redacted and capped at 65536 bytes, with `truncated` set if either was cut.
+
+A Run can attach an environment with `run.create`'s optional `environment_id`.
+An explicit environment must belong to the exact workspace/worktree and be
+running; otherwise the active running environment for that target is used. Run
+and verify commands are executed as `sh -c <command>` inside the container at
+the recipe workdir, while workspace file/git IO stays on the provider and
+binds the same root. Agent-mode Runs with an environment are rejected in A2.1
+(`agent runs with an environment are not supported in A2.1 (A2.2)`). An
+`ephemeral` environment is destroyed when the Run reaches a terminal state, and
+only that Run's environment is touched. `terminal.open`,
+`workspace.gitStatus` and `workspace.gitDiff` redirect into a running
+environment for the workspace root (no specific `worktree_id`).
+
+### Start, stop, destroy, list, doctor
+
+```bash
+monexus host rpc --method environment.stop --params '{"environment_id":"env_..."}'
+monexus host rpc --method environment.start --params '{
+  "environment_id":"env_...","approval_id":"dec_..."}'
+monexus host rpc --method environment.destroy --params '{"environment_id":"env_..."}'
+monexus host rpc --method environment.list --params '{"workspace_id":"wsp_..."}'
+monexus host rpc --method environment.doctor --params '{"environment_id":"env_..."}'
+```
+
+- `environment.start` works only from `stopped`. It requires approval when the
+  recipe has a start hook or uses the bridge network; since the start hook is
+  mandatory, restarting in practice always asks once. A failed start hook stops
+  the container and leaves the record with the error.
+- `environment.stop` calls `docker stop` only. It keeps the container and the
+  environment/scratch directories, moves the record to `stopped`, treats a
+  missing container as success and is safe to repeat. It does **not** run the
+  recipe's `lifecycle.stop` hook in A2.1.
+- `environment.destroy` removes the container, environment directory and
+  scratch, releases the lease and records a tombstone. It is idempotent,
+  including for an unknown id. If cleanup cannot be confirmed it returns
+  `cleanup_failed` with artifact detail, keeps the record as
+  `orphan_suspected`, and writes
+  `<state-dir>/artifacts/environment-<id>-cleanup.log`.
+- `environment.get` returns `{environment:{...}}`; only destroyed records are
+  tombstones. `environment.list` accepts an optional `workspace_id`.
+  `environment.doctor` is read-only and reports daemon, container, label,
+  running, mount and optional recipe checks; its guidance is to inspect only
+  the `monexus-env-<id>` container and never run `docker system prune` or
+  delete unowned containers.
+
+When `MONEXUS_ENVIRONMENT_ENABLED=false` (or `0`/`off`/`no`), `create`, `start`
+and `exec` return `unsupported`; `stop`, `destroy`, `doctor`, `list`, `get` and
+all recipe methods remain available so cleanup still works.
+
+### Cleanup guarantees and reconciliation
+
+Every managed container is named `monexus-env-<environment_id>` and carries
+`monexus.managed=true`, `monexus.primary_id`, `monexus.environment_id`,
+`monexus.workspace_id` and `monexus.recipe_hash` labels. The host reconciles at
+startup and every 60 seconds, read-only: it adopts a matching container only on
+an exact recorded-plan match (including a re-verified recipe), removes a
+container that matches a timed-out create intent, and marks any label or plan
+mismatch as drift without touching it. It never creates containers and never
+deletes unowned ones. If a runtime node's link is unavailable, destroy returns
+`unreachable` before cleanup and leaves the record; there is no silent reroute
+to local Docker. The honest invariant is therefore: a durable intent, labelled
+containers, periodic reconcile, `environment.doctor`, and an explicit
+`orphan_suspected` state when cleanup cannot be confirmed — not a promise that
+no orphan can ever exist.
+
+### Paths and runtime nodes
+
+- Environment directories live at
+  `<runner home>/.monexus/environments/<id>` (mode 0700); a temporary env-file
+  is removed after container start and before the prepare hook. The workspace
+  scratch directory is `<workspace root>-monexus-scratch-<id>` locally or over
+  SSH, and `<node home>/.monexus/environments/<id>/scratch` on a runtime node.
+- The runner is chosen from the machine: local, SSH, or a paired runtime node.
+  A runtime machine must have a live paired transport session, otherwise the
+  call fails as `unreachable`; a node without a usable home fails as
+  `unsupported`. There is no local fallback.
+- Runtime nodes use the generic runtime exec/fs/pty primitives, with paths
+  confined to the `workspace` or `environments` root; they expose no
+  environment-specific RPC. Their environment root is
+  `<node home>/.monexus/environments` (mode 0700), and the host drives the same
+  create/start/stop/destroy/exec sequence over those primitives.
+
+### Known limits
+
+- `lifecycle.stop` is declared, signed and mandatory, but `environment.stop`
+  and `environment.destroy` do not execute it in A2.1; only Docker stop/remove
+  happen. Do not rely on the stop hook for cleanup work.
+- `ttl_s` is recorded on the environment but is not enforced anywhere, and
+  there is no automatic TTL stop.
+- Approval TTL is fixed at 15 minutes and is not caller-configurable.
+- Docker-backed end-to-end tests are opportunistic: they visibly skip in CI
+  when no Docker daemon is reachable or when `nginx:alpine` with a repository
+  digest is not available locally. A skip is not a pass; `environment.doctor`
+  is the supported way to check a live environment.
+- The recipe schema rejects privileged mode, published ports and host
+  networking outright; an approval cannot enable them.
+
+## 14. Environment variables
 
 | variable | purpose |
 | --- | --- |
@@ -946,6 +1477,9 @@ secret, then mirror the new metadata with
 | `MONEXUS_HOST_BIN`, `MONEXUS_DESKTOP_BIN` | override component binaries in the launcher |
 | `MONEXUS_MAX_PARALLEL` | per-machine Run limit (default 4) |
 | `MONEXUS_AGENT_SSH=1` | opt in to the round-1 remote-agent PoC: SSH-backed `agent.start` launches the adapter over `ssh -T` instead of returning the local-only error |
+| `MONEXUS_SKILL_ENABLED=1` | default for `--skill-enabled` (skill packs stay off unless enabled) |
+| `MONEXUS_ENVIRONMENT_ENABLED=false` | disable environment `create`/`start`/`exec` (`0`, `off`, `no` also disable); `stop`/`destroy`/`doctor`/`list`/`get` and recipe methods stay available for cleanup |
+| `MONEXUS_RECIPE_TRUST` | owner trust-store file for recipe signing keys (default `<state-dir>/recipe_trust.json`); read only at host startup |
 | `MONEXUS_TRIGGER_ENABLED=1` | default for `--trigger-enabled` (triggers stay off unless enabled) |
 | `MONEXUS_TZDATA_DIR` | tzdata directory for IANA schedule timezones (default `/usr/share/zoneinfo`) |
 | `MONEXUS_WEBHOOK_BODY_LIMIT` | webhook body limit in bytes (default 65536, cap 262144) |
