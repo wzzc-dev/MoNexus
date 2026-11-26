@@ -5,6 +5,7 @@ import {
   "monexus/runtime" @runtime,
   "monexus/pty-runtime" @pty_runtime,
   "monexus/runtime-transport" @transport,
+  "monexus/skills" @skills,
   "moonbitlang/async",
   "moonbitlang/async/fs",
   "moonbitlang/async/process",

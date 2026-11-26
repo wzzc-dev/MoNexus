@@ -347,6 +347,70 @@ async fn handle_request(
     }
     // Registered unconditionally so a flag-off host answers `unsupported`
     // rather than `method_not_found` (ADR-0014 §8 gap note).
+    @contracts.METHOD_SKILL_IMPORT => {
+      state.mutex.release()
+      handle_skill_import(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_KEY_REGISTER => {
+      state.mutex.release()
+      handle_skill_key_register(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_KEY_REVOKE => {
+      state.mutex.release()
+      handle_skill_key_revoke(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_ALLOW => {
+      state.mutex.release()
+      handle_skill_allow(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_ALLOWLIST_REVOKE => {
+      state.mutex.release()
+      handle_skill_allowlist_revoke(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_ENABLE => {
+      state.mutex.release()
+      handle_skill_enable(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_DISABLE => {
+      state.mutex.release()
+      handle_skill_disable(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_UPGRADE => {
+      state.mutex.release()
+      handle_skill_upgrade(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_UNINSTALL => {
+      state.mutex.release()
+      handle_skill_uninstall(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_LIST => {
+      state.mutex.release()
+      handle_skill_list(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_GET => {
+      state.mutex.release()
+      handle_skill_get(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_DOCTOR => {
+      state.mutex.release()
+      handle_skill_doctor(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_PERMISSIONS_SET => {
+      state.mutex.release()
+      handle_skill_permissions_set(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_PERMISSIONS_GET => {
+      state.mutex.release()
+      handle_skill_permissions_get(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_INVOKE => {
+      state.mutex.release()
+      handle_skill_invoke(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_SKILL_TOOLS => {
+      state.mutex.release()
+      handle_skill_tools(state, sink, request, client_request_id)
+    }
     @contracts.METHOD_TRIGGER_CREATE
     | @contracts.METHOD_TRIGGER_LIST
     | @contracts.METHOD_TRIGGER_GET

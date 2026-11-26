@@ -605,6 +605,9 @@ fn approval_binding_id(
   if method == @contracts.METHOD_RUNTIME_PTY_OPEN {
     return require_safe_id(params, "session_id")
   }
+  if method == @contracts.METHOD_RUNTIME_SKILL_INVOKE {
+    return require_safe_id(params, "run_id")
+  }
   if client_request_id == "" {
     return Err(
       invalid_params(
@@ -1084,9 +1087,34 @@ async fn NodeHost::classify_policy(
   request : @transport.HandlerRequest,
 ) -> Result[PolicyCheckResult?, @contracts.RpcError] {
   let method = request.rpc_method
+  // Mirror storage and GC move or delete mirrored files but never start work.
+  // They are still classified under the installed policy as `control` (a Low
+  // risk continuation), so they need a delivered snapshot like any mutation
+  // and cannot be used to stage a bundle on an unverified node.
+  let mirrors_skill = method == @contracts.METHOD_RUNTIME_SKILL_MIRROR ||
+    method == @contracts.METHOD_RUNTIME_SKILL_GC
+  let invokes_skill = method == @contracts.METHOD_RUNTIME_SKILL_INVOKE
   let snapshot = match self.policy.verified_snapshot() {
     Some(value) => value
     None => {
+      if invokes_skill {
+        node_audit(
+          self,
+          "policy.decision",
+          "unverifiable",
+          "method=" + method + " reason=no_verified_snapshot",
+        )
+        return Err(
+          @contracts.RpcError::new(
+            @transport.ERR_POLICY_STALE,
+            "skill invocation requires a verified policy snapshot; the node fails closed",
+            data=@contracts.json_object([
+              ("kind", @contracts.json_string("skill_unavailable")),
+              ("reason", @contracts.json_string("policy_unverifiable")),
+            ]),
+          ),
+        )
+      }
       let override = @contracts.runtime_method_mutates(method)
       let outcome = if override {
         "operator_override"
@@ -1103,23 +1131,49 @@ async fn NodeHost::classify_policy(
       return Ok(None)
     }
   }
-  let (execution, cwd_rooted) = match
-    execution_request_for(method, request.params, self.workspace_root) {
-    Ok(Some(value)) => value
-    Ok(None) => {
-      node_audit(
-        self,
-        "policy.decision",
-        "read_only",
-        "method=" +
-        method +
-        " policy_version=" +
-        snapshot.version +
-        " outcome=control",
-      )
-      return Ok(None)
+  let (execution, cwd_rooted) = if invokes_skill {
+    match self.skill_execution_request(request.params) {
+      Ok(value) => value
+      Err(error) => return Err(error)
     }
-    Err(error) => return Err(error)
+  } else if mirrors_skill {
+    let (absolute, rooted) = match policy_cwd(self.workspace_root, "") {
+      Ok(value) => value
+      Err(error) => return Err(error)
+    }
+    let label = if method == @contracts.METHOD_RUNTIME_SKILL_MIRROR {
+      "skill.mirror"
+    } else {
+      "skill.gc"
+    }
+    (
+      @policy.ExecutionRequest::new(
+        operation=@policy.PolicyOperation::Control,
+        argv=[label],
+        cwd=absolute,
+        workspace_root=self.workspace_root,
+      ),
+      rooted,
+    )
+  } else {
+    match
+      execution_request_for(method, request.params, self.workspace_root) {
+      Ok(Some(value)) => value
+      Ok(None) => {
+        node_audit(
+          self,
+          "policy.decision",
+          "read_only",
+          "method=" +
+          method +
+          " policy_version=" +
+          snapshot.version +
+          " outcome=control",
+        )
+        return Ok(None)
+      }
+      Err(error) => return Err(error)
+    }
   }
   let context = @policy.PolicyContext::with_snapshot(
     snapshot,
@@ -1456,6 +1510,18 @@ async fn NodeHost::dispatch_inner(
   }
   if method == @contracts.METHOD_RUNTIME_GIT_READ_OUTPUT {
     return self.git_read_output(request)
+  }
+  if method == @contracts.METHOD_RUNTIME_SKILL_MIRROR {
+    return self.skill_mirror(request.params)
+  }
+  if method == @contracts.METHOD_RUNTIME_SKILL_LIST {
+    return self.skill_list(request.params)
+  }
+  if method == @contracts.METHOD_RUNTIME_SKILL_INVOKE {
+    return self.skill_invoke(request.params)
+  }
+  if method == @contracts.METHOD_RUNTIME_SKILL_GC {
+    return self.skill_gc(request.params)
   }
   Err(
     @contracts.RpcError::new(

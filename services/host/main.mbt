@@ -24,6 +24,7 @@ async fn run_host_command(args : Array[String]) -> (Int32, String) {
     "machine" => machine_command(args[2:].to_owned())
     "runtime" | "--runtime" => runtime_command(args[2:].to_owned())
     "rpc" => rpc_command(args[2:].to_owned())
+    "skill-mcp" => skill_mcp_command(args[2:].to_owned())
     _ =>
       (
         2,
@@ -54,6 +55,7 @@ fn usage_text() -> String {
     "      [--runtime-state-dir DIR] [--runtime-policy FILE]",
     "      [--runtime-workspace-root DIR ...] [--runtime-wait-ms N]",
     "      [--runtime-approval-ttl-ms N]",
+    "      [--skill-enabled true|false]  (default: $MONEXUS_SKILL_ENABLED, off)",
     "  monexus-host status [--state-dir DIR]",
     "  monexus-host subscribe [--state-dir DIR] [--since SEQ]",
     "      [--timeout-ms N] [--max-events N]",
@@ -67,6 +69,8 @@ fn usage_text() -> String {
     "      [--timeout-seconds N]",
     "  monexus-host machine remove --id ID [--state-dir DIR]",
     "  monexus-host rpc --method METHOD [--state-dir DIR] [--params JSON]",
+    "  monexus-host skill-mcp --state-dir DIR --session ID",
+    "      (stdio MCP gateway; requires $MONEXUS_SKILL_TOKEN)",
     "  monexus-host runtime pair|serve|status [--runtime-id ID] ...",
     "      (see `monexus-host runtime help`; also `--runtime ...`)",
     "",
@@ -206,6 +210,18 @@ async fn serve_command(args : Array[String]) -> (Int32, String) {
       }
     None => false
   }
+  let skill_env_default = match @env.get_env_var("MONEXUS_SKILL_ENABLED") {
+    Some(value) =>
+      match value.to_lower() {
+        "true" | "1" | "yes" | "on" => true
+        _ => false
+      }
+    None => false
+  }
+  let exe = match @env.args() {
+    values if values.length() > 0 => values[0]
+    _ => "monexus-host"
+  }
   let options = HostOptions::new(
     state_dir=pair_last(pairs, "--state-dir", @client.default_state_dir()),
     heartbeat_ms=pair_int(pairs, "--heartbeat-ms", 1_000),
@@ -223,6 +239,8 @@ async fn serve_command(args : Array[String]) -> (Int32, String) {
       "--runtime-approval-ttl-ms",
       60_000L,
     ),
+    skill_enabled=pair_bool(pairs, "--skill-enabled", skill_env_default),
+    host_exe=exe,
   )
   @signal.set_global_cancellation_signals(
     [@signal.SIGINT, @signal.SIGTERM],

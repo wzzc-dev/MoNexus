@@ -109,6 +109,7 @@ pub fn MachineStore::open(path : String) -> Result[MachineStore, String] {
     task_store_migrate(conn)
     trigger_store_migrate(conn)
     environment_store_migrate(conn)
+    skill_store_migrate(conn)
   } catch {
     error => {
       conn.close() catch { _ => () }

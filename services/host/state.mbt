@@ -27,6 +27,14 @@ pub(all) struct HostOptions {
   /// How long a runtime high-risk approval Decision stays answerable. The
   /// provider caps this at the policy core's grant ceiling.
   runtime_approval_ttl_ms : Int64
+  /// Skill packs feature flag (ADR-0015 §4). Default off: every `skill.*`
+  /// method answers `unsupported`, `agent.start` rejects `skills`, ACP
+  /// `mcpServers` stays `[]` and no skill block is injected.
+  skill_enabled : Bool
+  /// Absolute path of this host binary, used as the stdio MCP gateway command
+  /// for local agent sessions. Empty means the gateway is unavailable; the
+  /// session then gets declarative injection only and is marked not invocable.
+  host_exe : String
 }
 
 ///|
@@ -44,6 +52,8 @@ pub fn HostOptions::new(
   runtime_workspace_roots~ : Array[String] = [],
   runtime_wait_ms~ : Int64 = 2_000L,
   runtime_approval_ttl_ms~ : Int64 = 60_000L,
+  skill_enabled~ : Bool = false,
+  host_exe~ : String = "",
 ) -> HostOptions {
   {
     state_dir,
@@ -59,6 +69,8 @@ pub fn HostOptions::new(
     runtime_workspace_roots,
     runtime_wait_ms: runtime_wait_ms.max(0L),
     runtime_approval_ttl_ms: runtime_approval_ttl_ms.max(1_000L),
+    skill_enabled,
+    host_exe,
   }
 }
 
@@ -142,6 +154,15 @@ pub struct HostState {
   // host start; recipe signatures are re-verified against them before use.
   trust : @recipes.TrustStore
   verifier : @recipes.VerifierProbe
+  // A4: skill packs. The key store is loaded from `skill_keys`; capability
+  // tokens live only in memory and are never persisted. Waiters are keyed by
+  // Decision id and carry the owner's option id (or a fixed expired marker).
+  skill_enabled : Bool
+  host_exe : String
+  mut skill_keys : @skills.SkillKeyStore
+  skill_capabilities : Map[String, SkillCapability]
+  skill_waiters : Map[String, @aqueue.Queue[String]]
+  skill_rate : Map[String, @contracts.TriggerRateBucket]
   // Lifecycle mutations are serialized separately from `mutex` so a long
   // Docker pull never blocks event fan-out or read-only RPCs.
   environment_mutex : @async.Mutex
@@ -190,8 +211,43 @@ pub struct AgentSessionRuntime {
   turn_text : Ref[String]
   home : String
   memory_before : String
+  /// Capability token for this session's stdio skill gateway ("" when skills
+  /// are off, unavailable or the session is remote). Never persisted.
+  skill_token : String
   stderr_tail : Ref[String]
   finalized : Ref[Bool]
+}
+
+///|
+/// One frozen snapshot entry as the gateway needs it. `resource_root` is the
+/// materialised session directory (entry + resources only).
+pub struct SkillCapabilityEntry {
+  name : String
+  version : String
+  content_hash : String
+  scope : String
+  scope_ref : String
+  mode : String
+  entry_ids : Array[String]
+  resource_root : String
+}
+
+///|
+/// Session-scoped capability behind the stdio MCP gateway. The token is a
+/// bearer secret: it is never written to an event, audit record or session
+/// projection. `remote` sessions have no local gateway and are marked not
+/// invocable; the snapshot is still injected declaratively.
+pub struct SkillCapability {
+  token : String
+  session_id : String
+  agent_id : String
+  cwd : String
+  workspace_id : String
+  /// Session skill root (`<agent home>/sessions/<session>/skills`), used as the
+  /// only HOME for invoked commands. Never a shared or system home.
+  home : String
+  remote : Bool
+  entries : Map[String, SkillCapabilityEntry]
 }
 
 ///|
@@ -281,6 +337,12 @@ fn HostState::new(
     webhook_audit: Map([]),
     trust,
     verifier,
+    skill_enabled: options.skill_enabled,
+    host_exe: options.host_exe,
+    skill_keys: @skills.SkillKeyStore::empty(),
+    skill_capabilities: Map([]),
+    skill_waiters: Map([]),
+    skill_rate: Map([]),
     environment_mutex: @async.Mutex::Mutex(),
     env_exec_cache: Map([]),
     env_exec_tasks: Map([]),

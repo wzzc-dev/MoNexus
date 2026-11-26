@@ -5,6 +5,7 @@ members = [
   "./packages/contracts",
   "./packages/machines",
   "./packages/recipes",
+  "./packages/skills",
   "./packages/providers",
   "./packages/host-client",
   "./services/host",

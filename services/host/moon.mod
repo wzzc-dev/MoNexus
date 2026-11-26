@@ -17,6 +17,7 @@ import {
   "monexus/recipes@0.1.0",
   "monexus/runtime-node@0.1.0",
   "monexus/runtime-transport@0.1.0",
+  "monexus/skills@0.1.0",
   "moonbitlang/async@0.22.7",
   "moonbitlang/x@0.5.6",
 }

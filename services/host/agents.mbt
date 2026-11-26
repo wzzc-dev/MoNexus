@@ -346,6 +346,14 @@ fn expire_session_decisions(
       @contracts.decision_payload(expired),
       expired,
     )
+    if record.kind == @contracts.DECISION_KIND_SKILL {
+      let waiter = state.skill_waiters.get(record.id)
+      state.skill_waiters.remove(record.id)
+      match waiter {
+        Some(queue) => ignore(queue.try_put("expired") catch { _ => false })
+        None => ()
+      }
+    }
   }
 }
 
@@ -418,6 +426,7 @@ async fn finalize_agent_session(
   )
   state.agent_sessions.remove(runtime.id)
   state.mutex.release()
+  finalize_skill_session(state, runtime.skill_token, runtime.id, runtime.home)
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,6 +1195,34 @@ async fn handle_agent_start(
   let workspace_id = target.workspace_id
   let worktree_id = target.worktree_id
   let launcher = target.launcher
+  let remote_session = match launcher {
+    @agent.ProcessLauncher::Local => false
+    _ => true
+  }
+  let explicit_skills = match @contracts.skill_bindings_param(request.params) {
+    Some(value) => value
+    None => {
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_invalid("skills must be an array of exact name/version/content_hash/mode bindings"),
+      )
+      return
+    }
+  }
+  let task_id = @contracts.agent_task_id_param(request.params)
+  if task_id != "" && state.skill_enabled && !skill_scope_ref_valid(@contracts.SKILL_SCOPE_TASK, task_id) {
+    agent_io_error(
+      state,
+      sink,
+      request,
+      client_request_id,
+      agent_invalid("invalid task_id"),
+    )
+    return
+  }
   let home = match ensure_agent_home(state, agent_id) {
     Ok(value) => value
     Err(message) => {
@@ -1209,12 +1246,6 @@ async fn handle_agent_start(
   }
   let memory_limit = @contracts.agent_memory_limit_param(request.params)
   let prompt = @contracts.agent_prompt_param(request.params)
-  let (composed, memory_bytes) = compose_memory_prompt(
-    agents_text,
-    memory_text,
-    prompt,
-    memory_limit,
-  )
   let group = match state.group.val {
     Some(value) => value
     None => {
@@ -1235,13 +1266,49 @@ async fn handle_agent_start(
   let timestamp = @contracts.format_rfc3339(now)
   let session_id = @contracts.new_id("agt", now)
   open_agent_stderr_log(state, session_id)
+  let skill_setup = match
+    setup_skill_session(
+      state,
+      agent_id,
+      session_id,
+      task_id,
+      home,
+      cwd,
+      workspace_id,
+      remote_session,
+      explicit_skills,
+    ) {
+    Ok(value) => value
+    Err(fault) => {
+      finalize_skill_session(state, "", session_id, home)
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        skill_fault_error(fault),
+      )
+      return
+    }
+  }
+  let (composed, memory_bytes) = @skills.compose_skill_prompt(
+    agents_text,
+    memory_text,
+    Some(skill_setup.injection),
+    prompt,
+    memory_limit,
+  )
+  let spec_env = @contracts.agent_env_from_json(request.params)
+  if skill_setup.token != "" {
+    spec_env.set("MONEXUS_SKILL_TOKEN", skill_setup.token)
+  }
   let spec = @agent.AgentSpec::new(
     agent_id~,
     mode~,
     command=@contracts.agent_command_param(request.params),
     args=@contracts.agent_args_param(request.params),
     cwd~,
-    env=@contracts.agent_env_from_json(request.params),
+    env=spec_env,
   )
   let stderr_tail : Ref[String] = Ref("")
   let stderr_raw : Ref[String] = Ref("")
@@ -1282,6 +1349,7 @@ async fn handle_agent_start(
       state.mutex.acquire()
       record_readiness(state, failed)
       state.mutex.release()
+      finalize_skill_session(state, skill_setup.token, session_id, home)
       agent_io_error(
         state,
         sink,
@@ -1304,7 +1372,32 @@ async fn handle_agent_start(
           Ok(value) => value
           Err(message) => return Err(message)
         }
-        let session = match @agent.acp_new_session(process, cwd) {
+        let gateway_servers : Array[@json.Json] = []
+        if skill_setup.token != "" {
+          let gateway_args : Array[@json.Json] = [
+            @contracts.json_string("skill-mcp"),
+            @contracts.json_string("--state-dir"),
+            @contracts.json_string(state.state_dir),
+            @contracts.json_string("--session"),
+            @contracts.json_string(session_id),
+          ]
+          let gateway_env : Array[@json.Json] = [
+            @contracts.json_object([
+              ("name", @contracts.json_string("MONEXUS_SKILL_TOKEN")),
+              ("value", @contracts.json_string(skill_setup.token)),
+            ]),
+          ]
+          gateway_servers.push(
+            @contracts.json_object([
+              ("name", @contracts.json_string("monexus-skills")),
+              ("command", @contracts.json_string(state.host_exe)),
+              ("args", @contracts.json_array(gateway_args)),
+              ("env", @contracts.json_array(gateway_env)),
+            ]),
+          )
+        }
+        let mcp_servers = @contracts.json_array(gateway_servers)
+        let session = match @agent.acp_new_session_with(process, cwd, mcp_servers) {
           Ok(value) => value
           Err(message) => return Err(message)
         }
@@ -1349,6 +1442,7 @@ async fn handle_agent_start(
         state.mutex.acquire()
         record_readiness(state, failed)
         state.mutex.release()
+        finalize_skill_session(state, skill_setup.token, session_id, home)
         agent_io_error(
           state,
           sink,
@@ -1390,6 +1484,7 @@ async fn handle_agent_start(
     turns: if prompt == "" { 0 } else { 1 },
     memory_injected: memory_bytes > 0,
     memory_bytes,
+    skill_snapshot: skill_session_snapshot(skill_setup.entries),
     updated_at: timestamp,
   }
   let runtime : AgentSessionRuntime = {
@@ -1405,6 +1500,7 @@ async fn handle_agent_start(
     memory_before: memory_text,
     stderr_tail,
     finalized: Ref(false),
+    skill_token: skill_setup.token,
   }
   let mut prompt_id = ""
   state.mutex.acquire()
@@ -1423,6 +1519,7 @@ async fn handle_agent_start(
     Err(message) => {
       state.mutex.release()
       process.interrupt()
+      finalize_skill_session(state, skill_setup.token, session_id, home)
       agent_io_error(
         state,
         sink,
@@ -1433,7 +1530,63 @@ async fn handle_agent_start(
       return
     }
   }
+  if skill_setup.entries.length() > 0 {
+    let skill_entries : Array[@json.Json] = []
+    for entry in skill_setup.entries {
+      skill_entries.push(
+        @contracts.json_object([
+          ("name", @contracts.json_string(entry.snapshot.name)),
+          ("version", @contracts.json_string(entry.snapshot.version)),
+          ("content_hash", @contracts.json_string(entry.snapshot.content_hash)),
+          ("scope", @contracts.json_string(entry.snapshot.scope)),
+          ("mode", @contracts.json_string(entry.snapshot.mode)),
+        ]),
+      )
+    }
+    let _ = state.append_event(
+      @contracts.EVENT_SKILL_LOADED,
+      "agent-session/" + session_id,
+      @contracts.json_object([
+        ("session_id", @contracts.json_string(session_id)),
+        ("skills", @contracts.json_array(skill_entries)),
+        ("bytes", @contracts.json_int(skill_setup.injection.bytes)),
+        ("truncated", @contracts.json_bool(skill_setup.injection.truncated)),
+        ("invocable", @contracts.json_bool(!remote_session)),
+      ]),
+    )
+    if skill_setup.injection.truncated {
+      let _ = state.append_event(
+        @contracts.EVENT_SKILL_CONTEXT_TRUNCATED,
+        "agent-session/" + session_id,
+        @contracts.json_object([
+          ("session_id", @contracts.json_string(session_id)),
+          ("budget_bytes", @contracts.json_int(@skills.SKILL_CONTEXT_DEFAULT_BYTES)),
+          ("bytes", @contracts.json_int(skill_setup.injection.bytes)),
+          ("loaded", @contracts.json_int(skill_setup.loaded)),
+          ("available", @contracts.json_int(skill_setup.available)),
+        ]),
+      )
+    }
+  }
   state.mutex.release()
+  if skill_setup.entries.length() > 0 {
+    audit(
+      state,
+      "skill.session.load",
+      "host",
+      "session/" + session_id,
+      if remote_session { "declarative" } else { "injected" },
+      detail="loaded=" +
+      skill_setup.loaded.to_string() +
+      " available=" +
+      skill_setup.available.to_string() +
+      " bytes=" +
+      skill_setup.injection.bytes.to_string() +
+      " truncated=" +
+      skill_setup.injection.truncated.to_string(),
+      policy="skill",
+    )
+  }
   if prompt != "" {
     let sent = process.write_json(
       @agent.acp_rpc_request(
@@ -2004,6 +2157,7 @@ async fn handle_agent_resume(
     memory_before,
     stderr_tail,
     finalized: Ref(false),
+    skill_token: "",
   }
   let resumed = {
     ..record,
@@ -2452,6 +2606,16 @@ async fn handle_decision_respond(
         decision_id~,
         run_id=record.run_id,
       )
+      if record.kind == @contracts.DECISION_KIND_SKILL {
+        state.mutex.acquire()
+        let waiter = state.skill_waiters.get(decision_id)
+        state.skill_waiters.remove(decision_id)
+        state.mutex.release()
+        match waiter {
+          Some(queue) => ignore(queue.try_put(option_id) catch { _ => false })
+          None => ()
+        }
+      }
       if record.kind == @contracts.DECISION_KIND_APPROVAL {
         handle_approval_decision_respond(
           state,

@@ -563,9 +563,20 @@ pub fn acp_initialize_params() -> @json.Json {
 
 ///|
 pub fn acp_new_session_params(cwd : String) -> @json.Json {
+  acp_new_session_params_with(cwd, @contracts.json_array([]))
+}
+
+///|
+/// Same `session/new` parameters with an explicit MCP server list. The host
+/// passes only its own stdio skill gateway; skill-provided servers are never
+/// registered.
+pub fn acp_new_session_params_with(
+  cwd : String,
+  mcp_servers : @json.Json,
+) -> @json.Json {
   @contracts.json_object([
     ("cwd", @contracts.json_string(cwd)),
-    ("mcpServers", @contracts.json_array([])),
+    ("mcpServers", mcp_servers),
     ("additionalDirectories", @contracts.json_array([])),
   ])
 }
@@ -768,7 +779,19 @@ pub async fn acp_new_session(
   process : AgentProcess,
   cwd : String,
 ) -> Result[String, String] {
-  let result = match process.request("session/new", acp_new_session_params(cwd)) {
+  acp_new_session_with(process, cwd, @contracts.json_array([]))
+}
+
+///|
+/// `session/new` with the host-owned MCP gateway list. Default callers keep
+/// the historical empty list.
+pub async fn acp_new_session_with(
+  process : AgentProcess,
+  cwd : String,
+  mcp_servers : @json.Json,
+) -> Result[String, String] {
+  let result = match
+    process.request("session/new", acp_new_session_params_with(cwd, mcp_servers)) {
     Ok(value) => value
     Err(message) => return Err(message)
   }
