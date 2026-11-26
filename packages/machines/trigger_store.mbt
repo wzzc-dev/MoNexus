@@ -1,5 +1,5 @@
 ///|
-/// Trigger persistence (ADR-0014, A3.0).
+/// Trigger persistence (ADR-0014, A3.0 events; A3.1 schedule and webhook).
 ///
 /// Three rules keep this package honest:
 /// 1. `events` stays the only event log. Trigger lifecycle and fire records
@@ -11,8 +11,10 @@
 ///    once, and it is written in the *same* transaction as the `task.created`
 ///    projection and the `trigger.fired` event.
 ///
-/// A3.0 only wires event triggers. `webhook_keys` and `webhook_nonces` are
-/// created empty for forward compatibility with A3.1; nothing reads them.
+/// A3.1 adds the schedule CAS claim, the bounded due scan and the webhook
+/// exactly-once transaction (`webhook_keys` + `webhook_nonces`). The ledger
+/// rules above apply unchanged: every fire still inserts one Task and one
+/// `trigger.fired` in the same transaction as its fire-key row.
 
 ///|
 fn trigger_store_migrate(
@@ -79,8 +81,9 @@ fn trigger_store_migrate(
     "CREATE INDEX IF NOT EXISTS trigger_fires_trigger_idx " +
     "ON trigger_fires(trigger_id, created_at)",
   )
-  // Empty forward-compatible tables for A3.1. A3.0 never reads or writes
-  // them; keeping them in the migration lets A3.1 stay additive.
+  // Webhook key metadata and nonce replay ledger (ADR-0014 §4.3–§4.4). Key
+  // secrets live only under the state dir; these rows store the relative
+  // secret path and never the secret itself.
   exec_raise(
     conn,
     "CREATE TABLE IF NOT EXISTS webhook_keys (" +
@@ -110,6 +113,60 @@ fn trigger_store_migrate(
     "PRIMARY KEY (key_id, nonce)" +
     ")",
   )
+  // A3.1 additions. The base tables above stay A3.0-compatible; each ALTER is
+  // a no-op error once the column exists, which is safe to swallow.
+  let _ = try {
+    exec_raise(
+      conn,
+      "ALTER TABLE triggers ADD COLUMN resolved_tz TEXT NOT NULL DEFAULT ''",
+    )
+  } catch {
+    _ => ()
+  }
+  let _ = try {
+    exec_raise(
+      conn,
+      "ALTER TABLE triggers ADD COLUMN anchor_ms INTEGER NOT NULL DEFAULT 0",
+    )
+  } catch {
+    _ => ()
+  }
+  let _ = try {
+    exec_raise(
+      conn,
+      "ALTER TABLE triggers ADD COLUMN next_fire_ms INTEGER NOT NULL DEFAULT 0",
+    )
+  } catch {
+    _ => ()
+  }
+  exec_raise(
+    conn,
+    "CREATE INDEX IF NOT EXISTS triggers_due_idx ON triggers(next_fire_ms)",
+  )
+  let _ = try {
+    exec_raise(
+      conn,
+      "ALTER TABLE webhook_keys ADD COLUMN last_used_at TEXT NOT NULL DEFAULT ''",
+    )
+  } catch {
+    _ => ()
+  }
+  let _ = try {
+    exec_raise(
+      conn,
+      "ALTER TABLE webhook_keys ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''",
+    )
+  } catch {
+    _ => ()
+  }
+  let _ = try {
+    exec_raise(
+      conn,
+      "ALTER TABLE webhook_nonces ADD COLUMN task_id TEXT NOT NULL DEFAULT ''",
+    )
+  } catch {
+    _ => ()
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -125,13 +182,19 @@ fn trigger_put_raw(
     Some(value) => value
     None => 0L
   }
+  let next_fire_ms = match @contracts.trigger_parse_rfc3339_ms(
+    record.next_fire_at,
+  ) {
+    Some(value) => value
+    None => 0L
+  }
   let stmt = conn.prepare(
     "INSERT INTO triggers (" +
     "id,org_id,name,type,enabled,expires_at,expires_ms,target_json," +
     "source_json,config_hash,created_by,version,record_json,expired_at," +
     "active_from_seq,next_fire_at,last_fired_at,dedupe_hits," +
-    "created_at,updated_at" +
-    ") VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20) " +
+    "created_at,updated_at,resolved_tz,anchor_ms,next_fire_ms" +
+    ") VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23) " +
     "ON CONFLICT(id) DO UPDATE SET " +
     "name=excluded.name,type=excluded.type,enabled=excluded.enabled," +
     "expires_at=excluded.expires_at,expires_ms=excluded.expires_ms," +
@@ -142,7 +205,8 @@ fn trigger_put_raw(
     "next_fire_at=excluded.next_fire_at," +
     "last_fired_at=excluded.last_fired_at," +
     "dedupe_hits=excluded.dedupe_hits,created_at=excluded.created_at," +
-    "updated_at=excluded.updated_at",
+    "updated_at=excluded.updated_at,resolved_tz=excluded.resolved_tz," +
+    "anchor_ms=excluded.anchor_ms,next_fire_ms=excluded.next_fire_ms",
   )
   stmt.bind(index=1, record.id)
   stmt.bind(index=2, record.org_id)
@@ -164,6 +228,9 @@ fn trigger_put_raw(
   stmt.bind(index=18, record.dedupe_hits.to_int64())
   stmt.bind(index=19, record.created_at)
   stmt.bind(index=20, record.updated_at)
+  stmt.bind(index=21, record.resolved_tz)
+  stmt.bind(index=22, record.anchor_ms)
+  stmt.bind(index=23, next_fire_ms)
   let _ = stmt.step()
   stmt.finalize()
 }
@@ -646,20 +713,24 @@ pub fn MachineStore::reconcile_trigger_projection(
     existing.finalize()
     let events = self.conn.prepare(
       "SELECT payload_json FROM events " +
-      "WHERE type LIKE 'trigger.%' AND type <> 'trigger.rejected' " +
-      "ORDER BY seq ASC",
+      "WHERE type LIKE 'trigger.%' ORDER BY seq ASC",
     )
     let records : Array[@contracts.TriggerRecord] = []
     let index_by_id : Map[String, Int] = Map([])
+    // A3.1 internal advances (`missed_window`, `clock_skew`) have no
+    // `trigger.fired` record, so they persist `next_fire_at` on the rejection
+    // event instead. Replay applies those patches after all records.
+    let patches : Array[(String, String)] = []
     while events.step() {
       let payload_text : String = events.column(index=0)
       let payload = @json.parse(payload_text) catch {
         _ => @json.Json::empty_object()
       }
-      let record_json = match @contracts.as_object(payload) {
-        Some(object) => object.get("record")
-        None => None
+      let object = match @contracts.as_object(payload) {
+        Some(value) => value
+        None => continue
       }
+      let record_json = object.get("record")
       match record_json {
         Some(value) =>
           match @contracts.trigger_record_from_json(value) {
@@ -676,8 +747,23 @@ pub fn MachineStore::reconcile_trigger_projection(
           }
         None => ()
       }
+      let patch_id = @contracts.string_field_or(object, "trigger_id", "")
+      let patch_next = @contracts.string_field_or(object, "next_fire_at", "")
+      if patch_id != "" && patch_next != "" {
+        patches.push((patch_id, patch_next))
+      }
     }
     events.finalize()
+    for patch in patches {
+      let (id, next_fire_at) = patch
+      match index_by_id.get(id) {
+        Some(index) => {
+          let record = records[index]
+          records[index] = { ..record, next_fire_at }
+        }
+        None => ()
+      }
+    }
     exec_raise(self.conn, "BEGIN IMMEDIATE")
     exec_raise(self.conn, "DELETE FROM triggers")
     for record in records {
@@ -694,5 +780,681 @@ pub fn MachineStore::reconcile_trigger_projection(
       let _ = try { exec_raise(self.conn, "ROLLBACK") } catch { _ => () }
       Err(sqlite_text(error))
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// A3.1: schedule claim, due scan and webhook transactions
+// ---------------------------------------------------------------------------
+
+///|
+/// Outcome of the webhook exactly-once transaction. `Duplicate` carries the
+/// Task id of the earlier delivery so the host can answer 202 without
+/// creating anything.
+pub(all) enum WebhookFireOutcome {
+  WebhookFireApplied
+  WebhookFireDuplicate(task_id~ : String)
+  WebhookFireNonceReuse
+  WebhookFireDisabled
+  WebhookFireExpired
+  WebhookFireNotFound
+  WebhookFireKeyInactive
+}
+
+///|
+/// Due schedules, oldest slot first. `next_fire_ms` is the slot's UTC
+/// millisecond value (not the jittered execution time), so the host still
+/// applies `schedule_is_due` per row. Bounded by `limit` so one tick cannot
+/// starve the rest of the host.
+pub fn MachineStore::list_due_schedules(
+  self : MachineStore,
+  now_ms : Int64,
+  limit : Int,
+) -> Result[Array[@contracts.TriggerRecord], String] {
+  try {
+    let stmt = self.conn.prepare(
+      "SELECT record_json, dedupe_hits FROM triggers " +
+      "WHERE type=?1 AND enabled=1 AND next_fire_ms > 0 AND next_fire_ms <= ?2 " +
+      "AND (expires_ms=0 OR expires_ms > ?2) " +
+      "ORDER BY next_fire_ms, id LIMIT ?3",
+    )
+    stmt.bind(index=1, @contracts.TRIGGER_TYPE_SCHEDULE)
+    stmt.bind(index=2, now_ms)
+    stmt.bind(index=3, limit.max(1).min(1_000).to_int64())
+    let out : Array[@contracts.TriggerRecord] = []
+    while stmt.step() {
+      match trigger_from_row(stmt, 1) {
+        Some(record) => out.push(record)
+        None => ()
+      }
+    }
+    stmt.finalize()
+    Ok(out)
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
+/// Exactly-once schedule claim (ADR-0014 §3.3): CAS `next_fire_at` from the
+/// caller's expected value, then insert the slot fire row, Task events and
+/// `trigger.fired` in the same transaction. A lost CAS returns
+/// `TriggerVersionConflict` and writes nothing.
+pub fn MachineStore::record_trigger_schedule_event(
+  self : MachineStore,
+  task_events : Array[@contracts.EventEnvelope],
+  fired_event : @contracts.EventEnvelope,
+  task : @contracts.TaskRecord,
+  fire : @contracts.TriggerFire,
+  record_after : @contracts.TriggerRecord,
+  expected_next_fire_at : String,
+  new_next_fire_at : String,
+  now_ms : Int64,
+) -> Result[@contracts.TriggerWriteOutcome, String] {
+  let new_next_fire_ms = match @contracts.trigger_parse_rfc3339_ms(
+    new_next_fire_at,
+  ) {
+    Some(value) => value
+    None => 0L
+  }
+  try {
+    exec_raise(self.conn, "BEGIN IMMEDIATE")
+    let check = self.conn.prepare(
+      "SELECT enabled, expires_ms, next_fire_at, record_json FROM triggers WHERE id=?1",
+    )
+    check.bind(index=1, fire.trigger_id)
+    let mut found = false
+    let mut enabled = false
+    let mut expires_ms = 0L
+    let mut stored_next = ""
+    let mut stored_json = ""
+    if check.step() {
+      found = true
+      let enabled_col : Int64 = check.column(index=0)
+      enabled = enabled_col != 0L
+      let expires_col : Int64 = check.column(index=1)
+      expires_ms = expires_col
+      stored_next = check.column(index=2)
+      stored_json = check.column(index=3)
+    }
+    check.finalize()
+    if !found {
+      exec_raise(self.conn, "ROLLBACK")
+      return Ok(@contracts.TriggerNotFound)
+    }
+    if !enabled {
+      exec_raise(self.conn, "ROLLBACK")
+      return Ok(@contracts.TriggerDisabled)
+    }
+    if expires_ms > 0L && expires_ms <= now_ms {
+      exec_raise(self.conn, "ROLLBACK")
+      return Ok(@contracts.TriggerExpired)
+    }
+    // A caller's snapshot may predate previous duplicate drops. Keep the
+    // projection's dedupe counter authoritative when writing its successor.
+    let record_stored = {
+      ..record_after,
+      dedupe_hits: trigger_dedupe_hits_raw(self.conn, fire.trigger_id),
+    }
+    if stored_next != expected_next_fire_at {
+      // Another tick advanced the slot before us; it owns this fire.
+      exec_raise(self.conn, "ROLLBACK")
+      return Ok(@contracts.TriggerVersionConflict)
+    }
+    let cas = self.conn.prepare(
+      "UPDATE triggers SET next_fire_at=?2, next_fire_ms=?3, " +
+      "record_json=?4, updated_at=?5 WHERE id=?1 AND next_fire_at=?6",
+    )
+    cas.bind(index=1, fire.trigger_id)
+    cas.bind(index=2, new_next_fire_at)
+    cas.bind(index=3, new_next_fire_ms)
+    cas.bind(index=4, record_stored.to_json().stringify())
+    cas.bind(index=5, record_stored.updated_at)
+    cas.bind(index=6, expected_next_fire_at)
+    let _ = cas.step()
+    let changed = (self.conn.changes() > 0L)
+    cas.finalize()
+    if !changed {
+      exec_raise(self.conn, "ROLLBACK")
+      return Ok(@contracts.TriggerVersionConflict)
+    }
+    trigger_fire_put_raw(self.conn, fire)
+    let inserted = (self.conn.changes() > 0L)
+    if !inserted {
+      // Defensive: the slot was already fenced by an earlier claim. Keep the
+      // advanced projection (so the slot is not rescanned) and count the hit.
+      let stored = @json.parse(stored_json) catch {
+        _ => @json.Json::empty_object()
+      }
+      match @contracts.trigger_record_from_json(stored) {
+        Some(record) => {
+          let patched = { ..record, next_fire_at: new_next_fire_at }
+          trigger_put_raw(self.conn, patched)
+        }
+        None => ()
+      }
+      trigger_bump_dedupe_raw(self.conn, fire.trigger_id)
+      exec_raise(self.conn, "COMMIT")
+      return Ok(@contracts.TriggerDuplicate)
+    }
+    let mut max_seq = fired_event.seq
+    for event in task_events {
+      if event.seq > max_seq {
+        max_seq = event.seq
+      }
+      insert_event_raw(self.conn, event)
+    }
+    bump_last_seq_raw(self.conn, max_seq)
+    task_put_raw(self.conn, task)
+    insert_event_raw(self.conn, fired_event)
+    trigger_put_raw(self.conn, record_stored)
+    exec_raise(self.conn, "COMMIT")
+    Ok(@contracts.TriggerApplied)
+  } catch {
+    error => {
+      let _ = try { exec_raise(self.conn, "ROLLBACK") } catch { _ => () }
+      Err(sqlite_text(error))
+    }
+  }
+}
+
+///|
+/// Refresh the projection row only. Used when a schedule has no persisted
+/// `next_fire_at` yet (for example a record written before A3.1); there is no
+/// lifecycle transition to event, so this is projection-only.
+pub fn MachineStore::refresh_trigger_projection(
+  self : MachineStore,
+  record : @contracts.TriggerRecord,
+) -> Result[Unit, String] {
+  try {
+    trigger_put_raw(self.conn, record)
+    Ok(())
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
+/// Advance a schedule slot without creating a Task (`missed_window` skip,
+/// `clock_skew`, rate limit or invalid target). The CAS and the rejection
+/// event are one transaction so the persisted `next_fire_at` cannot be lost
+/// on restart.
+pub fn MachineStore::record_trigger_schedule_reject_event(
+  self : MachineStore,
+  rejected_event : @contracts.EventEnvelope,
+  record_after : @contracts.TriggerRecord,
+  expected_next_fire_at : String,
+  new_next_fire_at : String,
+) -> Result[Bool, String] {
+  let new_next_fire_ms = match @contracts.trigger_parse_rfc3339_ms(
+    new_next_fire_at,
+  ) {
+    Some(value) => value
+    None => 0L
+  }
+  try {
+    exec_raise(self.conn, "BEGIN IMMEDIATE")
+    let check = self.conn.prepare(
+      "SELECT next_fire_at FROM triggers WHERE id=?1",
+    )
+    check.bind(index=1, record_after.id)
+    let mut found = false
+    let mut stored_next = ""
+    if check.step() {
+      found = true
+      stored_next = check.column(index=0)
+    }
+    check.finalize()
+    if !found || stored_next != expected_next_fire_at {
+      exec_raise(self.conn, "ROLLBACK")
+      return Ok(false)
+    }
+    let record_stored = {
+      ..record_after,
+      dedupe_hits: trigger_dedupe_hits_raw(self.conn, record_after.id),
+    }
+    let cas = self.conn.prepare(
+      "UPDATE triggers SET next_fire_at=?2, next_fire_ms=?3, " +
+      "record_json=?4, updated_at=?5 WHERE id=?1 AND next_fire_at=?6",
+    )
+    cas.bind(index=1, record_after.id)
+    cas.bind(index=2, new_next_fire_at)
+    cas.bind(index=3, new_next_fire_ms)
+    cas.bind(index=4, record_stored.to_json().stringify())
+    cas.bind(index=5, record_stored.updated_at)
+    cas.bind(index=6, expected_next_fire_at)
+    let _ = cas.step()
+    let changed = (self.conn.changes() > 0L)
+    cas.finalize()
+    if !changed {
+      exec_raise(self.conn, "ROLLBACK")
+      return Ok(false)
+    }
+    insert_event_raw(self.conn, rejected_event)
+    bump_last_seq_raw(self.conn, rejected_event.seq)
+    exec_raise(self.conn, "COMMIT")
+    Ok(true)
+  } catch {
+    error => {
+      let _ = try { exec_raise(self.conn, "ROLLBACK") } catch { _ => () }
+      Err(sqlite_text(error))
+    }
+  }
+}
+
+///|
+/// Exactly-once webhook commit (ADR-0014 §4.4). The nonce row and the fire row
+/// are written in the same transaction:
+/// - same nonce + same body hash → `Duplicate` with the earlier Task id;
+/// - same nonce + different hash → `NonceReuse`, nothing written;
+/// - delivery-id fire key already present → `Duplicate` with its Task id.
+pub fn MachineStore::record_trigger_webhook_event(
+  self : MachineStore,
+  task_events : Array[@contracts.EventEnvelope],
+  fired_event : @contracts.EventEnvelope,
+  task : @contracts.TaskRecord,
+  fire : @contracts.TriggerFire,
+  record_after : @contracts.TriggerRecord,
+  key_id : String,
+  nonce : String,
+  body_sha256 : String,
+  nonce_expires_ms : Int64,
+  now_ms : Int64,
+  first_seen_ms : Int64,
+) -> Result[WebhookFireOutcome, String] {
+  try {
+    exec_raise(self.conn, "BEGIN IMMEDIATE")
+    let check = self.conn.prepare(
+      "SELECT enabled, expires_ms FROM triggers WHERE id=?1",
+    )
+    check.bind(index=1, fire.trigger_id)
+    let mut found = false
+    let mut enabled = false
+    let mut expires_ms = 0L
+    if check.step() {
+      found = true
+      let enabled_col : Int64 = check.column(index=0)
+      enabled = enabled_col != 0L
+      let expires_col : Int64 = check.column(index=1)
+      expires_ms = expires_col
+    }
+    check.finalize()
+    if !found {
+      exec_raise(self.conn, "ROLLBACK")
+      return Ok(WebhookFireNotFound)
+    }
+    let key_check = self.conn.prepare(
+      "SELECT enabled, revoked_at, expires_at FROM webhook_keys " +
+      "WHERE key_id=?1 AND trigger_id=?2",
+    )
+    key_check.bind(index=1, key_id)
+    key_check.bind(index=2, fire.trigger_id)
+    let mut key_found = false
+    let mut key_enabled = false
+    let mut key_revoked = ""
+    let mut key_expires = ""
+    if key_check.step() {
+      key_found = true
+      let enabled_col : Int64 = key_check.column(index=0)
+      key_enabled = enabled_col != 0L
+      key_revoked = key_check.column(index=1)
+      key_expires = key_check.column(index=2)
+    }
+    key_check.finalize()
+    let key_expired = match @contracts.trigger_parse_rfc3339_ms(key_expires) {
+      Some(value) => value <= now_ms
+      None => key_expires != ""
+    }
+    if !key_found || !key_enabled || key_revoked != "" || key_expired {
+      exec_raise(self.conn, "ROLLBACK")
+      return Ok(WebhookFireKeyInactive)
+    }
+    if !enabled {
+      exec_raise(self.conn, "ROLLBACK")
+      return Ok(WebhookFireDisabled)
+    }
+    if expires_ms > 0L && expires_ms <= now_ms {
+      exec_raise(self.conn, "ROLLBACK")
+      return Ok(WebhookFireExpired)
+    }
+    // Preserve duplicate-drop accounting across a later successful delivery.
+    let record_stored = {
+      ..record_after,
+      dedupe_hits: trigger_dedupe_hits_raw(self.conn, fire.trigger_id),
+    }
+    let nonce_stmt = self.conn.prepare(
+      "SELECT body_sha256, task_id, expires_at_ms FROM webhook_nonces " +
+      "WHERE key_id=?1 AND nonce=?2",
+    )
+    nonce_stmt.bind(index=1, key_id)
+    nonce_stmt.bind(index=2, nonce)
+    let mut nonce_found = false
+    let mut stored_hash = ""
+    let mut stored_task_id = ""
+    let mut stored_expires = 0L
+    if nonce_stmt.step() {
+      nonce_found = true
+      stored_hash = nonce_stmt.column(index=0)
+      stored_task_id = nonce_stmt.column(index=1)
+      stored_expires = nonce_stmt.column(index=2)
+    }
+    nonce_stmt.finalize()
+    if nonce_found && stored_expires > now_ms {
+      if stored_hash != body_sha256 {
+        exec_raise(self.conn, "ROLLBACK")
+        return Ok(WebhookFireNonceReuse)
+      }
+      trigger_bump_dedupe_raw(self.conn, fire.trigger_id)
+      exec_raise(self.conn, "COMMIT")
+      return Ok(WebhookFireDuplicate(task_id=stored_task_id))
+    }
+    if nonce_found {
+      // Expired nonce row: prune it and proceed as a fresh delivery.
+      let del = self.conn.prepare(
+        "DELETE FROM webhook_nonces WHERE key_id=?1 AND nonce=?2",
+      )
+      del.bind(index=1, key_id)
+      del.bind(index=2, nonce)
+      let _ = del.step()
+      del.finalize()
+    }
+    let insert_nonce = self.conn.prepare(
+      "INSERT INTO webhook_nonces " +
+      "(key_id,nonce,body_sha256,first_seen_ms,expires_at_ms,task_id) " +
+      "VALUES (?1,?2,?3,?4,?5,'') " +
+      "ON CONFLICT(key_id,nonce) DO NOTHING",
+    )
+    insert_nonce.bind(index=1, key_id)
+    insert_nonce.bind(index=2, nonce)
+    insert_nonce.bind(index=3, body_sha256)
+    insert_nonce.bind(index=4, first_seen_ms)
+    insert_nonce.bind(index=5, nonce_expires_ms)
+    let _ = insert_nonce.step()
+    let nonce_inserted = (self.conn.changes() > 0L)
+    insert_nonce.finalize()
+    if !nonce_inserted {
+      // A concurrent writer with the same (key_id, nonce) slipped in between
+      // our BEGIN and the insert; re-read it and apply the same hash rule.
+      let raced = self.conn.prepare(
+        "SELECT body_sha256, task_id FROM webhook_nonces " +
+        "WHERE key_id=?1 AND nonce=?2",
+      )
+      raced.bind(index=1, key_id)
+      raced.bind(index=2, nonce)
+      let mut raced_hash = ""
+      let mut raced_task_id = ""
+      if raced.step() {
+        raced_hash = raced.column(index=0)
+        raced_task_id = raced.column(index=1)
+      }
+      raced.finalize()
+      exec_raise(self.conn, "ROLLBACK")
+      if raced_hash == body_sha256 {
+        return Ok(WebhookFireDuplicate(task_id=raced_task_id))
+      }
+      return Ok(WebhookFireNonceReuse)
+    }
+    trigger_fire_put_raw(self.conn, fire)
+    let inserted = (self.conn.changes() > 0L)
+    if !inserted {
+      let existing = self.conn.prepare(
+        "SELECT task_id FROM trigger_fires WHERE trigger_id=?1 AND fire_key=?2",
+      )
+      existing.bind(index=1, fire.trigger_id)
+      existing.bind(index=2, fire.fire_key)
+      let mut existing_task_id = ""
+      if existing.step() {
+        existing_task_id = existing.column(index=0)
+      }
+      existing.finalize()
+      let update = self.conn.prepare(
+        "UPDATE webhook_nonces SET task_id=?3 WHERE key_id=?1 AND nonce=?2",
+      )
+      update.bind(index=1, key_id)
+      update.bind(index=2, nonce)
+      update.bind(index=3, existing_task_id)
+      let _ = update.step()
+      update.finalize()
+      trigger_bump_dedupe_raw(self.conn, fire.trigger_id)
+      exec_raise(self.conn, "COMMIT")
+      return Ok(WebhookFireDuplicate(task_id=existing_task_id))
+    }
+    let mut max_seq = fired_event.seq
+    for event in task_events {
+      if event.seq > max_seq {
+        max_seq = event.seq
+      }
+      insert_event_raw(self.conn, event)
+    }
+    bump_last_seq_raw(self.conn, max_seq)
+    task_put_raw(self.conn, task)
+    insert_event_raw(self.conn, fired_event)
+    trigger_put_raw(self.conn, record_stored)
+    let link = self.conn.prepare(
+      "UPDATE webhook_nonces SET task_id=?3 WHERE key_id=?1 AND nonce=?2",
+    )
+    link.bind(index=1, key_id)
+    link.bind(index=2, nonce)
+    link.bind(index=3, task.id)
+    let _ = link.step()
+    link.finalize()
+    exec_raise(self.conn, "COMMIT")
+    Ok(WebhookFireApplied)
+  } catch {
+    error => {
+      let _ = try { exec_raise(self.conn, "ROLLBACK") } catch { _ => () }
+      Err(sqlite_text(error))
+    }
+  }
+}
+
+///|
+/// Persist `meta.trigger.last_tick_ms` for rollback detection (§3.4).
+pub fn MachineStore::trigger_last_tick_ms(
+  self : MachineStore,
+) -> Result[Int64?, String] {
+  try {
+    match read_meta_raw(self.conn, "trigger.last_tick_ms") {
+      Some(text) => {
+        let parsed = @string.parse_int64(text) catch { _ => 0L }
+        Ok(Some(parsed))
+      }
+      None => Ok(None)
+    }
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
+pub fn MachineStore::set_trigger_last_tick_ms(
+  self : MachineStore,
+  tick_ms : Int64,
+) -> Result[Unit, String] {
+  try {
+    let stmt = self.conn.prepare(
+      "INSERT INTO meta(key,value) VALUES('trigger.last_tick_ms',?1) " +
+      "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    )
+    stmt.bind(index=1, tick_ms.to_string())
+    let _ = stmt.step()
+    stmt.finalize()
+    Ok(())
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
+/// Prune expired nonce rows. Called from the schedule loop; the TTL already
+/// includes the freshness window plus 120 seconds.
+pub fn MachineStore::prune_webhook_nonces(
+  self : MachineStore,
+  now_ms : Int64,
+) -> Result[Int, String] {
+  try {
+    let stmt = self.conn.prepare(
+      "DELETE FROM webhook_nonces WHERE expires_at_ms <= ?1",
+    )
+    stmt.bind(index=1, now_ms)
+    let _ = stmt.step()
+    let removed = self.conn.changes()
+    stmt.finalize()
+    Ok(removed.to_int())
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Webhook keys
+// ---------------------------------------------------------------------------
+
+///|
+pub fn MachineStore::put_webhook_key(
+  self : MachineStore,
+  record : @contracts.WebhookKeyRecord,
+) -> Result[Unit, String] {
+  try {
+    let stmt = self.conn.prepare(
+      "INSERT INTO webhook_keys (" +
+      "key_id,trigger_id,org_id,name,secret_path,enabled,created_at," +
+      "revoked_at,last_used_at,expires_at" +
+      ") VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) " +
+      "ON CONFLICT(key_id) DO UPDATE SET " +
+      "trigger_id=excluded.trigger_id,org_id=excluded.org_id," +
+      "name=excluded.name,secret_path=excluded.secret_path," +
+      "enabled=excluded.enabled,created_at=excluded.created_at," +
+      "revoked_at=excluded.revoked_at,last_used_at=excluded.last_used_at," +
+      "expires_at=excluded.expires_at",
+    )
+    stmt.bind(index=1, record.key_id)
+    stmt.bind(index=2, record.trigger_id)
+    stmt.bind(index=3, record.org_id)
+    stmt.bind(index=4, record.name)
+    stmt.bind(index=5, record.secret_path)
+    stmt.bind(index=6, if record.enabled { 1L } else { 0L })
+    stmt.bind(index=7, record.created_at)
+    stmt.bind(index=8, record.revoked_at)
+    stmt.bind(index=9, record.last_used_at)
+    stmt.bind(index=10, record.expires_at)
+    let _ = stmt.step()
+    stmt.finalize()
+    Ok(())
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
+fn webhook_key_from_row(stmt : @sqlite3.Statement) -> @contracts.WebhookKeyRecord raise @sqlite3.SqliteError {
+  let key_id : String = stmt.column(index=0)
+  let trigger_id : String = stmt.column(index=1)
+  let org_id : String = stmt.column(index=2)
+  let name : String = stmt.column(index=3)
+  let secret_path : String = stmt.column(index=4)
+  let enabled : Int64 = stmt.column(index=5)
+  let created_at : String = stmt.column(index=6)
+  let revoked_at : String = stmt.column(index=7)
+  let last_used_at : String = stmt.column(index=8)
+  let expires_at : String = stmt.column(index=9)
+  @contracts.WebhookKeyRecord::new(
+    key_id~,
+    trigger_id~,
+    org_id~,
+    name~,
+    secret_path~,
+    enabled=enabled != 0L,
+    created_at~,
+    revoked_at~,
+    last_used_at~,
+    expires_at~,
+  )
+}
+
+///|
+pub fn MachineStore::get_webhook_key(
+  self : MachineStore,
+  key_id : String,
+) -> Result[@contracts.WebhookKeyRecord?, String] {
+  try {
+    let stmt = self.conn.prepare(
+      "SELECT key_id,trigger_id,org_id,name,secret_path,enabled,created_at," +
+      "revoked_at,last_used_at,expires_at FROM webhook_keys WHERE key_id=?1",
+    )
+    stmt.bind(index=1, key_id)
+    let mut found : @contracts.WebhookKeyRecord? = None
+    if stmt.step() {
+      found = Some(webhook_key_from_row(stmt))
+    }
+    stmt.finalize()
+    Ok(found)
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
+pub fn MachineStore::list_webhook_keys(
+  self : MachineStore,
+  trigger_id : String,
+) -> Result[Array[@contracts.WebhookKeyRecord], String] {
+  try {
+    let stmt = self.conn.prepare(
+      "SELECT key_id,trigger_id,org_id,name,secret_path,enabled,created_at," +
+      "revoked_at,last_used_at,expires_at FROM webhook_keys " +
+      "WHERE trigger_id=?1 ORDER BY created_at, key_id",
+    )
+    stmt.bind(index=1, trigger_id)
+    let out : Array[@contracts.WebhookKeyRecord] = []
+    while stmt.step() {
+      out.push(webhook_key_from_row(stmt))
+    }
+    stmt.finalize()
+    Ok(out)
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
+pub fn MachineStore::revoke_webhook_key(
+  self : MachineStore,
+  key_id : String,
+  revoked_at : String,
+) -> Result[Bool, String] {
+  try {
+    let stmt = self.conn.prepare(
+      "UPDATE webhook_keys SET revoked_at=?2, enabled=0 " +
+      "WHERE key_id=?1 AND revoked_at=''",
+    )
+    stmt.bind(index=1, key_id)
+    stmt.bind(index=2, revoked_at)
+    let _ = stmt.step()
+    let changed = (self.conn.changes() > 0L)
+    stmt.finalize()
+    Ok(changed)
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
+pub fn MachineStore::touch_webhook_key(
+  self : MachineStore,
+  key_id : String,
+  last_used_at : String,
+) -> Result[Unit, String] {
+  try {
+    let stmt = self.conn.prepare(
+      "UPDATE webhook_keys SET last_used_at=?2 WHERE key_id=?1",
+    )
+    stmt.bind(index=1, key_id)
+    stmt.bind(index=2, last_used_at)
+    let _ = stmt.step()
+    stmt.finalize()
+    Ok(())
+  } catch {
+    error => Err(sqlite_text(error))
   }
 }

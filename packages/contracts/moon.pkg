@@ -1,7 +1,10 @@
 import {
   "moonbitlang/core/json",
+  "moonbitlang/x/time",
+  "moonbitlang/x/crypto",
   "moonbitlang/core/random",
   "moonbitlang/core/string",
+  "moonbitlang/core/encoding/hex",
   "moonbitlang/core/encoding/utf8",
 }
 

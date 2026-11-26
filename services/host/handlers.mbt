@@ -431,6 +431,13 @@ async fn handle_connection(
   request : @http.Request,
   conn : @http.ServerConnection,
 ) -> Unit {
+  // Path split happens before the `/ws` bearer check (ADR-0014 §4.1): webhook
+  // callers authenticate with HMAC headers, never with the owner's WS token.
+  // No other path is served, so this stays loopback-only.
+  if request.path.has_prefix(@contracts.TRIGGER_WEBHOOK_PATH_PREFIX) {
+    handle_trigger_webhook(state, request, conn)
+    return
+  }
   if request.path != "/ws" {
     conn.send_response(404, "Not Found")
     conn.end_response()

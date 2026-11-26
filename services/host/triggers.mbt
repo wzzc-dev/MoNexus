@@ -1,5 +1,6 @@
 ///|
-/// Trigger RPC handlers and the event dispatcher (ADR-0014, A3.0).
+/// Trigger RPC handlers and the event dispatcher (ADR-0014, A3.0 events;
+/// A3.1 schedule and webhook sources).
 ///
 /// The dispatcher is a host task next to `heartbeat_loop`. It polls the
 /// existing `events` table through `MachineStore::load_events_since` with the
@@ -8,9 +9,9 @@
 ///
 /// A trigger can only create a Task. There is no command, argv, environment,
 /// approval or policy field anywhere below, and no path from a payload to an
-/// argument vector. Runs are not started in A3.0 (`start_run=true` is
-/// answered with `unsupported`); the Task is created with the same event and
-/// projection shape as `task.create`.
+/// argument vector. Runs are still not started by triggers (`start_run=true`
+/// is answered with `unsupported` until A3.2); every source creates its Task
+/// with the same event and projection shape as `task.create`.
 
 ///|
 const TRIGGER_LOOP_INTERVAL_MS : Int = 200
@@ -162,70 +163,202 @@ fn trigger_normalize_expiry(
 }
 
 ///|
-fn trigger_validate_source(
-  source : @contracts.TriggerSource,
-) -> Result[@contracts.TriggerSource, @contracts.RpcError] {
-  if source.event_type == "" {
-    return Err(trigger_invalid("source.event_type is required"))
+///|
+/// Reject any source key that is not part of that trigger type's schema.
+/// Unknown fields are configuration errors, not ignored extensions
+/// (ADR-0014 §3.1, §4).
+fn trigger_validate_source_shape(
+  kind : String,
+  source_json : @json.Json,
+) -> Result[Unit, @contracts.RpcError] {
+  let object = match @contracts.as_object(source_json) {
+    Some(value) => value
+    None => return Err(trigger_invalid("source must be an object"))
   }
-  if !@contracts.trigger_event_type_valid(source.event_type) {
-    return Err(
-      trigger_invalid(
-        "source.event_type must be exact or a trailing .* prefix",
-      ),
-    )
+  match @contracts.trigger_source_unknown_key(kind, object) {
+    Some(key) =>
+      Err(
+        trigger_invalid(
+          "source contains an unknown field for " + kind + ": " + key,
+        ),
+      )
+    None => Ok(())
   }
-  if @contracts.trigger_event_type_blacklisted(source.event_type) {
-    return Err(trigger_invalid("source.event_type is not matchable"))
+}
+
+///|
+/// The only CIDRs that can ever match a direct connection to the loopback
+/// listener. Anything else belongs at the owner's TLS reverse proxy; A3 never
+/// reads `X-Forwarded-For` for identity (ADR-0014 §4.3).
+fn trigger_webhook_cidrs_valid(cidrs : Array[String]) -> Bool {
+  for cidr in cidrs {
+    if cidr != "127.0.0.1/32" && cidr != "::1/128" {
+      return false
+    }
   }
-  if source.subject_prefix.length() > @contracts.TRIGGER_SUBJECT_PREFIX_MAX {
-    return Err(trigger_invalid("source.subject_prefix is too long"))
+  true
+}
+
+///|
+fn trigger_validate_payload_field_name(
+  name : String,
+) -> Result[Unit, @contracts.RpcError] {
+  if name == "" || name.length() > 64 {
+    return Err(trigger_invalid("source.payload_fields contains a bad name"))
   }
-  if source.correlation_id.length() > @contracts.TRIGGER_CORRELATION_MAX {
-    return Err(trigger_invalid("source.correlation_id is too long"))
-  }
-  // Schedule/webhook-only fields are rejected on an event trigger so an
-  // owner cannot smuggle a schedule configuration into an event source.
-  if source.schedule_kind != "" ||
-    source.interval_minutes != 0 ||
-    source.at != "" ||
-    source.weekday != 0 ||
-    source.jitter_s != 0 ||
-    source.missed != "skip" ||
-    source.allowed_cidrs.length() != 0 {
-    return Err(
-      trigger_invalid("source contains fields for another trigger type"),
-    )
-  }
-  if source.timezone != "UTC" {
-    return Err(
-      trigger_invalid("source.timezone is only valid for schedule triggers"),
-    )
-  }
-  for name in source.payload_fields {
-    if name == "" || name.length() > 64 {
+  for ch in name {
+    let code = ch.to_int()
+    let ok = (code >= 97 && code <= 122) ||
+      (code >= 65 && code <= 90) ||
+      (code >= 48 && code <= 57) ||
+      code == 95 ||
+      code == 45
+    if !ok {
       return Err(trigger_invalid("source.payload_fields contains a bad name"))
     }
-    for ch in name {
-      let code = ch.to_int()
-      let ok = (code >= 97 && code <= 122) ||
-        (code >= 65 && code <= 90) ||
-        (code >= 48 && code <= 57) ||
-        code == 95 ||
-        code == 45
-      if !ok {
+  }
+  if @contracts.trigger_forbidden_config_field(name) {
+    return Err(
+      trigger_invalid("source.payload_fields cannot name a secret field"),
+    )
+  }
+  Ok(())
+}
+
+///|
+fn trigger_validate_source(
+  kind : String,
+  source : @contracts.TriggerSource,
+) -> Result[@contracts.TriggerSource, @contracts.RpcError] {
+  if kind == @contracts.TRIGGER_TYPE_EVENT {
+    if source.event_type == "" {
+      return Err(trigger_invalid("source.event_type is required"))
+    }
+    if !@contracts.trigger_event_type_valid(source.event_type) {
+      return Err(
+        trigger_invalid(
+          "source.event_type must be exact or a trailing .* prefix",
+        ),
+      )
+    }
+    if @contracts.trigger_event_type_blacklisted(source.event_type) {
+      return Err(trigger_invalid("source.event_type is not matchable"))
+    }
+    if source.subject_prefix.length() > @contracts.TRIGGER_SUBJECT_PREFIX_MAX {
+      return Err(trigger_invalid("source.subject_prefix is too long"))
+    }
+    if source.correlation_id.length() > @contracts.TRIGGER_CORRELATION_MAX {
+      return Err(trigger_invalid("source.correlation_id is too long"))
+    }
+    // Schedule/webhook-only fields are rejected on an event trigger so an
+    // owner cannot smuggle a schedule configuration into an event source.
+    if source.schedule_kind != "" ||
+      source.interval_minutes != 0 ||
+      source.at != "" ||
+      source.weekday != 0 ||
+      source.jitter_s != 0 ||
+      source.missed != "skip" ||
+      source.allowed_cidrs.length() != 0 {
+      return Err(
+        trigger_invalid("source contains fields for another trigger type"),
+      )
+    }
+    if source.timezone != "UTC" {
+      return Err(
+        trigger_invalid("source.timezone is only valid for schedule triggers"),
+      )
+    }
+    for name in source.payload_fields {
+      match trigger_validate_payload_field_name(name) {
+        Ok(_) => ()
+        Err(error) => return Err(error)
+      }
+    }
+    return Ok(source)
+  }
+  if kind == @contracts.TRIGGER_TYPE_SCHEDULE {
+    if source.event_type != "" ||
+      source.subject_prefix != "" ||
+      source.correlation_id != "" ||
+      source.ignore_self != true {
+      return Err(
+        trigger_invalid("source contains fields for an event trigger"),
+      )
+    }
+    if source.payload_fields.length() != 0 ||
+      source.allowed_cidrs.length() != 0 {
+      return Err(
+        trigger_invalid("source contains fields for another trigger type"),
+      )
+    }
+    match @contracts.schedule_parse(source) {
+      Ok(_) => ()
+      Err(message) => return Err(trigger_invalid(message))
+    }
+    let timezone = match @contracts.trigger_timezone_parse(source.timezone) {
+      Ok(value) => value
+      Err(message) => return Err(trigger_unsupported(message))
+    }
+    if source.schedule_kind == @contracts.TRIGGER_SCHEDULE_KIND_EVERY &&
+      timezone != @contracts.TriggerTimezone::Utc {
+      return Err(
+        trigger_invalid(
+          "source.timezone must be omitted or UTC for every schedules",
+        ),
+      )
+    }
+    return Ok(source)
+  }
+  if kind == @contracts.TRIGGER_TYPE_WEBHOOK {
+    if source.event_type != "" ||
+      source.subject_prefix != "" ||
+      source.correlation_id != "" ||
+      source.ignore_self != true {
+      return Err(
+        trigger_invalid("source contains fields for an event trigger"),
+      )
+    }
+    if source.schedule_kind != "" ||
+      source.interval_minutes != 0 ||
+      source.at != "" ||
+      source.weekday != 0 ||
+      source.jitter_s != 0 ||
+      source.missed != "skip" {
+      return Err(
+        trigger_invalid("source contains fields for a schedule trigger"),
+      )
+    }
+    if source.timezone != "UTC" {
+      return Err(
+        trigger_invalid("source.timezone is not valid for webhook triggers"),
+      )
+    }
+    if !@contracts.webhook_payload_fields_valid(source.payload_fields) {
+      return Err(
+        trigger_invalid(
+          "source.payload_fields must be at most 8 unique dot paths " +
+          "with at most two segments each",
+        ),
+      )
+    }
+    for name in source.payload_fields {
+      if @contracts.trigger_forbidden_config_field(name) {
         return Err(
-          trigger_invalid("source.payload_fields contains a bad name"),
+          trigger_invalid("source.payload_fields cannot name a secret field"),
         )
       }
     }
-    if @contracts.trigger_forbidden_config_field(name) {
+    if !trigger_webhook_cidrs_valid(source.allowed_cidrs) {
       return Err(
-        trigger_invalid("source.payload_fields cannot name a secret field"),
+        trigger_unsupported(
+          "source.allowed_cidrs is limited to direct loopback " +
+          "(127.0.0.1/32 or ::1/128); terminate external traffic at your TLS proxy",
+        ),
       )
     }
+    return Ok(source)
   }
-  Ok(source)
+  Err(trigger_invalid("unknown trigger type: " + kind))
 }
 
 ///|
@@ -247,7 +380,7 @@ fn trigger_validate_target(
   if target.start_run {
     return Err(
       trigger_unsupported(
-        "start_run is not wired in A3.0; the trigger creates a planned Task only",
+        "start_run is not implemented; the trigger creates a planned Task only",
       ),
     )
   }
@@ -315,6 +448,28 @@ fn trigger_referenced_targets_ok(
 // ---------------------------------------------------------------------------
 // Rate limiting
 // ---------------------------------------------------------------------------
+
+///|
+/// Global fire-rate guard shared by event and schedule triggers
+/// (ADR-0014 §6.1: 300 fires/min). Webhook requests have their own buckets
+/// because they are limited before a Task exists.
+fn trigger_global_rate_allow(state : HostState, now_ms : Int64) -> Bool {
+  let bucket = match state.trigger_buckets.get(TRIGGER_RATE_GLOBAL_KEY) {
+    Some(value) => value
+    None => @contracts.trigger_rate_bucket_new(
+      now_ms,
+      @contracts.TRIGGER_GLOBAL_RATE_BURST,
+    )
+  }
+  let (updated, allowed) = @contracts.trigger_rate_take(
+    bucket,
+    now_ms,
+    @contracts.TRIGGER_GLOBAL_RATE_PER_MIN,
+    @contracts.TRIGGER_GLOBAL_RATE_BURST,
+  )
+  state.trigger_buckets.set(TRIGGER_RATE_GLOBAL_KEY, updated)
+  allowed
+}
 
 ///|
 fn trigger_rate_allow(
@@ -403,13 +558,25 @@ fn trigger_reject(
 }
 
 // ---------------------------------------------------------------------------
-// Task attempt (shared by the event dispatcher and trigger.fire)
+// Task attempt (shared by the event dispatcher, schedule loop, webhook
+// endpoint and trigger.fire)
 // ---------------------------------------------------------------------------
 
 ///|
-/// Render and commit one trigger attempt. The store transaction is the only
-/// place that decides "exactly once"; everything before it is pure or a read.
-fn trigger_attempt(
+/// Fully built, not-yet-committed fire. The caller chooses which store
+/// transaction applies it: event/manual use `record_trigger_task_event`,
+/// schedules use the `next_fire_at` CAS, webhooks use the nonce/fire
+/// transaction.
+struct TriggerPrepared {
+  task_events : Array[@contracts.EventEnvelope]
+  fired_event : @contracts.EventEnvelope
+  task : @contracts.TaskRecord
+  fire : @contracts.TriggerFire
+  record_after : @contracts.TriggerRecord
+}
+
+///|
+fn trigger_prepare(
   state : HostState,
   record : @contracts.TriggerRecord,
   source : String,
@@ -421,11 +588,15 @@ fn trigger_attempt(
   causation_id : String,
   correlation_id : String,
   now_ms : Int64,
-) -> Result[TriggerAttempt, String] {
+  next_fire_at : String,
+  scheduled_for_ms : Int64,
+  key_id : String,
+  coalesced : Bool,
+) -> Result[TriggerPrepared, TriggerAttempt] {
   match trigger_referenced_targets_ok(state, record.target) {
     Ok(_) => ()
     Err(message) =>
-      return Ok({
+      return Err({
         outcome: TRIGGER_ATTEMPT_INVALID_TARGET,
         task_id: "",
         run_id: "",
@@ -438,7 +609,7 @@ fn trigger_attempt(
     .trim()
     .to_string()
   if title == "" {
-    return Ok({
+    return Err({
       outcome: TRIGGER_ATTEMPT_INVALID_TARGET,
       task_id: "",
       run_id: "",
@@ -504,11 +675,18 @@ fn trigger_attempt(
     source~,
     fire_key~,
     event_id~,
+    scheduled_for_ms~,
+    key_id~,
     task_id=task.id,
+    coalesced~,
     depth~,
     created_at=timestamp,
   )
-  let record_after = { ..record, last_fired_at: timestamp }
+  let record_after = {
+    ..record,
+    last_fired_at: timestamp,
+    next_fire_at,
+  }
   let fired_event = trigger_envelope(
     state,
     @contracts.EVENT_TRIGGER_FIRED,
@@ -518,6 +696,56 @@ fn trigger_attempt(
     correlation_id,
     base_key + "/fired",
   )
+  Ok({
+    task_events,
+    fired_event,
+    task,
+    fire,
+    record_after,
+  })
+}
+
+///|
+/// Render and commit one trigger attempt. The store transaction is the only
+/// place that decides "exactly once"; everything before it is pure or a read.
+fn trigger_attempt(
+  state : HostState,
+  record : @contracts.TriggerRecord,
+  source : String,
+  fire_key : String,
+  event_id : String,
+  vars : Map[String, String],
+  depth : Int,
+  root_trigger_id : String,
+  causation_id : String,
+  correlation_id : String,
+  now_ms : Int64,
+) -> Result[TriggerAttempt, String] {
+  let prepared = match trigger_prepare(
+    state,
+    record,
+    source,
+    fire_key,
+    event_id,
+    vars,
+    depth,
+    root_trigger_id,
+    causation_id,
+    correlation_id,
+    now_ms,
+    record.next_fire_at,
+    0L,
+    "",
+    false,
+  ) {
+    Ok(value) => value
+    Err(attempt) => return Ok(attempt)
+  }
+  let task_events = prepared.task_events
+  let fired_event = prepared.fired_event
+  let task = prepared.task
+  let fire = prepared.fire
+  let record_after = prepared.record_after
   match state.store.record_trigger_task_event(
     task_events,
     fired_event,
@@ -908,6 +1136,7 @@ fn trigger_public_error(
 fn trigger_create_locked(
   state : HostState,
   params : Map[String, @json.Json],
+  timezone_plan : TriggerTimezonePlan?,
 ) -> Result[@contracts.TriggerRecord, @contracts.RpcError] {
   let name = @contracts.string_field_or(params, "name", "").trim().to_string()
   if !@contracts.trigger_name_valid(name) {
@@ -926,11 +1155,7 @@ fn trigger_create_locked(
     return Err(trigger_invalid("unknown trigger type: " + kind))
   }
   if !@contracts.trigger_type_wired(kind) {
-    return Err(
-      trigger_unsupported(
-        "only event triggers are wired in A3.0; schedule and webhook are A3.1",
-      ),
-    )
+    return Err(trigger_unsupported("trigger type is not implemented"))
   }
   let target_json = match params.get("target") {
     Some(value) => value
@@ -962,13 +1187,17 @@ fn trigger_create_locked(
     Some(value) => value
     None => return Err(trigger_invalid("source must be an object"))
   }
+  match trigger_validate_source_shape(kind, source_json) {
+    Ok(_) => ()
+    Err(error) => return Err(error)
+  }
   let enabled = @contracts.bool_field_or(params, "enabled", true)
   let now_ms = @async.now()
   let target = match trigger_validate_target(state, target, false) {
     Ok(value) => value
     Err(error) => return Err(error)
   }
-  let source = match trigger_validate_source(source) {
+  let source = match trigger_validate_source(kind, source) {
     Ok(value) => value
     Err(error) => return Err(error)
   }
@@ -1010,6 +1239,44 @@ fn trigger_create_locked(
     target,
     source,
   )
+  // Schedule state is frozen at creation: the anchor is the minute-truncated
+  // creation time and `local` was already resolved to a concrete IANA name
+  // (ADR-0014 §3.1–3.2).
+  let resolved_tz = if kind == @contracts.TRIGGER_TYPE_SCHEDULE {
+    match timezone_plan {
+      Some(plan) => plan.resolved_tz
+      None => return Err(trigger_unsupported("schedule timezone was not resolved"))
+    }
+  } else {
+    ""
+  }
+  let anchor_ms = if kind == @contracts.TRIGGER_TYPE_SCHEDULE {
+    trigger_schedule_anchor_ms(now_ms)
+  } else {
+    0L
+  }
+  let next_fire_at = if kind == @contracts.TRIGGER_TYPE_SCHEDULE {
+    let spec = match @contracts.schedule_parse(source) {
+      Ok(value) => value
+      Err(message) => return Err(trigger_invalid(message))
+    }
+    let plan = match timezone_plan {
+      Some(value) => value
+      None => return Err(trigger_unsupported("schedule timezone was not resolved"))
+    }
+    let next_ms = match @contracts.schedule_next_slot(
+      spec,
+      plan.zone,
+      anchor_ms,
+      now_ms,
+    ) {
+      Ok(value) => value
+      Err(message) => return Err(trigger_invalid(message))
+    }
+    @contracts.format_rfc3339(next_ms)
+  } else {
+    ""
+  }
   let record = @contracts.TriggerRecord::new(
     id=@contracts.new_id("trg", now_ms),
     org_id=@contracts.ORG_LOCAL,
@@ -1023,6 +1290,9 @@ fn trigger_create_locked(
     active_from_seq=state.next_seq - 1L,
     enabled~,
     expires_at~,
+    next_fire_at~,
+    resolved_tz~,
+    anchor_ms~,
   )
   let event = trigger_envelope(
     state,
@@ -1046,6 +1316,7 @@ fn trigger_create_locked(
 fn trigger_update_locked(
   state : HostState,
   params : Map[String, @json.Json],
+  timezone_plan : TriggerTimezonePlan?,
 ) -> Result[@contracts.TriggerRecord, @contracts.RpcError] {
   let trigger_id = match @contracts.trigger_id_param(params) {
     Ok(value) => value
@@ -1091,7 +1362,8 @@ fn trigger_update_locked(
     }
     None => current.target
   }
-  let source = match params.get("source") {
+  let source_json = params.get("source")
+  let source = match source_json {
     Some(value) => {
       if @contracts.trigger_config_has_forbidden_field(value) {
         return Err(trigger_invalid("source contains a forbidden field"))
@@ -1103,12 +1375,22 @@ fn trigger_update_locked(
     }
     None => current.source
   }
+  match source_json {
+    Some(value) =>
+      match trigger_validate_source_shape(current.kind, value) {
+        Ok(_) => ()
+        Err(error) => return Err(error)
+      }
+    None => ()
+  }
+  let source_changed =
+    source.to_json().stringify() != current.source.to_json().stringify()
   let enabled = @contracts.bool_field_or(params, "enabled", current.enabled)
   let target = match trigger_validate_target(state, target, false) {
     Ok(value) => value
     Err(error) => return Err(error)
   }
-  let source = match trigger_validate_source(source) {
+  let source = match trigger_validate_source(current.kind, source) {
     Ok(value) => value
     Err(error) => return Err(error)
   }
@@ -1151,7 +1433,7 @@ fn trigger_update_locked(
   if target.to_json().stringify() != current.target.to_json().stringify() {
     changed.push("target")
   }
-  if source.to_json().stringify() != current.source.to_json().stringify() {
+  if source_changed {
     changed.push("source")
   }
   let timestamp = @contracts.format_rfc3339(now_ms)
@@ -1172,6 +1454,37 @@ fn trigger_update_locked(
     target,
     source,
   )
+  // The anchor and resolved timezone are frozen for the life of the trigger;
+  // only a schedule change moves `next_fire_at` (ADR-0014 §3.1).
+  let mut resolved_tz = current.resolved_tz
+  let mut anchor_ms = current.anchor_ms
+  let mut next_fire_at = current.next_fire_at
+  if current.kind == @contracts.TRIGGER_TYPE_SCHEDULE {
+    let plan = match timezone_plan {
+      Some(value) => value
+      None => return Err(trigger_unsupported("schedule timezone was not resolved"))
+    }
+    resolved_tz = plan.resolved_tz
+    if anchor_ms == 0L {
+      anchor_ms = trigger_schedule_anchor_ms(now_ms)
+    }
+    if source_changed || next_fire_at == "" {
+      let spec = match @contracts.schedule_parse(source) {
+        Ok(value) => value
+        Err(message) => return Err(trigger_invalid(message))
+      }
+      let next_ms = match @contracts.schedule_next_slot(
+        spec,
+        plan.zone,
+        anchor_ms,
+        now_ms,
+      ) {
+        Ok(value) => value
+        Err(message) => return Err(trigger_invalid(message))
+      }
+      next_fire_at = @contracts.format_rfc3339(next_ms)
+    }
+  }
   let updated = {
     ..current,
     name,
@@ -1184,6 +1497,9 @@ fn trigger_update_locked(
     updated_at: timestamp,
     active_from_seq,
     expired_at,
+    next_fire_at,
+    resolved_tz,
+    anchor_ms,
   }
   let event = trigger_envelope(
     state,
@@ -1316,7 +1632,17 @@ fn trigger_get_locked(
     Ok(value) => value
     Err(message) => return Err(trigger_invalid("cannot read trigger fires: " + message))
   }
-  Ok(@contracts.trigger_get_result(record, fires, @async.now()))
+  let keys : Array[@contracts.WebhookKeyRecord] =
+    if record.kind == @contracts.TRIGGER_TYPE_WEBHOOK {
+    match state.store.list_webhook_keys(trigger_id) {
+      Ok(value) => value
+      Err(message) =>
+        return Err(trigger_invalid("cannot read webhook keys: " + message))
+    }
+  } else {
+    []
+  }
+  Ok(@contracts.trigger_get_result(record, fires, @async.now(), webhook_keys=keys))
 }
 
 ///|
@@ -1402,10 +1728,223 @@ fn trigger_fire_locked(
 }
 
 ///|
+/// The active-key cap is re-checked under the mutex right before insert so
+/// two concurrent `trigger.source.add` calls cannot exceed the limit.
+fn trigger_webhook_key_insert_locked(
+  state : HostState,
+  record : @contracts.WebhookKeyRecord,
+) -> Result[Unit, @contracts.RpcError] {
+  let trigger = match state.store.get_trigger(record.trigger_id) {
+    Ok(Some(value)) => value
+    Ok(None) => return Err(trigger_not_found("trigger not found"))
+    Err(message) => return Err(trigger_invalid("cannot read trigger: " + message))
+  }
+  if trigger.kind != @contracts.TRIGGER_TYPE_WEBHOOK {
+    return Err(
+      trigger_unsupported("webhook keys are only valid on webhook triggers"),
+    )
+  }
+  if !trigger.enabled {
+    return Err(trigger_conflict("trigger is disabled"))
+  }
+  let now_ms = @async.now()
+  let keys = match state.store.list_webhook_keys(record.trigger_id) {
+    Ok(value) => value
+    Err(message) => return Err(trigger_invalid("cannot list webhook keys: " + message))
+  }
+  let mut active = 0
+  for key in keys {
+    if @contracts.webhook_key_active(key, now_ms) {
+      active = active + 1
+    }
+  }
+  if active >= @contracts.TRIGGER_WEBHOOK_KEYS_MAX {
+    return Err(
+      trigger_conflict(
+        "webhook key limit reached (" +
+        @contracts.TRIGGER_WEBHOOK_KEYS_MAX.to_string() + " active keys)",
+      ),
+    )
+  }
+  match state.store.put_webhook_key(record) {
+    Ok(_) => Ok(())
+    Err(message) => Err(trigger_conflict("cannot persist webhook key: " + message))
+  }
+}
+
+///|
+/// `trigger.source.add`: generate a 256-bit secret, write it once to
+/// `secrets/webhook/<key_id>.key` (0700 dir / 0600 file) and store only the
+/// relative path in SQLite. The secret is returned once and never logged or
+/// persisted (ADR-0014 §4.3).
+async fn trigger_webhook_key_add(
+  state : HostState,
+  params : Map[String, @json.Json],
+) -> Result[@json.Json, @contracts.RpcError] {
+  let trigger_id = match @contracts.trigger_id_param(params) {
+    Ok(value) => value
+    Err(message) => return Err(trigger_invalid(message))
+  }
+  let name = @contracts.string_field_or(params, "name", "").trim().to_owned()
+  if name.length() > 64 {
+    return Err(trigger_invalid("name is too long"))
+  }
+  let now_ms = @async.now()
+  state.mutex.acquire()
+  let trigger = state.store.get_trigger(trigger_id)
+  let keys = state.store.list_webhook_keys(trigger_id)
+  state.mutex.release()
+  let trigger = match trigger {
+    Ok(Some(value)) => value
+    Ok(None) => return Err(trigger_not_found("trigger not found"))
+    Err(message) => return Err(trigger_invalid("cannot read trigger: " + message))
+  }
+  if trigger.kind != @contracts.TRIGGER_TYPE_WEBHOOK {
+    return Err(
+      trigger_unsupported("webhook keys are only valid on webhook triggers"),
+    )
+  }
+  if !trigger.enabled {
+    return Err(trigger_conflict("trigger is disabled"))
+  }
+  let keys = match keys {
+    Ok(value) => value
+    Err(message) => return Err(trigger_invalid("cannot list webhook keys: " + message))
+  }
+  let mut active = 0
+  for key in keys {
+    if @contracts.webhook_key_active(key, now_ms) {
+      active = active + 1
+    }
+  }
+  if active >= @contracts.TRIGGER_WEBHOOK_KEYS_MAX {
+    return Err(
+      trigger_conflict(
+        "webhook key limit reached (" +
+        @contracts.TRIGGER_WEBHOOK_KEYS_MAX.to_string() + " active keys)",
+      ),
+    )
+  }
+  let key_id = @contracts.new_id("whk", now_ms)
+  if !@contracts.webhook_key_id_valid(key_id) {
+    return Err(trigger_unsupported("cannot allocate a webhook key id"))
+  }
+  let secret = match @env.rand(32) {
+    Some(value) => value
+    None => return Err(trigger_unsupported("secure random is unavailable"))
+  }
+  let secret_hex = @contracts.webhook_secret_hex(secret.exact_view())
+  let relative = @contracts.webhook_secret_relative_path(key_id)
+  let absolute = state.state_dir + "/" + relative
+  let directory = state.state_dir + "/secrets/webhook"
+  @fs.mkdir(
+    directory,
+    permission=0o700,
+    recursive=true,
+    allow_exist=true,
+  ) catch {
+    error =>
+      return Err(
+        trigger_invalid("cannot create the webhook secret directory: " +
+        error.to_string()),
+      )
+  }
+  @fs.chmod(directory, 0o700) catch { _ => () }
+  @fs.write_file(absolute, secret_hex, permission=0o600) catch {
+    error =>
+      return Err(
+        trigger_invalid("cannot write the webhook secret: " + error.to_string()),
+      )
+  }
+  @fs.chmod(absolute, 0o600) catch { _ => () }
+  let record = @contracts.WebhookKeyRecord::new(
+    key_id~,
+    trigger_id~,
+    org_id=@contracts.ORG_LOCAL,
+    name~,
+    secret_path=relative,
+    enabled=true,
+    created_at=@contracts.format_rfc3339(now_ms),
+  )
+  state.mutex.acquire()
+  let inserted = trigger_webhook_key_insert_locked(state, record)
+  state.mutex.release()
+  match inserted {
+    Ok(_) =>
+      Ok(
+        @contracts.json_object(
+          [
+            ("key_id", @contracts.json_string(key_id)),
+            ("secret", @contracts.json_string(secret_hex)),
+          ],
+        ),
+      )
+    Err(error) => {
+      @fs.remove(absolute) catch { _ => () }
+      Err(error)
+    }
+  }
+}
+
+///|
+/// `trigger.source.revoke`: idempotent, immediate for new requests, and it
+/// never touches Tasks that already exist (ADR-0014 §4.3).
+async fn trigger_webhook_key_revoke(
+  state : HostState,
+  params : Map[String, @json.Json],
+) -> Result[@json.Json, @contracts.RpcError] {
+  let key_id = @contracts.string_field_or(params, "key_id", "").trim().to_owned()
+  if !@contracts.webhook_key_id_valid(key_id) {
+    return Err(trigger_not_found("webhook key not found"))
+  }
+  let now_ms = @async.now()
+  let timestamp = @contracts.format_rfc3339(now_ms)
+  state.mutex.acquire()
+  let current = state.store.get_webhook_key(key_id)
+  let outcome = match current {
+    Ok(None) => Err(trigger_not_found("webhook key not found"))
+    Ok(Some(record)) =>
+      if record.revoked_at != "" {
+        Ok(())
+      } else {
+        match state.store.revoke_webhook_key(key_id, timestamp) {
+          Ok(true) => Ok(())
+          Ok(false) => Err(trigger_not_found("webhook key not found"))
+          Err(message) =>
+            Err(trigger_conflict("cannot revoke webhook key: " + message))
+        }
+      }
+    Err(message) => Err(trigger_invalid("cannot read webhook key: " + message))
+  }
+  state.mutex.release()
+  match outcome {
+    Ok(_) => {
+      // Best effort: revocation itself is authoritative, so a missing or
+      // undeletable file stays harmless (the key row is never active again).
+      @fs.remove(
+        state.state_dir + "/" +
+        @contracts.webhook_secret_relative_path(key_id),
+      ) catch {
+        _ => ()
+      }
+      Ok(
+        @contracts.json_object(
+          [
+            ("key_id", @contracts.json_string(key_id)),
+            ("revoked", @contracts.json_bool(true)),
+          ],
+        ),
+      )
+    }
+    Err(error) => Err(error)
+  }
+}
+
+///|
 /// Entry point for every registered `trigger.*` method. The feature flag is
 /// checked here: with `trigger.enabled=false` every trigger method returns
-/// `unsupported` and no dispatcher exists, leaving the rest of the host
-/// byte-identical to a build without A3.
+/// `unsupported`, `/hooks/*` answers the uniform 401, and no dispatcher or
+/// scheduler runs.
 async fn handle_trigger_rpc(
   state : HostState,
   sink : Sink,
@@ -1424,8 +1963,15 @@ async fn handle_trigger_rpc(
   }
   match request.method {
     @contracts.METHOD_TRIGGER_CREATE => {
+      let plan = match trigger_schedule_plan_for_create(request.params) {
+        Ok(value) => value
+        Err(error) => {
+          send_machine_error(state, sink, request, client_request_id, error)
+          return
+        }
+      }
       state.mutex.acquire()
-      let outcome = trigger_create_locked(state, request.params)
+      let outcome = trigger_create_locked(state, request.params, plan)
       state.mutex.release()
       match outcome {
         Ok(record) =>
@@ -1466,8 +2012,15 @@ async fn handle_trigger_rpc(
       }
     }
     @contracts.METHOD_TRIGGER_UPDATE => {
+      let plan = match trigger_schedule_plan_for_update(state, request.params) {
+        Ok(value) => value
+        Err(error) => {
+          send_machine_error(state, sink, request, client_request_id, error)
+          return
+        }
+      }
       state.mutex.acquire()
-      let outcome = trigger_update_locked(state, request.params)
+      let outcome = trigger_update_locked(state, request.params, plan)
       state.mutex.release()
       match outcome {
         Ok(record) =>
@@ -1494,6 +2047,22 @@ async fn handle_trigger_rpc(
             client_request_id,
             @contracts.trigger_result(record, @async.now()),
           )
+        Err(error) => send_machine_error(state, sink, request, client_request_id, error)
+      }
+    }
+    @contracts.METHOD_TRIGGER_SOURCE_ADD => {
+      let outcome = trigger_webhook_key_add(state, request.params)
+      match outcome {
+        Ok(result) =>
+          send_machine_result(state, sink, request, client_request_id, result)
+        Err(error) => send_machine_error(state, sink, request, client_request_id, error)
+      }
+    }
+    @contracts.METHOD_TRIGGER_SOURCE_REVOKE => {
+      let outcome = trigger_webhook_key_revoke(state, request.params)
+      match outcome {
+        Ok(result) =>
+          send_machine_result(state, sink, request, client_request_id, result)
         Err(error) => send_machine_error(state, sink, request, client_request_id, error)
       }
     }
@@ -1524,7 +2093,7 @@ async fn handle_trigger_rpc(
         request,
         client_request_id,
         trigger_unsupported(
-          request.method + " is not implemented until A3.1",
+          request.method + " is not implemented",
         ),
       )
   }
