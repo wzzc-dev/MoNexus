@@ -31,6 +31,16 @@ struct Sink {
 }
 
 ///|
+/// One in-flight `environment.exec`, tracked so stop/destroy can cancel the
+/// underlying Docker/SSH invocation. The result lands in `env_exec_cache` so a
+/// repeated `exec_id` never runs twice.
+pub struct EnvironmentExecTask {
+  environment_id : String
+  exec_id : String
+  task : @async.Task[Unit]
+}
+
+///|
 /// Host-wide mutable state, guarded by `mutex`. All fields that change at
 /// runtime live here so connection handlers can share them safely.
 ///|
@@ -66,6 +76,20 @@ pub struct HostState {
   trigger_buckets : Map[String, @contracts.TriggerRateBucket]
   webhook_inflight : Map[String, Int]
   webhook_audit : Map[String, TriggerWebhookAuditState]
+  // A2.1: owner trust store and its verifier probe. Both are loaded once at
+  // host start; recipe signatures are re-verified against them before use.
+  trust : @recipes.TrustStore
+  verifier : @recipes.VerifierProbe
+  // Lifecycle mutations are serialized separately from `mutex` so a long
+  // Docker pull never blocks event fan-out or read-only RPCs.
+  environment_mutex : @async.Mutex
+  env_exec_cache : Map[String, @json.Json]
+  env_exec_tasks : Map[String, EnvironmentExecTask]
+  env_create_started : Map[String, Int64]
+  // Whitebox test seam: production never sets this. It makes the durable
+  // approval-consumption append fail so the fail-closed path can be tested
+  // without corrupting the database.
+  test_fail_approval_consumption : Ref[Bool]
 }
 
 ///|
@@ -135,6 +159,8 @@ fn HostState::new(
   options : HostOptions,
   port : Int,
   store : @machines.MachineStore,
+  trust : @recipes.TrustStore,
+  verifier : @recipes.VerifierProbe,
 ) -> HostState {
   let now = @async.now()
   let token = random_token()
@@ -179,6 +205,13 @@ fn HostState::new(
     trigger_buckets: Map([]),
     webhook_inflight: Map([]),
     webhook_audit: Map([]),
+    trust,
+    verifier,
+    environment_mutex: @async.Mutex::Mutex(),
+    env_exec_cache: Map([]),
+    env_exec_tasks: Map([]),
+    env_create_started: Map([]),
+    test_fail_approval_consumption: Ref(false),
   }
 }
 
@@ -421,6 +454,50 @@ fn HostState::append_artifact_event(
 ) -> Result[@contracts.EventEnvelope, String] {
   let event = self.next_envelope(event_type, subject, payload)
   match self.store.record_artifact_event(event, record) {
+    Ok(_) => {
+      self.publish(event)
+      Ok(event)
+    }
+    Err(message) => Err(message)
+  }
+}
+
+///|
+///|
+/// Append an environment event and its projection in one transaction. A
+/// destroyed record is passed with `removed_id = Some(id)` so the projection
+/// is tombstoned; create retries still find the original record.
+fn HostState::append_environment_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+  record : @contracts.EnvironmentRecord?,
+  removed_id : String?,
+) -> Result[@contracts.EventEnvelope, String] {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.record_environment_event(event, record, removed_id) {
+    Ok(_) => {
+      self.publish(event)
+      Ok(event)
+    }
+    Err(message) => Err(message)
+  }
+}
+
+///|
+/// Append a recipe event and its projection in one transaction. Refused
+/// imports are audit-only (`record = None`); they never become usable.
+fn HostState::append_recipe_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+  record : @contracts.RecipeRecord?,
+  refused : Bool,
+) -> Result[@contracts.EventEnvelope, String] {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.record_recipe_event(event, record, refused) {
     Ok(_) => {
       self.publish(event)
       Ok(event)

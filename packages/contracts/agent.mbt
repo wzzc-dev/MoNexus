@@ -99,6 +99,11 @@ pub const EVENT_DECISION_RESPONDED : String = "decision.responded"
 ///|
 pub const EVENT_DECISION_EXPIRED : String = "decision.expired"
 
+///|
+/// A grant that has been spent. Environment approvals are one-time: the host
+/// records consumption before the first pull/create and refuses any reuse.
+pub const EVENT_DECISION_CONSUMED : String = "decision.consumed"
+
 // ---------------------------------------------------------------------------
 // Errors / labels
 // ---------------------------------------------------------------------------
@@ -554,6 +559,15 @@ pub(all) struct DecisionRecord {
   // Derived Inbox fields. Set when the host lists decisions; empty when stored.
   inbox : String
   run_status : String
+  // ADR-0013 §6: minimal one-time environment approval binding. Empty for
+  // every other Decision kind.
+  action : String
+  plan_digest : String
+  machine_id : String
+  recipe_hash : String
+  nonce : String
+  expires_at : String
+  consumed_at : String
 }
 
 ///|
@@ -586,6 +600,37 @@ pub fn DecisionRecord::new(
     answered_at: "",
     inbox: "",
     run_status: "",
+    action: "",
+    plan_digest: "",
+    machine_id: "",
+    recipe_hash: "",
+    nonce: "",
+    expires_at: "",
+    consumed_at: "",
+  }
+}
+
+///|
+/// Attach the A2.1 environment approval binding to a pending Decision. The
+/// grant is valid exactly once, for this plan/machine/recipe, until
+/// `expires_at`.
+pub fn DecisionRecord::with_environment_approval(
+  self : DecisionRecord,
+  action~ : String,
+  plan_digest~ : String,
+  machine_id~ : String,
+  recipe_hash~ : String,
+  nonce~ : String,
+  expires_at~ : String,
+) -> DecisionRecord {
+  {
+    ..self,
+    action,
+    plan_digest,
+    machine_id,
+    recipe_hash,
+    nonce,
+    expires_at,
   }
 }
 
@@ -612,6 +657,13 @@ pub fn DecisionRecord::to_json(self : DecisionRecord) -> @json.Json {
     ("answered_at", json_string(self.answered_at)),
     ("inbox", json_string(self.inbox)),
     ("run_status", json_string(self.run_status)),
+    ("action", json_string(self.action)),
+    ("plan_digest", json_string(self.plan_digest)),
+    ("machine_id", json_string(self.machine_id)),
+    ("recipe_hash", json_string(self.recipe_hash)),
+    ("nonce", json_string(self.nonce)),
+    ("expires_at", json_string(self.expires_at)),
+    ("consumed_at", json_string(self.consumed_at)),
   ])
 }
 
@@ -655,6 +707,13 @@ pub fn decision_from_json(json : @json.Json) -> DecisionRecord? {
     answered_at: string_field_or(object, "answered_at", ""),
     inbox: string_field_or(object, "inbox", ""),
     run_status: string_field_or(object, "run_status", ""),
+    action: string_field_or(object, "action", ""),
+    plan_digest: string_field_or(object, "plan_digest", ""),
+    machine_id: string_field_or(object, "machine_id", ""),
+    recipe_hash: string_field_or(object, "recipe_hash", ""),
+    nonce: string_field_or(object, "nonce", ""),
+    expires_at: string_field_or(object, "expires_at", ""),
+    consumed_at: string_field_or(object, "consumed_at", ""),
   })
 }
 

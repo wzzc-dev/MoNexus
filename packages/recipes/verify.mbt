@@ -443,6 +443,32 @@ pub async fn import_recipe(
 }
 
 ///|
+/// Reattach the stored signature to canonical recipe bytes and parse the
+/// result. The canonical bytes deliberately exclude `signature`, so they are
+/// not a complete recipe document on their own; callers first verify the hash
+/// and signature with `reverify_stored`, then use this for the structured
+/// recipe. The key id and SSHSIG body are already validated and contain no
+/// JSON metacharacters.
+pub fn parse_stored_recipe(
+  canonical : String,
+  key_id : String,
+  signature : String,
+) -> Result[Recipe, RecipeError] {
+  if canonical.length() < 2 ||
+    canonical.get_char(canonical.length() - 1) != Some('}') {
+    return Err(
+      RecipeError::new(InvalidJson).at("recipe").with_detail(
+        "canonical bytes are not a JSON object",
+      ),
+    )
+  }
+  let document = canonical[:canonical.length() - 1].to_owned() +
+    ",\"signature\":{\"key_id\":\"" + key_id +
+    "\",\"alg\":\"ed25519\",\"sig\":\"" + signature + "\"}}"
+  parse_recipe(document)
+}
+
+///|
 /// Re-verify a recipe loaded from storage. The canonical bytes and hash are the
 /// authority: a mismatch is `hash_mismatch`, and the signature must still be
 /// valid for the current trust store (ADR-0013 §2.3 "用前复验").

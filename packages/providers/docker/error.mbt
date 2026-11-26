@@ -19,6 +19,7 @@ pub(all) enum DockerErrorCode {
   InvalidRoot
   ForbiddenRoot
   RootsOverlap
+  InvalidContainerPath
   InvalidEnvName
   EnvNameNotAllowed
   EnvNameDuplicate
@@ -49,6 +50,7 @@ pub fn DockerErrorCode::label(self : DockerErrorCode) -> String {
     InvalidRoot => "invalid_root"
     ForbiddenRoot => "forbidden_root"
     RootsOverlap => "roots_overlap"
+    InvalidContainerPath => "invalid_container_path"
     InvalidEnvName => "invalid_env_name"
     EnvNameNotAllowed => "env_name_not_allowed"
     EnvNameDuplicate => "env_name_duplicate"

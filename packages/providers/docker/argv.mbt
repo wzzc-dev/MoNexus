@@ -35,6 +35,34 @@ pub const LABEL_WORKSPACE_ID : String = "monexus.workspace_id"
 pub const LABEL_RECIPE_HASH : String = "monexus.recipe_hash"
 
 ///|
+/// A2.1 runtime ids (`env_<ULID>`, `wsp_<ULID>`, `org_local`) are *not* recipe
+/// names: they contain `_` and uppercase ULID characters. This validator keeps
+/// the label alphabet narrow (ASCII alphanumerics, `_`, `-`, bounded length)
+/// without importing the recipe-name grammar that A2.0 deliberately narrowed
+/// for recipe identity.
+pub fn is_valid_runtime_id(text : String) -> Bool {
+  if text.length() == 0 || text.length() > 64 {
+    return false
+  }
+  for index in 0..<text.length() {
+    let ch = match text.get_char(index) {
+      Some(value) => value
+      None => return false
+    }
+    let code = ch.to_int()
+    let ok = (code >= 48 && code <= 57) ||
+      (code >= 65 && code <= 90) ||
+      (code >= 97 && code <= 122) ||
+      code == 95 ||
+      code == 45
+    if !ok {
+      return false
+    }
+  }
+  true
+}
+
+///|
 /// Validated identity for one environment container. `primary_id` is the
 /// owner's primary/account scope, `workspace_id` the bound workspace and
 /// `recipe_hash` the verified `sha256:<hex>` of the recipe.
@@ -52,24 +80,24 @@ pub fn EnvironmentIdentity::new(
   workspace_id~ : String,
   recipe_hash~ : String,
 ) -> Result[EnvironmentIdentity, DockerError] {
-  if !@recipes.is_valid_recipe_name(environment_id) {
+  if !is_valid_runtime_id(environment_id) {
     return Err(
       DockerError::new(InvalidEnvironmentId).at("environment_id").with_detail(
-        "expected [a-z0-9][a-z0-9-]{0,63}",
+        "expected a bounded [A-Za-z0-9_-] runtime id",
       ),
     )
   }
-  if !@recipes.is_valid_recipe_name(primary_id) {
+  if !is_valid_runtime_id(primary_id) {
     return Err(
       DockerError::new(InvalidPrimaryId).at("primary_id").with_detail(
-        "expected [a-z0-9][a-z0-9-]{0,63}",
+        "expected a bounded [A-Za-z0-9_-] runtime id",
       ),
     )
   }
-  if !@recipes.is_valid_recipe_name(workspace_id) {
+  if !is_valid_runtime_id(workspace_id) {
     return Err(
       DockerError::new(InvalidWorkspaceId).at("workspace_id").with_detail(
-        "expected [a-z0-9][a-z0-9-]{0,63}",
+        "expected a bounded [A-Za-z0-9_-] runtime id",
       ),
     )
   }
@@ -245,11 +273,54 @@ pub fn pull_argv(image : @recipes.RecipeImage) -> Array[String] {
 }
 
 ///|
+/// An additional bind mount requested at create time (ADR-0013 §3.1
+/// "extra registered mounts"). The source must already be a registered host
+/// root: A2.1 resolves registration before reaching this builder, and the
+/// same forbidden-root rules apply so an arbitrary host path cannot be
+/// smuggled in. Extra mounts always force an environment approval.
+pub(all) struct ExtraMount {
+  source : String
+  target : String
+  read_only : Bool
+}
+
+///|
+pub fn ExtraMount::new(
+  source~ : String,
+  target~ : String,
+  read_only~ : Bool,
+) -> Result[ExtraMount, DockerError] {
+  match validate_root(source, "extra_mount.source") {
+    Ok(_) => ()
+    Err(error) => return Err(error)
+  }
+  if !@recipes.is_valid_container_path(target) {
+    return Err(
+      DockerError::new(InvalidContainerPath).at("extra_mount.target").with_detail(
+        "expected an absolute normalised container path",
+      ),
+    )
+  }
+  Ok({ source, target, read_only })
+}
+
+///|
+fn extra_mount_spec(mount : ExtraMount) -> String {
+  let spec = "type=bind,source=" + mount.source + ",target=" + mount.target
+  if mount.read_only {
+    spec + ",readonly"
+  } else {
+    spec
+  }
+}
+
+///|
 pub fn create_argv(
   recipe : @recipes.Recipe,
   identity : EnvironmentIdentity,
   roots : ResolvedRoots,
   env_file_path~ : String? = None,
+  extra_mounts~ : Array[ExtraMount] = [],
 ) -> Result[Array[String], DockerError] {
   let env_path = match env_file_path {
     Some(value) => {
@@ -300,6 +371,10 @@ pub fn create_argv(
     argv.push("--mount")
     argv.push(mount_spec(mount, roots))
   }
+  for mount in extra_mounts {
+    argv.push("--mount")
+    argv.push(extra_mount_spec(mount))
+  }
   argv.push(image_pull_reference(recipe.image))
   Ok(argv)
 }
@@ -332,4 +407,200 @@ pub fn rm_argv(identity : EnvironmentIdentity) -> Array[String] {
 ///|
 pub fn inspect_argv(identity : EnvironmentIdentity) -> Array[String] {
   ["inspect", "--type", "container", container_name(identity)]
+}
+
+///|
+/// `exec [--workdir <cwd>] <container> <argv...>`. The command is an argv
+/// array; there is no shell string field. Environment values are never passed
+/// here (they would land in the host process argv), so callers rely on the
+/// container's env-file-provided environment.
+pub fn exec_argv(
+  identity : EnvironmentIdentity,
+  argv : Array[String],
+  workdir~ : String = "",
+) -> Result[Array[String], DockerError] {
+  if argv.is_empty() {
+    return Err(
+      DockerError::new(Internal).at("argv").with_detail("exec argv is empty"),
+    )
+  }
+  let out : Array[String] = ["exec"]
+  if workdir != "" {
+    if !@recipes.is_valid_container_path(workdir) {
+      return Err(
+        DockerError::new(InvalidContainerPath).at("workdir").with_detail(
+          "expected an absolute normalised container path",
+        ),
+      )
+    }
+    out.push("--workdir")
+    out.push(workdir)
+  }
+  out.push(container_name(identity))
+  for arg in argv {
+    out.push(arg)
+  }
+  Ok(out)
+}
+
+///|
+/// Path of the fixed exec PID file inside the container (ADR-0013 §3.3).
+pub fn exec_pidfile(marker : String) -> String {
+  "/run/monexus/exec-" + marker + ".pid"
+}
+
+///|
+/// Fallback PID file for images whose runtime user cannot write `/run`.
+pub fn exec_pidfile_fallback(marker : String) -> String {
+  "/tmp/monexus-exec-" + marker + ".pid"
+}
+
+///|
+/// Fixed wrapper for `environment.exec` (ADR-0013 §3.3). The process is
+/// started with `setsid`, so its pid is also its process-group id, and the
+/// pid is written where the cancellation path can find it. The wrapper keeps
+/// stdout/stderr attached to the docker exec client, waits for the command and
+/// removes the PID file. `argv` is passed positionally; recipe or caller text
+/// never becomes part of this shell string.
+///
+/// The marker is validated as a bounded runtime id, so the generated paths
+/// cannot inject shell syntax or escape the fixed directory.
+pub fn exec_wrapped_argv(
+  identity : EnvironmentIdentity,
+  argv : Array[String],
+  marker : String,
+  workdir~ : String = "",
+) -> Result[Array[String], DockerError] {
+  if argv.is_empty() {
+    return Err(
+      DockerError::new(Internal).at("argv").with_detail("exec argv is empty"),
+    )
+  }
+  if !is_valid_runtime_id(marker) {
+    return Err(
+      DockerError::new(InvalidEnvironmentId).at("marker").with_detail(
+        "expected a bounded [A-Za-z0-9_-] exec marker",
+      ),
+    )
+  }
+  let primary = exec_pidfile(marker)
+  let fallback = exec_pidfile_fallback(marker)
+  let script = "pidfile=\"" + primary + "\"; " +
+    "rm -f \"$pidfile\" \"" + fallback + "\" 2>/dev/null; " +
+    "mkdir -p /run/monexus 2>/dev/null && " +
+    "printf x > \"$pidfile\" 2>/dev/null && rm -f \"$pidfile\" " +
+    "|| pidfile=\"" + fallback + "\"; " +
+    "setsid \"$@\" & pid=$!; " +
+    "printf '%s' \"$pid\" > \"$pidfile\" 2>/dev/null || true; " +
+    "wait \"$pid\"; code=$?; " +
+    "rm -f \"$pidfile\" 2>/dev/null; " +
+    "exit \"$code\""
+  let out : Array[String] = ["exec"]
+  if workdir != "" {
+    if !@recipes.is_valid_container_path(workdir) {
+      return Err(
+        DockerError::new(InvalidContainerPath).at("workdir").with_detail(
+          "expected an absolute normalised container path",
+        ),
+      )
+    }
+    out.push("--workdir")
+    out.push(workdir)
+  }
+  out.push(container_name(identity))
+  out.push("sh")
+  out.push("-c")
+  out.push(script)
+  out.push("monexus-exec")
+  for arg in argv {
+    out.push(arg)
+  }
+  Ok(out)
+}
+
+///|
+/// Bounded TERM→KILL termination for one wrapped exec. The script reads the
+/// PID file the wrapper wrote, signals the whole process group, waits one
+/// second, sends KILL, and reports whether the group is still observable.
+/// A missing or empty PID file is *unverified* (exit 3), never "terminated":
+/// the caller must not report a cancelled command as success.
+pub fn exec_terminate_argv(
+  identity : EnvironmentIdentity,
+  marker : String,
+) -> Result[Array[String], DockerError] {
+  if !is_valid_runtime_id(marker) {
+    return Err(
+      DockerError::new(InvalidEnvironmentId).at("marker").with_detail(
+        "expected a bounded [A-Za-z0-9_-] exec marker",
+      ),
+    )
+  }
+  let primary = exec_pidfile(marker)
+  let fallback = exec_pidfile_fallback(marker)
+  let script = "pidfile=\"" + primary + "\"; " +
+    "[ -s \"$pidfile\" ] || pidfile=\"" + fallback + "\"; " +
+    "p=$(cat \"$pidfile\" 2>/dev/null); " +
+    "if [ -z \"$p\" ]; then " +
+    "echo \"exec pid file is missing\" >&2; exit 3; fi; " +
+    "kill -TERM -$p 2>/dev/null; sleep 1; " +
+    "kill -KILL -$p 2>/dev/null; sleep 1; " +
+    "if kill -0 -$p 2>/dev/null; then " +
+    "echo \"exec process group survived KILL\" >&2; exit 3; fi; " +
+    "rm -f \"$pidfile\" 2>/dev/null; exit 0"
+  Ok([
+    "exec", container_name(identity), "sh", "-c", script,
+    "monexus-exec-terminate",
+  ])
+}
+
+///|
+/// Interactive exec argv for the terminal transport. `-i` keeps stdin open
+/// and `-t` allocates a container TTY; the host allocates its own PTY or SSH
+/// TTY in front of it.
+pub fn exec_tty_argv(
+  identity : EnvironmentIdentity,
+  argv : Array[String],
+  workdir~ : String = "",
+) -> Result[Array[String], DockerError] {
+  let base = match exec_argv(identity, argv, workdir~) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let out : Array[String] = ["exec", "-i", "-t"]
+  for index in 1..<base.length() {
+    out.push(base[index])
+  }
+  Ok(out)
+}
+
+///|
+/// `docker version --format {{.Server.Version}}`, used by the doctor to
+/// report the daemon version without changing state.
+pub fn version_argv() -> Array[String] {
+  ["version", "--format", "{{.Server.Version}}"]
+}
+
+///|
+/// List only containers carrying the managed label. Reconcile never scans
+/// unlabelled containers and never removes anything outside this set.
+pub fn list_managed_argv() -> Array[String] {
+  [
+    "ps", "-a", "--filter", "label=" + LABEL_MANAGED + "=true", "--format",
+    "{{.Names}}",
+  ]
+}
+
+///|
+/// Inspect one container by its exact name. Used by reconcile after a
+/// labelled scan; the name still has to satisfy the managed-name shape before
+/// it can be adopted.
+pub fn inspect_named_argv(name : String) -> Result[Array[String], DockerError] {
+  if !is_valid_runtime_id(name) {
+    return Err(
+      DockerError::new(InvalidEnvironmentId).at("name").with_detail(
+        "container name is not a bounded runtime id",
+      ),
+    )
+  }
+  Ok(["inspect", "--type", "container", name])
 }

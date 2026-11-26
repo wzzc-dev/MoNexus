@@ -35,22 +35,22 @@ fn expect_docker_reject(result : Result[Array[String], @docker.DockerError], rea
 test "identity and container names are validated" {
   let identity = docker_identity()
   inspect(@docker.container_name(identity), content="monexus-env-env01")
+  // A2.1 runtime ids include the upper-case ULID alphabet and `_`, unlike
+  // recipe names.
   match @docker.EnvironmentIdentity::new(
-    environment_id="Env01",
-    primary_id="owner01",
-    workspace_id="ws01",
+    environment_id="env_01ARYZ6S41",
+    primary_id="owner_01",
+    workspace_id="ws_01",
     recipe_hash=FULL_RECIPE_HASH,
   ) {
-    Ok(_) => fail("an upper-case identity must be rejected")
-    Err(error) =>
-      if error.reason() != "invalid_environment_id" {
-        fail("expected invalid_environment_id, got " + error.to_string())
-      }
+    Ok(value) =>
+      inspect(@docker.container_name(value), content="monexus-env-env_01ARYZ6S41")
+    Err(error) => fail("a runtime id must be accepted: " + error.to_string())
   }
   let cases : Array[(String, String, String, String, String)] = [
     ("env 01", "owner01", "ws01", FULL_RECIPE_HASH, "invalid_environment_id"),
-    ("env01", "Owner", "ws01", FULL_RECIPE_HASH, "invalid_primary_id"),
-    ("env01", "owner01", "ws_01", FULL_RECIPE_HASH, "invalid_workspace_id"),
+    ("env01", "Owner!", "ws01", FULL_RECIPE_HASH, "invalid_primary_id"),
+    ("env01", "owner01", "ws/01", FULL_RECIPE_HASH, "invalid_workspace_id"),
     ("env01", "owner01", "ws01", "sha256:abc", "invalid_recipe_hash"),
   ]
   for entry in cases {

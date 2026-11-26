@@ -198,7 +198,14 @@ async fn transition_run(
   )
   state.mutex.release()
   match outcome {
-    Ok(_) => Ok(updated)
+    Ok(_) => {
+      // A2.1: an ephemeral environment is destroyed when its Run reaches a
+      // terminal state. This is idempotent and never touches a shared env.
+      if terminal {
+        finalize_run_environment(state, updated)
+      }
+      Ok(updated)
+    }
     Err(message) => Err(message)
   }
 }
@@ -516,6 +523,25 @@ async fn resolve_run_cwd(
   state : HostState,
   run : @contracts.RunRecord,
 ) -> Result[String, String] {
+  // Environment runs execute in the container workdir. Never create a host
+  // worktree outside the mounted root for them: the workspace root (or the
+  // registered worktree root) is what the plan mounts.
+  if run.environment_id != "" {
+    if run.worktree_id != "" {
+      let record = match state.store.get_worktree(run.worktree_id) {
+        Ok(Some(value)) => value
+        Ok(None) => return Err("worktree not found")
+        Err(message) => return Err(message)
+      }
+      return Ok(record.path)
+    }
+    let workspace = match state.store.get_workspace(run.workspace_id) {
+      Ok(Some(value)) => value
+      Ok(None) => return Err("workspace not found")
+      Err(message) => return Err(message)
+    }
+    return Ok(workspace.root)
+  }
   if run.worktree_id != "" {
     let record = match state.store.get_worktree(run.worktree_id) {
       Ok(Some(value)) => value
@@ -639,6 +665,13 @@ async fn execute_run_body(
       Ok(session_id) => Ok(Completed("agent session " + session_id + " completed"))
       Err(message) => Err(message)
     }
+  } else if current.environment_id != "" {
+    // A container Run has no tmux session on the host; execute it directly in
+    // the environment and keep the output artifact.
+    match run_command_step(state, current, cwd) {
+      Ok((_kind, detail)) => Ok(Completed(detail))
+      Err(message) => Err(message)
+    }
   } else {
     execute_command_run(state, current, cwd)
   }
@@ -680,23 +713,18 @@ async fn run_command_step(
   if run.command.trim() == "" {
     return Err("run has no command")
   }
-  let workspace = match state.load_workspace(run.workspace_id) {
-    Ok(value) => value
-    Err(message) => return Err(message)
-  }
-  let provider = match
-    open_provider(state, workspace.machine_id, workspace.root) {
-    Ok(value) => value
-    Err(error) => return Err(error.message)
-  }
+  // Runs with an environment execute inside its container; file and git
+  // operations keep using the workspace transport through `run_exec_checked`.
   let result = match
-    provider.exec(
+    run_exec_checked(
+      state,
+      run,
       run.command,
-      cwd~,
-      timeout_seconds=RUN_DEFAULT_TIMEOUT_S,
+      cwd,
+      RUN_DEFAULT_TIMEOUT_S,
     ) {
     Ok(value) => value
-    Err(error) => return Err(error.to_string())
+    Err(message) => return Err(message)
   }
   let output = truncate_output(
     result.stdout + result.stderr,
@@ -920,32 +948,38 @@ async fn run_verification(state : HostState, run_id : String, cwd : String) -> U
     settle_verified(state, run_id, "no verify[] declared; gate passes")
     return
   }
-  let workspace = match state.load_workspace(run.workspace_id) {
-    Ok(value) => value
-    Err(message) => {
-      let _ = transition_run(
-        state,
-        run_id,
-        @contracts.RUN_STATUS_FAILED,
-        stop_reason="verify_setup_failed",
-        error_text=message,
-      )
-      return
+  // Verification follows the same dispatch as the main step: inside the
+  // environment container when the Run carries one, otherwise on the
+  // workspace transport (opened once for all verify commands).
+  let provider : @workspace.WorkspaceProvider? = if run.environment_id == "" {
+    let workspace = match state.load_workspace(run.workspace_id) {
+      Ok(value) => value
+      Err(message) => {
+        let _ = transition_run(
+          state,
+          run_id,
+          @contracts.RUN_STATUS_FAILED,
+          stop_reason="verify_setup_failed",
+          error_text=message,
+        )
+        return
+      }
     }
-  }
-  let provider = match
-    open_provider(state, workspace.machine_id, workspace.root) {
-    Ok(value) => value
-    Err(error) => {
-      let _ = transition_run(
-        state,
-        run_id,
-        @contracts.RUN_STATUS_FAILED,
-        stop_reason="verify_setup_failed",
-        error_text=error.message,
-      )
-      return
+    match open_provider(state, workspace.machine_id, workspace.root) {
+      Ok(value) => Some(value)
+      Err(error) => {
+        let _ = transition_run(
+          state,
+          run_id,
+          @contracts.RUN_STATUS_FAILED,
+          stop_reason="verify_setup_failed",
+          error_text=error.message,
+        )
+        return
+      }
     }
+  } else {
+    None
   }
   let mut failures = 0
   let mut index = 0
@@ -957,11 +991,29 @@ async fn run_verification(state : HostState, run_id : String, cwd : String) -> U
     let kind = verify_kind(command)
     let started = @contracts.format_rfc3339(@async.now())
     let evidence_id = @contracts.new_id("evd", @async.now())
-    let exec_result = provider.exec(
-      command,
-      cwd~,
-      timeout_seconds=VERIFY_DEFAULT_TIMEOUT_S,
-    )
+    let exec_result = if run.environment_id != "" {
+      run_exec_in_environment(state, run, command, VERIFY_DEFAULT_TIMEOUT_S)
+    } else {
+      match provider {
+        Some(value) =>
+          match
+            value.exec(
+              command,
+              cwd~,
+              timeout_seconds=VERIFY_DEFAULT_TIMEOUT_S,
+            ) {
+            Ok(result) =>
+              Ok({
+                exit_code: result.exit_code,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                timed_out: result.timed_out,
+              })
+            Err(error) => Err(error.to_string())
+          }
+        None => Err("verify provider is unavailable")
+      }
+    }
     let (exit_code, output, timed_out, exec_error) = match exec_result {
       Ok(result) => (
         result.exit_code,
@@ -969,8 +1021,8 @@ async fn run_verification(state : HostState, run_id : String, cwd : String) -> U
         result.timed_out,
         "",
       )
-      Err(error) =>
-        (-1, "verify command failed to run: " + error.to_string(), true, error.to_string())
+      Err(message) =>
+        (-1, "verify command failed to run: " + message, true, message)
     }
     let passed = exit_code == 0 && !timed_out
     let artifact_id = write_run_artifact(
@@ -2344,6 +2396,119 @@ if @contracts.task_status_is_terminal(task.status) {
       return
     }
   }
+  // A2.1: an explicit or active environment owns execution for this exact
+  // target. The Run keeps the environment id so every step (command,
+  // verification, diff) dispatches through the same container. Agent runs
+  // through environments are A2.2 scope and are rejected here.
+  let requested_environment = @contracts.string_field_or(
+    request.params,
+    "environment_id",
+    "",
+  )
+  let resolved_environment : @contracts.EnvironmentRecord? = if requested_environment != "" {
+    let loaded = match environment_record_by_id(state, requested_environment) {
+      Ok(Some(value)) => value
+      Ok(None) => {
+        task_io_error(
+          state,
+          sink,
+          request,
+          client_request_id,
+          task_not_found("environment not found"),
+        )
+        return
+      }
+      Err(error) => {
+        task_io_error(state, sink, request, client_request_id, error)
+        return
+      }
+    }
+    if loaded.workspace_id != workspace_id ||
+      loaded.worktree_id != worktree_id {
+      task_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        task_conflict("environment does not belong to this target"),
+      )
+      return
+    }
+    if loaded.state != @contracts.ENVIRONMENT_STATE_RUNNING {
+      task_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        task_conflict("environment is not running (state=" + loaded.state + ")"),
+      )
+      return
+    }
+    Some(loaded)
+  } else {
+    active_environment_for_target(state, workspace_id, worktree_id)
+  }
+  let run_environment_id = match resolved_environment {
+    Some(environment) => environment.id
+    None => ""
+  }
+  match resolved_environment {
+    Some(environment) => {
+      if mode == @contracts.RUN_MODE_AGENT {
+        task_io_error(
+          state,
+          sink,
+          request,
+          client_request_id,
+          task_invalid(
+            "agent runs with an environment are not supported in A2.1 (A2.2)",
+          ),
+        )
+        return
+      }
+      if environment.machine_id != "" {
+        if machine_id != "" && machine_id != environment.machine_id {
+          task_io_error(
+            state,
+            sink,
+            request,
+            client_request_id,
+            task_conflict("environment machine does not match the requested machine"),
+          )
+          return
+        }
+        machine_id = environment.machine_id
+      } else if machine_id != "" {
+        if !machine_is_local(state, machine_id) {
+          task_io_error(
+            state,
+            sink,
+            request,
+            client_request_id,
+            task_conflict(
+              "environment is local but the run requested a remote machine",
+            ),
+          )
+          return
+        }
+      }
+      if want_arch != "" || want_os != "" || want_tool != "" {
+        if !machine_matches(state, machine_id, want_arch, want_os, want_tool) {
+          task_io_error(
+            state,
+            sink,
+            request,
+            client_request_id,
+            task_conflict(
+              "environment machine does not match the requested capabilities",
+            ),
+          )
+          return
+        }
+      }
+    }
+    None => ()
+  }
   let now = @async.now()
   // Credentials must not be persisted with the Run (ADR-0006 §5). Secret-
   // looking env names are replaced with a marker; the agent account on the
@@ -2371,6 +2536,7 @@ if @contracts.task_status_is_terminal(task.status) {
     agent_command=@contracts.string_field_or(request.params, "agent_command", ""),
     agent_args=@contracts.string_array_field(request.params, "agent_args"),
     agent_env~,
+    environment_id=run_environment_id,
   )
   let record = if policy.action == @contracts.POLICY_ASK {
     {
@@ -2533,20 +2699,13 @@ async fn run_diff_text(state : HostState, run : @contracts.RunRecord) -> String 
     Ok(value) => value
     Err(_) => return ""
   }
-  let workspace = match state.load_workspace(run.workspace_id) {
-    Ok(value) => value
-    Err(_) => return ""
-  }
-  let provider = match
-    open_provider(state, workspace.machine_id, workspace.root) {
-    Ok(value) => value
-    Err(_) => return ""
-  }
   let result = match
-    provider.exec(
+    run_exec_checked(
+      state,
+      run,
       "git --no-pager diff --no-color HEAD",
-      cwd~,
-      timeout_seconds=60,
+      cwd,
+      60,
     ) {
     Ok(value) => value
     Err(_) => return ""

@@ -767,6 +767,24 @@ async fn handle_workspace_git_status(
       return
     }
   }
+  // An active environment redirects git execution into its container; the
+  // workspace record keeps its original kind and file operations stay on the
+  // host bind mount.
+  match active_environment_for_workspace_root(state, workspace_id) {
+    Some(environment) => {
+      let status = match environment_git_status(state, record, environment) {
+        Ok(value) => value
+        Err(error) => {
+          workspace_io_error(state, sink, request, client_request_id, error)
+          return
+        }
+      }
+      let result = @contracts.git_status_result(status)
+      send_machine_result(state, sink, request, client_request_id, result)
+      return
+    }
+    None => ()
+  }
   let provider = match provider_for_workspace(state, record) {
     Ok(value) => value
     Err(error) => {
@@ -836,6 +854,22 @@ async fn handle_workspace_git_diff(
       workspace_io_error(state, sink, request, client_request_id, error)
       return
     }
+  }
+  match active_environment_for_workspace_root(state, workspace_id) {
+    Some(environment) => {
+      let diff = match
+        environment_git_diff(state, environment, path, cached, range) {
+        Ok(value) => value
+        Err(error) => {
+          workspace_io_error(state, sink, request, client_request_id, error)
+          return
+        }
+      }
+      let result = @contracts.git_diff_result(diff)
+      send_machine_result(state, sink, request, client_request_id, result)
+      return
+    }
+    None => ()
   }
   let provider = match provider_for_workspace(state, record) {
     Ok(value) => value
@@ -1329,28 +1363,76 @@ async fn handle_terminal_open(
   let output : @aqueue.Queue[@workspace.TerminalEvent] = @aqueue.Queue(
     kind=Unbounded,
   )
-  let task = match state.group.val {
-    Some(group) =>
-      group.spawn(allow_failure=true, () => {
-        provider.run_terminal(
-          session_id,
-          command,
-          rows.to_int(),
-          cols.to_int(),
-          input,
-          output,
-        )
-      })
-    None => {
-      workspace_io_error(
-        state,
-        sink,
-        request,
-        client_request_id,
-        workspace_invalid("host task group is not running"),
-      )
-      return
+  // An active environment runs the terminal in its container (local PTY in
+  // front of docker exec, or an SSH TTY in front of the same argv). Only the
+  // fixed docker argv is executed; no caller string is interpolated.
+  let task = match active_environment_for_workspace_root(state, workspace_id) {
+    Some(environment) => {
+      let identity = match environment_identity_of_record(environment) {
+        Ok(value) => value
+        Err(error) => {
+          workspace_io_error(state, sink, request, client_request_id, error)
+          return
+        }
+      }
+      let runner = match environment_runner_for_machine(state, environment.machine_id) {
+        Ok(value) => value
+        Err(error) => {
+          workspace_io_error(state, sink, request, client_request_id, error)
+          return
+        }
+      }
+      match state.group.val {
+        Some(group) =>
+          group.spawn(allow_failure=true, () => {
+            @environment.run_container_terminal(
+              runner,
+              identity,
+              command,
+              environment.workdir,
+              record.root,
+              rows.to_int(),
+              cols.to_int(),
+              input,
+              output,
+            )
+          })
+        None => {
+          workspace_io_error(
+            state,
+            sink,
+            request,
+            client_request_id,
+            workspace_invalid("host task group is not running"),
+          )
+          return
+        }
+      }
     }
+    None =>
+      match state.group.val {
+        Some(group) =>
+          group.spawn(allow_failure=true, () => {
+            provider.run_terminal(
+              session_id,
+              command,
+              rows.to_int(),
+              cols.to_int(),
+              input,
+              output,
+            )
+          })
+        None => {
+          workspace_io_error(
+            state,
+            sink,
+            request,
+            client_request_id,
+            workspace_invalid("host task group is not running"),
+          )
+          return
+        }
+      }
   }
   let session : TerminalSession = {
     id: session_id,
