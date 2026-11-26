@@ -198,6 +198,17 @@ async test "a real ed25519 signature over the canonical hash verifies" {
     Err(error) =>
       fail("stored recipe did not re-verify: " + error.to_string())
   }
+  // Canonical bytes omit the signature field, so reattaching the verified
+  // signature must produce the same structured recipe without changing the
+  // signed bytes.
+  match @recipes.parse_stored_recipe(canonical, TEST_KEY_ID, sig) {
+    Ok(stored) =>
+      if stored.identity() != "signed-app@2.0.0" {
+        fail("stored recipe identity changed")
+      }
+    Err(error) =>
+      fail("stored canonical recipe did not parse: " + error.to_string())
+  }
 }
 
 ///|

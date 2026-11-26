@@ -64,3 +64,99 @@ fn pad_number(value : Int64, width : Int) -> String {
   }
   padding + text
 }
+
+///|
+/// Parse the host's UTC RFC3339 form (`YYYY-MM-DDTHH:MM:SS[.mmm]Z`) back to
+/// Unix milliseconds. Approval expiry is a security boundary, so it must be
+/// compared numerically rather than by lexicographic string order (which
+/// would order `2026...` after `2030...`). Returns `None` for anything else.
+pub fn parse_rfc3339_ms(text : String) -> Int64? {
+  let with_millis = text.length() == 24 &&
+    text.get_char(19) == Some('.') &&
+    text.get_char(23) == Some('Z')
+  let without_millis = text.length() == 20 && text.get_char(19) == Some('Z')
+  if !with_millis && !without_millis {
+    return None
+  }
+  if text.get_char(4) != Some('-') || text.get_char(7) != Some('-') ||
+    text.get_char(10) != Some('T') || text.get_char(13) != Some(':') ||
+    text.get_char(16) != Some(':') {
+    return None
+  }
+  let year = match parse_digits(text, 0, 4) {
+    Some(value) => value
+    None => return None
+  }
+  let month = match parse_digits(text, 5, 7) {
+    Some(value) => value
+    None => return None
+  }
+  let day = match parse_digits(text, 8, 10) {
+    Some(value) => value
+    None => return None
+  }
+  let hour = match parse_digits(text, 11, 13) {
+    Some(value) => value
+    None => return None
+  }
+  let minute = match parse_digits(text, 14, 16) {
+    Some(value) => value
+    None => return None
+  }
+  let second = match parse_digits(text, 17, 19) {
+    Some(value) => value
+    None => return None
+  }
+  let millis = if with_millis {
+    match parse_digits(text, 20, 23) {
+      Some(value) => value
+      None => return None
+    }
+  } else {
+    0
+  }
+  if year < 1970 || month < 1 || month > 12 || day < 1 || day > 31 ||
+    hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 ||
+    second > 59 || millis < 0 || millis > 999 {
+    return None
+  }
+  let days = days_from_civil(
+    year.to_int64(),
+    month.to_int64(),
+    day.to_int64(),
+  )
+  let time_ms = (hour.to_int64() * 3_600L + minute.to_int64() * 60L +
+    second.to_int64()) * 1_000L + millis.to_int64()
+  Some(days * 86_400_000L + time_ms)
+}
+
+///|
+fn parse_digits(text : String, start : Int, end : Int) -> Int? {
+  let mut value = 0
+  let mut index = start
+  while index < end {
+    let ch = match text.get_char(index) {
+      Some(value) => value
+      None => return None
+    }
+    let code = ch.to_int()
+    if code < 48 || code > 57 {
+      return None
+    }
+    value = value * 10 + (code - 48)
+    index = index + 1
+  }
+  Some(value)
+}
+
+///|
+fn days_from_civil(year : Int64, month : Int64, day : Int64) -> Int64 {
+  let adjusted_year = if month <= 2L { year - 1L } else { year }
+  let era = adjusted_year / 400L
+  let year_of_era = adjusted_year - era * 400L
+  let shifted_month = if month > 2L { month - 3L } else { month + 9L }
+  let day_of_year = (153L * shifted_month + 2L) / 5L + day - 1L
+  let day_of_era = year_of_era * 365L + year_of_era / 4L -
+    year_of_era / 100L + day_of_year
+  era * 146_097L + day_of_era - 719_468L
+}

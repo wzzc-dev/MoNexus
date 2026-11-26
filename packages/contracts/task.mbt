@@ -357,6 +357,7 @@ pub(all) struct RunRecord {
   machine_id : String
   workspace_id : String
   worktree_id : String
+  environment_id : String
   session_id : String
   mode : String
   command : String
@@ -398,6 +399,7 @@ pub fn RunRecord::new(
   agent_command~ : String = "",
   agent_args~ : Array[String] = [],
   agent_env~ : Map[String, String] = Map([]),
+  environment_id~ : String = "",
 ) -> RunRecord {
   {
     id,
@@ -406,6 +408,7 @@ pub fn RunRecord::new(
     machine_id,
     workspace_id,
     worktree_id,
+    environment_id,
     session_id: "",
     mode,
     command,
@@ -441,6 +444,7 @@ pub fn RunRecord::to_json(self : RunRecord) -> @json.Json {
     ("machine_id", json_string(self.machine_id)),
     ("workspace_id", json_string(self.workspace_id)),
     ("worktree_id", json_string(self.worktree_id)),
+    ("environment_id", json_string(self.environment_id)),
     ("session_id", json_string(self.session_id)),
     ("mode", json_string(self.mode)),
     ("command", json_string(self.command)),
@@ -484,6 +488,7 @@ pub fn run_from_json(json : @json.Json) -> RunRecord? {
     machine_id: string_field_or(object, "machine_id", ""),
     workspace_id: string_field_or(object, "workspace_id", ""),
     worktree_id: string_field_or(object, "worktree_id", ""),
+    environment_id: string_field_or(object, "environment_id", ""),
     session_id: string_field_or(object, "session_id", ""),
     mode: string_field_or(object, "mode", RUN_MODE_COMMAND),
     command: string_field_or(object, "command", ""),

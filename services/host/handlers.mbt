@@ -126,6 +126,54 @@ async fn handle_request(
       state.mutex.release()
       handle_workspace_close(state, sink, request, client_request_id)
     }
+    @contracts.METHOD_ENVIRONMENT_CREATE => {
+      state.mutex.release()
+      handle_environment_create(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_ENVIRONMENT_START => {
+      state.mutex.release()
+      handle_environment_start(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_ENVIRONMENT_STOP => {
+      state.mutex.release()
+      handle_environment_stop(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_ENVIRONMENT_DESTROY => {
+      state.mutex.release()
+      handle_environment_destroy(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_ENVIRONMENT_EXEC => {
+      state.mutex.release()
+      handle_environment_exec(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_ENVIRONMENT_DOCTOR => {
+      state.mutex.release()
+      handle_environment_doctor(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_ENVIRONMENT_LIST => {
+      state.mutex.release()
+      handle_environment_list(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_ENVIRONMENT_GET => {
+      state.mutex.release()
+      handle_environment_get(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_RECIPE_IMPORT => {
+      state.mutex.release()
+      handle_recipe_import(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_RECIPE_LIST => {
+      state.mutex.release()
+      handle_recipe_list(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_RECIPE_SHOW => {
+      state.mutex.release()
+      handle_recipe_show(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_RECIPE_REVOKE => {
+      state.mutex.release()
+      handle_recipe_revoke(state, sink, request, client_request_id)
+    }
     @contracts.METHOD_WORKTREE_CREATE => {
       state.mutex.release()
       handle_worktree_create(state, sink, request, client_request_id)

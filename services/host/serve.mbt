@@ -207,6 +207,26 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
       return Err("cannot rebuild task projection: " + message)
     }
   }
+  // Environment / recipe projections replay from the same append-only log.
+  // Trust keys are owner configuration loaded from the trust file, never from
+  // events; they are mirrored into `recipe_trust` for inspection.
+  match store.reconcile_environment_projection() {
+    Ok(_) => ()
+    Err(message) => {
+      store.close()
+      lock.close()
+      return Err("cannot rebuild environment projection: " + message)
+    }
+  }
+  let trust = load_host_trust(options.state_dir)
+  persist_trust_rows(store, trust)
+  let verifier = @recipes.probe_verifier()
+  if !verifier.usable {
+    println(
+      "monexus-host: recipe verifier is not usable (" + verifier.detail +
+      "); recipe imports will be refused",
+    )
+  }
   let addr = @socket.Addr::parse(
     "127.0.0.1:" + options.port.to_string(),
   ) catch {
@@ -217,7 +237,7 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
     }
   }
   let server = @http.Server::Server(addr, reuse_addr=false)
-  let state = HostState::new(options, server.addr().port(), store)
+  let state = HostState::new(options, server.addr().port(), store, trust, verifier)
   if options.trigger_enabled {
     match state.store.reconcile_trigger_projection() {
       Ok(count) =>
@@ -313,6 +333,14 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
     // M6: settle or reattach every Run that survived a restart before any
     // client can observe a stale `running` status.
     reconcile_runs(state)
+    // A2.1: reconcile environments once at start, then every 60s. The scan is
+    // read-only and convergent; it never creates an environment.
+    reconcile_environments(state)
+    group.spawn_bg(
+      no_wait=true,
+      allow_failure=true,
+      async fn() { environment_reconcile_loop(state) },
+    )
     server.run_forever(allow_failure=true, max_connections=64) <|
     ((request, _body, conn) => {
       handle_connection(state, request, conn)

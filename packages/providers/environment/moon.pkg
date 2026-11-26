@@ -1,0 +1,17 @@
+import {
+  "monexus/contracts" @contracts,
+  "monexus/recipes" @recipes,
+  "monexus/providers/docker" @docker,
+  "monexus/providers/ssh" @ssh,
+  "monexus/providers/workspace" @workspace,
+  "moonbit-community/pty" @pty,
+  "moonbitlang/async",
+  "moonbitlang/async/aqueue",
+  "moonbitlang/async/fs",
+  "moonbitlang/async/process",
+  "moonbitlang/core/encoding/utf8" @utf8,
+  "moonbitlang/core/env",
+  "moonbitlang/core/string",
+}
+
+supported_targets = "native"
