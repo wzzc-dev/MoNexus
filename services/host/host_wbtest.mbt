@@ -43,7 +43,15 @@ async fn host_test_state(
     state_dir=state_dir,
     trigger_enabled=trigger_enabled,
   )
-  HostState::new(options, 0, store)
+  let verifier : @recipes.VerifierProbe = {
+    tool: "",
+    found: false,
+    version: "",
+    supports_signatures: false,
+    usable: false,
+    detail: "not probed in unit test",
+  }
+  HostState::new(options, 0, store, @recipes.TrustStore::empty(), verifier)
 }
 
 ///|
