@@ -257,6 +257,9 @@ pub(all) struct TaskRecord {
   cancel_reason : String
   created_at : String
   updated_at : String
+  /// Exact skill bindings for sessions created for this Task (ADR-0015 §4.1).
+  /// Empty Tasks keep their pre-A4 JSON byte-identical.
+  skills : Array[SkillBinding]
   /// Present only for Tasks created by a trigger (ADR-0014 §2.4). Ordinary
   /// Tasks keep `None`, so their events stay byte-identical to pre-A3 hosts.
   origin : TriggerOrigin?
@@ -274,6 +277,7 @@ pub fn TaskRecord::new(
   verify~ : Array[String],
   created_at~ : String,
   status~ : String = TASK_STATUS_DRAFT,
+  skills~ : Array[SkillBinding] = [],
   origin~ : TriggerOrigin? = None,
 ) -> TaskRecord {
   {
@@ -290,6 +294,7 @@ pub fn TaskRecord::new(
     cancel_reason: "",
     created_at,
     updated_at: created_at,
+    skills,
     origin,
   }
 }
@@ -311,6 +316,14 @@ pub fn TaskRecord::to_json(self : TaskRecord) -> @json.Json {
     ("created_at", json_string(self.created_at)),
     ("updated_at", json_string(self.updated_at)),
   ]
+  if self.skills.length() > 0 {
+    entries.push(
+      (
+        "skills",
+        json_array(self.skills.map(fn(binding) { binding.to_json() })),
+      ),
+    )
+  }
   match self.origin {
     Some(origin) => entries.push(("origin", origin.to_json()))
     None => ()
@@ -342,6 +355,10 @@ pub fn task_from_json(json : @json.Json) -> TaskRecord? {
     cancel_reason: string_field_or(object, "cancel_reason", ""),
     created_at: string_field_or(object, "created_at", ""),
     updated_at: string_field_or(object, "updated_at", ""),
+    skills: match object.get("skills") {
+      Some(value) => skill_bindings_from_json(value)
+      None => []
+    },
     origin: match object.get("origin") {
       Some(value) => trigger_origin_from_json(value)
       None => None

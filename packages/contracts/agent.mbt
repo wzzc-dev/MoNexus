@@ -360,6 +360,8 @@ pub(all) struct AgentSessionRecord {
   decisions : Int
   memory_injected : Bool
   memory_bytes : Int
+  /// Frozen skill snapshot for this session (metadata only; no bodies).
+  skill_snapshot : Array[SkillSnapshotEntry]
   artifacts : Array[String]
   started_at : String
   updated_at : String
@@ -396,6 +398,7 @@ pub fn AgentSessionRecord::new(
     decisions: 0,
     memory_injected: false,
     memory_bytes: 0,
+    skill_snapshot: [],
     artifacts: [],
     started_at,
     updated_at: started_at,
@@ -411,7 +414,7 @@ pub fn AgentSessionRecord::to_json(self : AgentSessionRecord) -> @json.Json {
   let artifacts = json_array(
     self.artifacts.map(fn(value) { json_string(value) }),
   )
-  json_object([
+  let entries : Array[(String, @json.Json)] = [
     ("id", json_string(self.id)),
     ("agent_id", json_string(self.agent_id)),
     ("mode", json_string(self.mode)),
@@ -437,7 +440,11 @@ pub fn AgentSessionRecord::to_json(self : AgentSessionRecord) -> @json.Json {
     ("started_at", json_string(self.started_at)),
     ("updated_at", json_string(self.updated_at)),
     ("ended_at", json_string(self.ended_at)),
-  ])
+  ]
+  if self.skill_snapshot.length() > 0 {
+    entries.push(("skill_snapshot", skill_snapshot_to_json(self.skill_snapshot)))
+  }
+  json_object(entries)
 }
 
 ///|
@@ -472,6 +479,10 @@ pub fn agent_session_from_json(json : @json.Json) -> AgentSessionRecord? {
     decisions: int_field_or(object, "decisions", 0),
     memory_injected: bool_field_or(object, "memory_injected", false),
     memory_bytes: int_field_or(object, "memory_bytes", 0),
+    skill_snapshot: match object.get("skill_snapshot") {
+      Some(value) => skill_snapshot_from_json(value)
+      None => []
+    },
     artifacts: string_array_field(object, "artifacts"),
     started_at: string_field_or(object, "started_at", ""),
     updated_at: string_field_or(object, "updated_at", ""),
@@ -917,8 +928,10 @@ pub fn agent_start_params(
   memory_limit : Int,
   env : Map[String, String],
   machine_id~ : String = "",
+  skills~ : Array[SkillBinding] = [],
+  task_id~ : String = "",
 ) -> Map[String, @json.Json] {
-  Map([
+  let params : Map[String, @json.Json] = Map([
     ("client_request_id", json_string(client_request_id)),
     ("agent_id", json_string(agent_id)),
     ("mode", json_string(mode)),
@@ -932,6 +945,18 @@ pub fn agent_start_params(
     ("memory_limit", json_int(memory_limit)),
     ("env", agent_env_json(env)),
   ])
+  if skills.length() > 0 {
+    params.set("skills", json_array(skills.map(fn(binding) { binding.to_json() })))
+  }
+  if task_id != "" {
+    params.set("task_id", json_string(task_id))
+  }
+  params
+}
+
+///|
+pub fn agent_task_id_param(params : Map[String, @json.Json]) -> String {
+  string_field_or(params, "task_id", "")
 }
 
 ///|

@@ -102,7 +102,7 @@ fn node_default_home() -> String {
 
 ///|
 pub fn node_capabilities() -> Array[String] {
-  ["exec", "fs", "pty", "git", "process"]
+  ["exec", "fs", "pty", "git", "process", "skill"]
 }
 
 ///|
@@ -150,6 +150,9 @@ pub struct NodeHost {
   /// Node-local bounded audit ring for policy decisions and snapshot
   /// installation. The primary remains the system of record.
   audit : @transport.AuditLog
+  /// Mirrored skill leases (A4.2). Persisted 0600 so a restarted node keeps
+  /// serving only unexpired mirrors; invocation fails closed without a lease.
+  skill_leases : Map[String, NodeSkillLease]
 }
 
 ///|
@@ -701,6 +704,14 @@ pub async fn NodeHost::open(
       return Err(message)
     }
   }
+  let skill_leases = match
+    load_node_skill_leases(state_dir + "/" + NODE_SKILL_LEASES_FILE_NAME) {
+    Ok(value) => value
+    Err(message) => {
+      executor.close()
+      return Err(message)
+    }
+  }
   Ok({
     runtime_id,
     state_dir,
@@ -717,6 +728,7 @@ pub async fn NodeHost::open(
     durable,
     nonces,
     audit,
+    skill_leases,
   })
 }
 

@@ -801,6 +801,7 @@ async fn run_agent_step(
     run.prompt,
     4096,
     run.agent_env,
+    task_id=run.task_id,
   )
   let request : @contracts.RpcRequest = {
     id: "run:" + run.id + ":agent-start",
@@ -1880,6 +1881,24 @@ async fn handle_task_create(
   )
   let agent_id = @contracts.string_field_or(request.params, "agent_id", "")
   let mut verify = @contracts.verify_list_param(request.params, "verify")
+  // Per-Task skill bindings are exact tuples declared by the owner (ADR-0015
+  // §4.1). They only affect sessions created for this Task; triggers build
+  // Tasks through `TaskRecord::new` and therefore cannot add or modify them.
+  let skills = match @contracts.skill_bindings_param(request.params) {
+    Some(value) => value
+    None => {
+      task_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        task_invalid(
+          "skills must be an array of exact name/version/content_hash/mode bindings",
+        ),
+      )
+      return
+    }
+  }
   state.mutex.acquire()
   if parent_id != "" {
     match state.store.get_task(parent_id) {
@@ -1950,6 +1969,7 @@ async fn handle_task_create(
     verify~,
     created_at=@contracts.format_rfc3339(now),
     status=requested_status,
+    skills~,
   )
   let appended = state.append_task_event(
     @contracts.EVENT_TASK_CREATED,
