@@ -1402,7 +1402,31 @@ if [ "$REAL_ACP_AVAILABLE" = "1" ]; then
           sleep 0.2
         done
         if [ "$REAL_TEXT" = "1" ]; then
-          pass E1 "a real ACP model turn ran through the runtime launcher"
+          # Evidence: keep the streamed reply and the turn's stop reason. The
+          # turn can still be open when the first text arrives, so wait
+          # briefly for a terminal state. The assertion above already passed
+          # on a non-empty stream and is unchanged.
+          REAL_STOP=""
+          for _i in $(seq 1 100); do
+            REAL_STOP="$(printf '%s' "$REAL_READ" | jq -r '.stop_reason // empty' 2>/dev/null)"
+            [ -n "$REAL_STOP" ] && break
+            sleep 0.2
+            REAL_READ="$(rpc_q "$MAIN_STATE" agent.read "$(jq -n --arg id "$REAL_SID" '{session_id:$id,cursor:0}')")"
+          done
+          REAL_REPLY="$(printf '%s' "$REAL_READ" | jq -r '.text // ""' 2>/dev/null)"
+          # The reply is model output, so it must not be able to carry the
+          # caller's token into the log or the results file. Shell
+          # substitution keeps the value out of any process argv.
+          REAL_READ_SAFE="$REAL_READ"
+          if [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+            REAL_REPLY="${REAL_REPLY//"$ANTHROPIC_AUTH_TOKEN"/[redacted]}"
+            REAL_STOP="${REAL_STOP//"$ANTHROPIC_AUTH_TOKEN"/[redacted]}"
+            REAL_READ_SAFE="${REAL_READ_SAFE//"$ANTHROPIC_AUTH_TOKEN"/[redacted]}"
+          fi
+          REAL_REPLY="$(printf '%s' "$REAL_REPLY" | tr '\n\t' '  ')"
+          printf '%s\n' "$REAL_READ_SAFE" >"$WORK/real-read.json"
+          printf '      E1 reply: %s (stop_reason=%s)\n' "$REAL_REPLY" "${REAL_STOP:-unknown}" >&2
+          pass E1 "a real ACP model turn ran through the runtime launcher" "stop_reason=${REAL_STOP:-unknown} reply=${REAL_REPLY}"
         else
           fail E1 "a real ACP model turn ran through the runtime launcher" "$REAL_READ"
         fi
@@ -1414,6 +1438,10 @@ if [ "$REAL_ACP_AVAILABLE" = "1" ]; then
       fail E1 "a real ACP model turn ran through the runtime launcher" "real node did not attach"
     fi
     stop_pid "$REAL_NODE_PID"
+    # Section D's "revoke leaves no credential" counts every runtime
+    # credential on the primary, so the real node's credential must be dropped
+    # here. Otherwise this opt-in machine would keep the count at one.
+    rpc_main runtime.revoke "$(jq -n --arg r "$REAL_RID" '{runtime_id:$r,reason:"harness"}')" >/dev/null 2>&1 || true
   else
     fail E1 "a real ACP model turn ran through the runtime launcher" "pair failed: $REAL_PAIR"
   fi
