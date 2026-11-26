@@ -226,6 +226,11 @@ async test "paired runtime runs high-risk work only under an owner Decision" {
       host_wait_for("policy reinstall", 10_000L, () => {
         ae_count(h.host.audit_text(), "policy.snapshot_installed") >= 2
       })
+      // The reconnect is a new authenticated session, and the primary clears
+      // its installed-policy record when the channel drops. Waiting only for
+      // the node-side install leaves the resumed exec racing the fresh ack,
+      // which the primary must record before it accepts mutating dispatch.
+      host_wait_policy_ack(h.state, h.runtime_id, 10_000L)
       let pending_second = h.machine.exec_start_approved(
         run_id="e2e-run-pending",
         client_request_id="e2e-pending-1",
