@@ -302,9 +302,21 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
       return Err("cannot reconcile agent sessions: " + message)
     }
   }
+  // A1.5: the paired runtime listener is part of the production host. It is
+  // opened before host.json so a bad certificate, key or policy file refuses
+  // startup instead of advertising a host with an unverifiable runtime plane.
+  match open_runtime_host(state, options) {
+    Ok(_) => ()
+    Err(message) => {
+      state.store.close()
+      lock.close()
+      return Err(message)
+    }
+  }
   match write_host_info(state) {
     Ok(_) => ()
     Err(message) => {
+      close_runtime_host(state)
       store.close()
       lock.close()
       return Err(message)
@@ -318,6 +330,26 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
       allow_failure=true,
       async fn() { heartbeat_loop(state) },
     )
+    if options.runtime_listen.trim() != "" {
+      // The accept loop is bounded by the server's close flag; the attach
+      // loop registers a RuntimeMachine and agent launcher only while a live
+      // paired channel exists. Neither is started when the listener is off.
+      group.spawn_bg(
+        no_wait=true,
+        allow_failure=true,
+        async fn() {
+          match state.runtime_server.val {
+            Some(server) => server.run()
+            None => ()
+          }
+        },
+      )
+      group.spawn_bg(
+        no_wait=true,
+        allow_failure=true,
+        async fn() { runtime_attach_loop(state) },
+      )
+    }
     if options.trigger_enabled {
       group.spawn_bg(
         no_wait=true,
@@ -356,6 +388,7 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
   // SIGINT/SIGTERM cancel the task group; the next start rewrites host.json
   // and the OS releases the flock when the process exits.
   remove_host_info(state)
+  close_runtime_host(state)
   server.close()
   state.store.close()
   lock.close()

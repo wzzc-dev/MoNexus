@@ -53,22 +53,73 @@ fn chunk_of(
 }
 
 ///|
+/// Map a primary workspace path to the node-rooted path the runtime accepts.
+///
+/// The primary and node do not share a filesystem. A workspace opened on the
+/// primary has a primary-side root (for example `/home/owner/project`), while
+/// the node executes under its own `--workspace` root with the same relative
+/// layout. `workspace_roots` are the primary-side roots the attach layer
+/// registered for this machine; an absolute cwd below one of them is passed
+/// as the relative suffix, and the node resolves it against its own root.
+///
+/// Relative cwds pass through unchanged (the node validates and contains
+/// them). An absolute cwd outside every mapped root is rejected: silently
+/// running in a different directory is worse than failing the start.
+pub fn runtime_agent_cwd(
+  cwd : String,
+  workspace_roots : Array[String],
+) -> Result[String, String] {
+  let trimmed = cwd.trim().to_owned()
+  if trimmed == "" || !trimmed.has_prefix("/") {
+    return Ok(trimmed)
+  }
+  // Normalize trailing slashes on both sides so `/ws/` and `/ws` match.
+  let normalized = if trimmed.length() > 1 && trimmed.has_suffix("/") {
+    let mut value = trimmed
+    while value.length() > 1 && value.has_suffix("/") {
+      value = value[:value.length() - 1].to_owned()
+    }
+    value
+  } else {
+    trimmed
+  }
+  for root in workspace_roots {
+    let mut base = root.trim().to_owned()
+    if base == "" || !base.has_prefix("/") {
+      continue
+    }
+    while base.length() > 1 && base.has_suffix("/") {
+      base = base[:base.length() - 1].to_owned()
+    }
+    if normalized == base {
+      return Ok("")
+    }
+    if normalized.has_prefix(base + "/") {
+      return Ok(normalized[base.length() + 1:].to_owned())
+    }
+  }
+  Err(
+    "runtime agent cwd is outside the workspace roots mapped to this machine",
+  )
+}
+
+///|
 /// Build the launcher the host registers for one paired runtime machine. When
 /// an `ApprovalContext` is supplied, `process.start` goes through the same
 /// Decision/approval-binding path as `exec.start`; without one the node still
 /// fails closed for a high-risk start, so no gate is bypassed.
+///
+/// `workspace_roots` are the primary-side workspace paths mapped to this
+/// runtime; see `runtime_agent_cwd`.
 pub fn runtime_agent_launcher(
   machine : @provider_runtime.RuntimeMachine,
   approval~ : @provider_runtime.ApprovalContext? = None,
+  workspace_roots~ : Array[String] = [],
 ) -> @agent.RemoteLauncher {
   @agent.RemoteLauncher::new(start=async fn(spec) {
-    if spec.cwd != "" && spec.cwd.has_prefix("/") {
-      // The runtime roots cwd under its own workspace; a primary absolute path
-      // is not meaningful on the node. A1.5 owns mapping workspace paths, so
-      // fail honestly instead of resolving to a different directory.
-      return Err(
-        "runtime agent cwd must be relative to the node workspace root",
-      )
+    let cwd = match runtime_agent_cwd(spec.cwd, workspace_roots) {
+      Ok(value) => value
+      Err(message) => return Err(message)
     }
     let now = @async.now()
     let run_id = @contracts.new_id("proc", now)
@@ -81,7 +132,7 @@ pub fn runtime_agent_launcher(
             run_id~,
             client_request_id~,
             argv=spec.argv,
-            cwd=spec.cwd,
+            cwd=cwd,
             inherit_env=allowlist,
             risk=spec.risk,
             approval=context,
@@ -95,7 +146,7 @@ pub fn runtime_agent_launcher(
             run_id~,
             client_request_id~,
             argv=spec.argv,
-            cwd=spec.cwd,
+            cwd=cwd,
             inherit_env=allowlist,
             risk=spec.risk,
           ) {

@@ -358,6 +358,46 @@ async fn handle_request(
       state.mutex.release()
       handle_trigger_rpc(state, sink, request, client_request_id)
     }
+    @contracts.METHOD_RUNTIME_PAIRING_CREATE => {
+      state.mutex.release()
+      handle_runtime_pairing_create(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_RUNTIME_REVOKE => {
+      state.mutex.release()
+      handle_runtime_revoke(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_RUNTIME_DRAIN => {
+      state.mutex.release()
+      handle_runtime_drain(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_RUNTIME_STATUS => {
+      state.mutex.release()
+      handle_runtime_status(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_RUNTIME_AUDIT => {
+      state.mutex.release()
+      handle_runtime_audit(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_MACHINE_EXEC => {
+      state.mutex.release()
+      handle_machine_exec(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_MACHINE_EXEC_STATUS => {
+      state.mutex.release()
+      handle_machine_exec_status(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_MACHINE_FS => {
+      state.mutex.release()
+      handle_machine_fs(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_MACHINE_PTY => {
+      state.mutex.release()
+      handle_machine_pty(state, sink, request, client_request_id)
+    }
+    @contracts.METHOD_MACHINE_GIT => {
+      state.mutex.release()
+      handle_machine_git(state, sink, request, client_request_id)
+    }
     _ => {
       let text = error_response_text(
         request.id,

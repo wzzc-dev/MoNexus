@@ -18,6 +18,44 @@ pub const METHOD_MACHINE_REMOVE : String = "machine.remove"
 pub const METHOD_MACHINE_LIST : String = "machine.list"
 
 ///|
+/// Paired-runtime operations exposed through the primary host. These drive the
+/// provider surface over the live pinned transport; they are the operator
+/// entry points for the two-machine acceptance path, not a second control
+/// protocol on the node.
+pub const METHOD_MACHINE_EXEC : String = "machine.exec"
+
+///|
+pub const METHOD_MACHINE_EXEC_STATUS : String = "machine.exec.status"
+
+///|
+pub const METHOD_MACHINE_FS : String = "machine.fs"
+
+///|
+pub const METHOD_MACHINE_PTY : String = "machine.pty"
+
+///|
+pub const METHOD_MACHINE_GIT : String = "machine.git"
+
+///|
+/// Primary-side runtime enrollment/operations. `runtime.pairing.create`
+/// returns the one-time plaintext code once; only its hash is persisted.
+pub const METHOD_RUNTIME_PAIRING_CREATE : String = "runtime.pairing.create"
+
+///|
+pub const METHOD_RUNTIME_REVOKE : String = "runtime.revoke"
+
+///|
+pub const METHOD_RUNTIME_DRAIN : String = "runtime.drain"
+
+///|
+pub const METHOD_RUNTIME_STATUS : String = "runtime.status"
+
+///|
+/// Bounded primary transport audit/log text for acceptance and diagnostics.
+/// Entries never contain pairing codes, tokens or argv values.
+pub const METHOD_RUNTIME_AUDIT : String = "runtime.audit"
+
+///|
 pub const EVENT_MACHINE_REGISTERED : String = "machine.registered"
 
 ///|
