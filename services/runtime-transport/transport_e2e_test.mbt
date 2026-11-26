@@ -3,13 +3,30 @@
 ///
 /// Every test generates a throwaway PKI with `openssl` inside an
 /// `@fs.tmpdir` directory (a CA, a server leaf with SAN localhost, and an
-/// unrelated CA/leaf used to exercise both pinning layers). Servers and
-/// clients are strictly sequential: the transport serializes server
-/// handshakes through one process-wide mutex, and these tests never overlap
-/// handshakes, so they do not reproduce the A1.0 spike's OpenSSL race.
+/// unrelated CA/leaf used to exercise both pinning layers). The transport
+/// serializes server handshakes through one process-wide mutex, so these
+/// tests hold `e2e_test_lock` while their server runs: isolation is a
+/// precondition of the suite, not something the test runner provides (it
+/// schedules up to ten test bodies at once in this process), and a test that
+/// shared the process with another test's handshake storm could exceed the
+/// server's handshake timeout through no fault of its own.
 ///
 /// The tests use only the public package API plus `@contracts`, `@json`,
 /// `@tls`, `@socket`, `@fs` and `@process`.
+
+///|
+/// Serializes the end-to-end tests in this process. The generated test driver
+/// schedules up to ten async test bodies at once; each end-to-end test runs a
+/// TLS server plus several clients, and every server handshake in the process
+/// shares one lock with a five-second timeout. Without this lock one test's
+/// deliberate reconnect storm (the heartbeat test opens a new connection
+/// every few hundred milliseconds) can starve another test's handshake until
+/// the server gives up on it, and the client then sees a closed connection
+/// mid-exchange. The assertions below all assume a server nobody else is
+/// touching, so the precondition is enforced here instead of being inferred
+/// from the runner's scheduling. This changes scheduling only; every
+/// assertion still runs.
+let e2e_test_lock : Lazy[@async.Mutex] = Lazy(() => @async.Mutex::Mutex())
 
 ///|
 struct E2ePki {
@@ -201,12 +218,91 @@ async fn e2e_request(
   let frame = match exchanged {
     None => fail("request timed out: " + id + " " + rpc_method)
     Some(Ok(value)) => value
-    Some(Err(message)) => fail(message)
+    Some(Err(message)) =>
+      fail("request " + id + " " + rpc_method + " failed: " + message)
   }
   match @contracts.parse_response(frame) {
     Ok(value) => value
     Err(message) => fail("invalid response frame: " + safe_detail(message))
   }
+}
+
+///|
+/// Read one response per request, in request order. Frames that are
+/// notifications are collected instead of being treated as responses: a
+/// draining primary emits `runtime.drain` after the next frame it handles,
+/// which can land between two pipelined responses.
+async fn e2e_collect_responses(
+  stream : TlsStream,
+  requests : Array[@contracts.RpcRequest],
+  responses : Array[@contracts.RpcResponse],
+  notifications : Array[@contracts.RpcNotification],
+) -> Result[Unit, String] {
+  let mut index = 0
+  while index < requests.length() {
+    let frame = stream.read() catch {
+      error => return Err("response read failed: " + safe_error(error))
+    }
+    if @contracts.is_notification(frame) {
+      let notification = match @contracts.parse_notification(frame) {
+        Ok(value) => value
+        Err(message) => {
+          return Err("invalid notification frame: " + safe_detail(message))
+        }
+      }
+      notifications.push(notification)
+      continue
+    }
+    let response = match @contracts.parse_response(frame) {
+      Ok(value) => value
+      Err(message) => {
+        return Err("invalid response frame: " + safe_detail(message))
+      }
+    }
+    let expected_id = requests[index].id
+    if response.id != expected_id {
+      return Err(
+        "response id mismatch: expected " +
+        expected_id +
+        ", got " +
+        response.id,
+      )
+    }
+    responses.push(response)
+    index = index + 1
+  }
+  Ok(())
+}
+
+///|
+/// Write every request before reading any response, then collect the
+/// responses. Pipelining matters when the server's authenticated idle budget
+/// is deliberately short: a request/response ping-pong whose next write waits
+/// on a descheduled client can exceed that budget, and a server that drops
+/// the connection mid-exchange surfaces as a TLS read failure on the client.
+/// Writing the whole batch up front keeps the server from ever waiting on the
+/// client. Returns the responses in request order plus every notification
+/// observed while reading them.
+async fn e2e_pipelined_requests(
+  stream : TlsStream,
+  requests : Array[@contracts.RpcRequest],
+) -> (Array[@contracts.RpcResponse], Array[@contracts.RpcNotification]) {
+  let responses : Array[@contracts.RpcResponse] = []
+  let notifications : Array[@contracts.RpcNotification] = []
+  let exchanged = @async.with_timeout_opt(10_000, () => {
+    for request in requests {
+      stream.write(request.to_json()) catch {
+        error => return Err("request write failed: " + safe_error(error))
+      }
+    }
+    e2e_collect_responses(stream, requests, responses, notifications)
+  })
+  match exchanged {
+    None => fail("pipelined request batch timed out")
+    Some(Ok(_)) => ()
+    Some(Err(message)) => fail("pipelined request batch failed: " + message)
+  }
+  (responses, notifications)
 }
 
 ///|
@@ -287,6 +383,10 @@ async fn e2e_with_primary(
   handlers : HandlerRegistry,
   body : async (PrimaryServer) -> Unit,
 ) -> Unit {
+  // One end-to-end test at a time per process; see `e2e_test_lock`.
+  let lock = e2e_test_lock.force()
+  lock.acquire()
+  defer lock.release()
   let tls = TlsServerConfig::new(
     bind_host="127.0.0.1",
     bind_port=0,
@@ -349,7 +449,7 @@ async test "pairing, JSON-RPC session, rotation and revocation over pinned TLS" 
       let client = e2e_client_config(pki, port, pki.leaf_sha)
       let secret = match state.create_pairing_code() {
         Ok(value) => value
-        Err(_) => fail("cannot create pairing code")
+        Err(message) => fail("cannot create pairing code: " + safe_detail(message))
       }
       // Pairing succeeds through the node client and persists a 0600 token.
       let token_path = pki.dir + "/node-token"
@@ -638,6 +738,20 @@ async fn e2e_wait_for(
 }
 
 ///|
+/// Render a node connect error for a test failure message. Discarding the
+/// error hides whether a pair failed in the TLS layer, the wire protocol or on
+/// the primary's own rejection path, which is exactly what a flaky run needs.
+fn e2e_node_error_text(error : NodeConnectError) -> String {
+  match error {
+    NodeRevoked => "runtime is revoked"
+    NodeUnauthorized => "runtime is unauthorized"
+    NodeUnsupportedVersion => "unsupported protocol version"
+    NodeTransport(message) => "transport error: " + safe_detail(message)
+    NodeProtocol(message) => "protocol error: " + safe_detail(message)
+  }
+}
+
+///|
 async test "pairing expiry and per-source pairing/auth rate limits over TLS" {
   let pki = e2e_make_pki()
   defer @fs.rmdir(pki.dir, recursive=true)
@@ -657,7 +771,7 @@ async test "pairing expiry and per-source pairing/auth rate limits over TLS" {
   })
   match (store.save)(snapshot) {
     Ok(_) => ()
-    Err(_) => fail("cannot seed state store")
+    Err(message) => fail("cannot seed state store: " + safe_detail(message))
   }
   e2e_with_primary(
     pki,
@@ -694,7 +808,7 @@ async test "pairing expiry and per-source pairing/auth rate limits over TLS" {
       }
       let valid = match state.create_pairing_code() {
         Ok(value) => value
-        Err(_) => fail("cannot create pairing code")
+        Err(message) => fail("cannot create pairing code: " + safe_detail(message))
       }
       let blocked_stream = e2e_connect(client)
       let blocked = e2e_request(
@@ -723,7 +837,7 @@ async test "pairing expiry and per-source pairing/auth rate limits over TLS" {
       let client = e2e_client_config(pki, port, pki.leaf_sha)
       let secret = match state.create_pairing_code() {
         Ok(value) => value
-        Err(_) => fail("cannot create pairing code")
+        Err(message) => fail("cannot create pairing code: " + safe_detail(message))
       }
       let credential = e2e_pair_raw(client, secret.code, "rt-auth")
       let wrong_token = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -759,8 +873,11 @@ async test "heartbeat timeout, reconnect with cursor resume and drain" {
   defer @fs.rmdir(pki.dir, recursive=true)
   let handlers = HandlerRegistry::new()
   // The server times out an authenticated connection after 100 ms of silence.
-  // The node heartbeats every 500 ms in the reconnect scenario, so the server
-  // deterministically drops each connection and the node reconnects.
+  // Hello hands the node that same 100 ms cadence (the node config's value is
+  // only a fallback). The node serves only after the hello response and
+  // quantizes its beats through a 20 ms poll, so an idle connection misses the
+  // deadline and is dropped; the node reconnects with backoff and resumes from
+  // its durable cursor.
   e2e_with_primary(
     pki,
     StateStore::memory(),
@@ -774,7 +891,7 @@ async test "heartbeat timeout, reconnect with cursor resume and drain" {
       let client = e2e_client_config(pki, port, pki.leaf_sha)
       let secret = match state.create_pairing_code() {
         Ok(value) => value
-        Err(_) => fail("cannot create pairing code")
+        Err(message) => fail("cannot create pairing code: " + safe_detail(message))
       }
       let silent_credential = e2e_pair_raw(client, secret.code, "rt-silent")
       let silent = e2e_send_hello(
@@ -798,7 +915,7 @@ async test "heartbeat timeout, reconnect with cursor resume and drain" {
       // Reconnect scenario with a durable outbox cursor.
       let secret2 = match state.create_pairing_code() {
         Ok(value) => value
-        Err(_) => fail("cannot create pairing code")
+        Err(message) => fail("cannot create pairing code: " + safe_detail(message))
       }
       let node_credential = e2e_pair_raw(client, secret2.code, "rt-node")
       let delivered : Ref[Int64] = Ref(0L)
@@ -863,27 +980,14 @@ async test "heartbeat timeout, reconnect with cursor resume and drain" {
           delivered.val == 3L && e2e_session_details(state).length() >= 2
         }, 15_000)
         assert_true(ready)
-        // Resume at the JSON level: hello with the durable cursor reports it
-        // back and no gap, because the primary stored the same cursor.
-        let resume_stream = e2e_connect(client)
-        let resume_hello = e2e_request(
-          resume_stream,
-          "h-resume",
-          METHOD_HELLO,
-          e2e_hello_params("rt-node", node_credential, PROTOCOL_VERSION, 3L),
-        )
-        let resume_object = e2e_result_object(resume_hello)
-        assert_eq(
-          @contracts.int64_field_or(resume_object, "resume_cursor", -1L),
-          3L,
-        )
-        assert_eq(
-          @contracts.bool_field_or(resume_object, "gap", true),
-          false,
-        )
-        let bye = e2e_request(resume_stream, "b-resume", METHOD_BYE, Map([]))
-        assert_true(bye.error is None)
-        resume_stream.close()
+        // Drain before probing resume at the JSON level. While the node is
+        // reconnecting, every reconnect opens a new session for `rt-node` and
+        // the primary closes the runtime's previous channel; a probe sharing
+        // the runtime would race that replacement, and the deliberate 100 ms
+        // idle budget can drop the probe's connection between its own hello
+        // and bye. Draining first stops the reconnect loop, so the probe owns
+        // the server. The node's Drained outcome is the end-to-end assertion
+        // that the notification reached it.
         server.drain()
         let done = e2e_wait_for(() => outcome.val is Some(_), 15_000)
         assert_true(done)
@@ -892,6 +996,38 @@ async test "heartbeat timeout, reconnect with cursor resume and drain" {
           Some(_) => assert_true(false)
           None => assert_true(false)
         }
+        // Resume on a fresh connection: hello with the durable cursor reports
+        // it back with no gap, because the primary stored the same cursor.
+        // Hello and bye are pipelined so the short authenticated idle budget
+        // cannot drop the connection between the two requests; the draining
+        // primary announces `runtime.drain` after the hello it handles, and
+        // the reader collects that notification instead of treating it as the
+        // bye's response.
+        let resume_stream = e2e_connect(client)
+        let hello_request = @contracts.RpcRequest::new(
+          "h-resume",
+          METHOD_HELLO,
+          e2e_hello_params("rt-node", node_credential, PROTOCOL_VERSION, 3L),
+        )
+        let bye_request = @contracts.RpcRequest::new(
+          "b-resume",
+          METHOD_BYE,
+          Map([]),
+        )
+        let probe = e2e_pipelined_requests(
+          resume_stream,
+          [hello_request, bye_request],
+        )
+        let resume_object = e2e_result_object(probe.0[0])
+        assert_eq(
+          @contracts.int64_field_or(resume_object, "resume_cursor", -1L),
+          3L,
+        )
+        assert_eq(@contracts.bool_field_or(resume_object, "gap", true), false)
+        assert_true(probe.0[1].error is None)
+        assert_eq(probe.1.length(), 1)
+        assert_eq(probe.1[0].method, METHOD_DRAIN)
+        resume_stream.close()
       })
       assert_eq(delivered.val, 3L)
       assert_eq(state.cursor_for("rt-node"), 3L)
@@ -935,11 +1071,11 @@ async test "fixed lifetime, re-pair revocation and file-backed state" {
   @fs.chmod(state_dir, 0o700) catch { _ => () }
   let store = match StateStore::open(state_dir) {
     Ok(value) => value
-    Err(_) => fail("cannot open state store")
+    Err(message) => fail("cannot open state store: " + safe_detail(message))
   }
   let policy = match CredentialPolicy::fixed(10_000L) {
     Ok(value) => value
-    Err(_) => fail("invalid credential policy")
+    Err(message) => fail("invalid credential policy: " + safe_detail(message))
   }
   let handlers = HandlerRegistry::new()
   e2e_with_primary(
@@ -970,12 +1106,13 @@ async test "fixed lifetime, re-pair revocation and file-backed state" {
       expired_stream.close()
       let secret1 = match state.create_pairing_code() {
         Ok(value) => value
-        Err(_) => fail("cannot create pairing code")
+        Err(message) => fail("cannot create pairing code: " + safe_detail(message))
       }
       let node = NodeConfig::new(runtime_id="rt-lifetime", tls=client)
       let grant1 = match pair_with_primary(node, secret1.code) {
         Ok(value) => value
-        Err(_) => fail("re-pair after expiry failed")
+        Err(error) =>
+          fail("re-pair after expiry failed: " + e2e_node_error_text(error))
       }
       assert_true(grant1.expires_at_ms is Some(_))
       let session1 = e2e_send_hello(
@@ -991,11 +1128,11 @@ async test "fixed lifetime, re-pair revocation and file-backed state" {
       // Pairing again for the same runtime revokes the previous credential.
       let secret2 = match state.create_pairing_code() {
         Ok(value) => value
-        Err(_) => fail("cannot create pairing code")
+        Err(message) => fail("cannot create pairing code: " + safe_detail(message))
       }
       let grant2 = match pair_with_primary(node, secret2.code) {
         Ok(value) => value
-        Err(_) => fail("second pairing failed")
+        Err(error) => fail("second pairing failed: " + e2e_node_error_text(error))
       }
       assert_true(grant2.credential != grant1.credential)
       assert_eq(grant2.generation, grant1.generation + 1)
@@ -1068,7 +1205,7 @@ async test "node stops on revocation and bounds reconnect attempts" {
       let client = e2e_client_config(pki, port, pki.leaf_sha)
       let secret = match state.create_pairing_code() {
         Ok(value) => value
-        Err(_) => fail("cannot create pairing code")
+        Err(message) => fail("cannot create pairing code: " + safe_detail(message))
       }
       let credential = e2e_pair_raw(client, secret.code, "rt-stop")
       let node = NodeConfig::new(
@@ -1093,10 +1230,23 @@ async test "node stops on revocation and bounds reconnect attempts" {
         group.spawn_bg(() => {
           outcome.val = Some(node_run(node, credential, OutboxPort::empty()))
         })
-        let connected = e2e_wait_for(() => state.session_count() > 0, 5_000)
+        // Wait for the server to attach the live channel, not just for the
+        // session record. Revoking an attached runtime drops and seals the
+        // channel (the documented behavior), so the primary's connection loop
+        // notices on its next 100 ms poll and closes the stream; the node then
+        // reconnects and stops on the rejected hello. Revoking before the
+        // attach instead leaves the connection open, and the node only learns
+        // from the error response to its next heartbeat — and hello makes the
+        // node adopt the primary's heartbeat interval (5 s here), which lands
+        // exactly on a 5 s deadline. That interleaving is a coin toss, not a
+        // property worth asserting.
+        let connected = e2e_wait_for(
+          () => state.channel_for("rt-stop") is Some(_),
+          5_000,
+        )
         assert_true(connected)
         let _ = state.revoke("rt-stop", "test")
-        let stopped = e2e_wait_for(() => outcome.val is Some(_), 5_000)
+        let stopped = e2e_wait_for(() => outcome.val is Some(_), 15_000)
         assert_true(stopped)
         match outcome.val {
           Some(NodeRunOutcome::Revoked) => assert_true(true)
