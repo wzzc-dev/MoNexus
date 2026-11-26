@@ -17,9 +17,10 @@ pub const GRANT_FORMAT : String = "monexus.approval.grant"
 pub const GRANT_FORMAT_VERSION : Int = 1
 
 ///|
-/// Hard lifetime ceiling. Grants are short-lived on purpose: a nonce is only
-/// remembered in memory, so a restart can only replay a grant that is still
-/// inside this window.
+/// Hard lifetime ceiling. Grants are short-lived on purpose. The node persists
+/// consumed nonces with their grant expiry, so a restart cannot replay a grant
+/// that was already used; the ceiling bounds how long the replay memory must
+/// be kept.
 pub const MAX_GRANT_TTL_MS : Int64 = 600_000L
 
 ///|
@@ -31,6 +32,10 @@ pub(all) struct ApprovalGrant {
   run_id : String
   command_digest : String
   policy_version : String
+  /// The exact snapshot hash the Decision was made under. Version text alone
+  /// is not unique; a same-version republish with different rules must not
+  /// validate an old grant.
+  policy_hash : String
   nonce : String
   issued_at_ms : Int64
   expires_at_ms : Int64
@@ -49,10 +54,16 @@ fn is_command_digest(text : String) -> Bool {
 }
 
 ///|
+fn is_policy_hash(text : String) -> Bool {
+  text.length() == 64 && is_hex64(text)
+}
+
+///|
 fn validate_grant_fields(
   run_id : String,
   command_digest : String,
   policy_version : String,
+  policy_hash : String,
   nonce : String,
   issued_at_ms : Int64,
   expires_at_ms : Int64,
@@ -68,6 +79,9 @@ fn validate_grant_fields(
   if policy_version == "" || policy_version.length() > 128 ||
     !is_token_text(policy_version) {
     return Some("approval grant policy version is invalid")
+  }
+  if !is_policy_hash(policy_hash) {
+    return Some("approval grant policy hash is invalid")
   }
   if nonce.length() < 16 || nonce.length() > 128 || !is_token_text(nonce) {
     return Some("approval grant nonce is invalid")
@@ -92,6 +106,7 @@ pub fn ApprovalGrant::new(
   run_id~ : String,
   command_digest~ : String,
   policy_version~ : String,
+  policy_hash~ : String,
   nonce~ : String,
   issued_at_ms~ : Int64,
   expires_at_ms~ : Int64,
@@ -102,6 +117,7 @@ pub fn ApprovalGrant::new(
     run_id,
     command_digest,
     policy_version,
+    policy_hash,
     nonce,
     issued_at_ms,
     expires_at_ms,
@@ -115,6 +131,7 @@ pub fn ApprovalGrant::new(
     run_id,
     command_digest,
     policy_version,
+    policy_hash,
     nonce,
     issued_at_ms,
     expires_at_ms,
@@ -133,6 +150,7 @@ pub fn ApprovalGrant::encode(self : ApprovalGrant) -> String {
   "\"format_version\":" + GRANT_FORMAT_VERSION.to_string() + "," +
   "\"issued_at_ms\":" + canonical_int64(self.issued_at_ms) + "," +
   "\"nonce\":" + canonical_quote(self.nonce) + "," +
+  "\"policy_hash\":" + canonical_quote(self.policy_hash) + "," +
   "\"policy_version\":" + canonical_quote(self.policy_version) + "," +
   "\"reason\":" + canonical_quote(self.reason) + "," +
   "\"run_id\":" + canonical_quote(self.run_id) + "}"
@@ -161,7 +179,8 @@ pub fn ApprovalGrant::decode(text : String) -> Result[ApprovalGrant, String] {
   }
   let allowed_keys : Array[String] = [
     "command_digest", "decision_id", "expires_at_ms", "format", "format_version",
-    "issued_at_ms", "nonce", "policy_version", "reason", "run_id",
+    "issued_at_ms", "nonce", "policy_hash", "policy_version", "reason",
+    "run_id",
   ]
   if object_has_unknown_keys(object, allowed_keys) {
     return Err("approval grant contains an unknown field")
@@ -192,6 +211,10 @@ pub fn ApprovalGrant::decode(text : String) -> Result[ApprovalGrant, String] {
     Ok(value) => value
     Err(_) => return Err("approval grant is missing policy_version")
   }
+  let policy_hash = match required_string(object, "policy_hash") {
+    Ok(value) => value
+    Err(_) => return Err("approval grant is missing policy_hash")
+  }
   let nonce = match required_string(object, "nonce") {
     Ok(value) => value
     Err(_) => return Err("approval grant is missing nonce")
@@ -216,6 +239,7 @@ pub fn ApprovalGrant::decode(text : String) -> Result[ApprovalGrant, String] {
     run_id~,
     command_digest~,
     policy_version~,
+    policy_hash~,
     nonce~,
     issued_at_ms~,
     expires_at_ms~,
@@ -229,15 +253,13 @@ pub fn ApprovalGrant::decode(text : String) -> Result[ApprovalGrant, String] {
 // ---------------------------------------------------------------------------
 
 ///|
-/// Bounded in-memory record of consumed grant nonces.
+/// Bounded record of consumed grant nonces.
 ///
-/// **Restart semantics:** entries live only in this process. A runtime restart
-/// forgets them; a grant that has not yet expired could therefore be presented
-/// again within its remaining lifetime. This is bounded by `MAX_GRANT_TTL_MS`
-/// (ten minutes) and by the exec layer's per-run idempotency key, which stops
-/// a second process from being started for the same run. Callers that need
-/// crash-safe single-use semantics should back this with a durable store in
-/// A1.3 without changing the grant format: the nonce is the idempotency key.
+/// **Restart semantics:** this struct itself is in-memory; the node host
+/// serializes it with `encode` before executing an approved request and
+/// restores it with `decode` on the next start, so a restart does not forget a
+/// consumed nonce. Persistence failure before execution is a refusal, not a
+/// reason to run unrecorded.
 ///
 /// Entries are pruned once their grant has expired, so the set only holds
 /// nonces that could still be replayed. When the capacity is reached, the
@@ -272,6 +294,17 @@ pub fn ConsumedNonces::contains(self : ConsumedNonces, nonce : String) -> Bool {
 ///|
 fn ConsumedNonces::prune(self : ConsumedNonces, now_ms : Int64) -> Unit {
   self.entries.retain(fn(_nonce, expires_at_ms) { expires_at_ms >= now_ms })
+}
+
+///|
+/// Drop entries whose grant can no longer be replayed (the grant expired).
+/// The node calls this after loading its durable nonce file and before it
+/// saves a new copy.
+pub fn ConsumedNonces::prune_expired(
+  self : ConsumedNonces,
+  now_ms : Int64,
+) -> Unit {
+  self.prune(now_ms)
 }
 
 ///|
@@ -311,6 +344,90 @@ fn ConsumedNonces::consume(
   true
 }
 
+///|
+/// Canonical encoding for the node's durable consumed-nonce file. The format
+/// is `{"entries":[[nonce,expires_at_ms],...]}`; entries are pruned by the
+/// caller before saving.
+pub fn ConsumedNonces::encode(self : ConsumedNonces) -> String {
+  let mut out = "{\"entries\":["
+  let mut first = true
+  for pair in self.entries.iter() {
+    let (nonce, expires_at_ms) = pair
+    if !first {
+      out = out + ","
+    }
+    out = out + "[" + canonical_quote(nonce) + "," +
+      canonical_int64(expires_at_ms) + "]"
+    first = false
+  }
+  out + "]}"
+}
+
+///|
+/// Decode a consumed-nonce file. Malformed entries, unknown keys and
+/// out-of-range expiries are rejected rather than silently dropped: a corrupt
+/// replay memory must fail closed, not forget a nonce that could be replayed.
+pub fn ConsumedNonces::decode(
+  text : String,
+  capacity? : Int = 1024,
+) -> Result[ConsumedNonces, String] {
+  let parsed = try {
+    @json.parse(text)
+  } catch {
+    _ => return Err("consumed nonce file is not valid JSON")
+  }
+  let object = match parsed {
+    @json.Json::Object(value) => value
+    _ => return Err("consumed nonce file is not an object")
+  }
+  for key in object.keys() {
+    if key != "entries" {
+      return Err("consumed nonce file contains an unknown field")
+    }
+  }
+  let items = match object.get("entries") {
+    Some(@json.Json::Array(value)) => value
+    _ => return Err("consumed nonce file is missing entries")
+  }
+  // Refuse an oversized file rather than evicting entries while loading: a
+  // forgotten nonce is a replay window, so a corrupt or oversized store must
+  // fail closed.
+  if items.length() > capacity.max(1) {
+    return Err("consumed nonce file has too many entries")
+  }
+  let consumed = ConsumedNonces::new(capacity~)
+  for item in items {
+    let pair = match item {
+      @json.Json::Array(value) => value
+      _ => return Err("consumed nonce entry is not an array")
+    }
+    if pair.length() != 2 {
+      return Err("consumed nonce entry has the wrong shape")
+    }
+    let nonce = match pair[0] {
+      @json.Json::String(value) => value
+      _ => return Err("consumed nonce entry has an invalid nonce")
+    }
+    if nonce.length() < 16 || nonce.length() > 128 || !is_token_text(nonce) {
+      return Err("consumed nonce entry has an invalid nonce")
+    }
+    let expires_at_ms = match pair[1] {
+      @json.Json::Number(value, ..) =>
+        if value < 0.0 || value > 10_000_000_000_000.0 ||
+          value != value.to_int64().to_double() {
+          return Err("consumed nonce entry has an invalid expiry")
+        } else {
+          value.to_int64()
+        }
+      _ => return Err("consumed nonce entry has an invalid expiry")
+    }
+    if !consumed.consume(nonce, expires_at_ms, 0L) {
+      return Err("consumed nonce file contains a duplicate nonce")
+    }
+  }
+  Ok(consumed)
+}
+
 // ---------------------------------------------------------------------------
 // Verification
 // ---------------------------------------------------------------------------
@@ -322,6 +439,7 @@ pub(all) enum GrantError {
   DigestMismatch
   PolicyUnavailable
   PolicyVersionMismatch
+  PolicyHashMismatch
   PolicyStale
   NotYetValid
   Expired
@@ -337,6 +455,7 @@ pub fn GrantError::label(self : GrantError) -> String {
     DigestMismatch => "digest_mismatch"
     PolicyUnavailable => "policy_unavailable"
     PolicyVersionMismatch => "policy_version_mismatch"
+    PolicyHashMismatch => "policy_hash_mismatch"
     PolicyStale => "policy_stale"
     NotYetValid => "not_yet_valid"
     Expired => "expired"
@@ -356,6 +475,8 @@ pub fn GrantError::message(self : GrantError) -> String {
     PolicyUnavailable => "no policy snapshot is available to verify the grant"
     PolicyVersionMismatch =>
       "approval grant names a different or unknown policy version"
+    PolicyHashMismatch =>
+      "approval grant names a different policy snapshot hash"
     PolicyStale => "approval grant's policy snapshot is stale"
     NotYetValid => "approval grant is not valid yet"
     Expired => "approval grant has expired"
@@ -370,6 +491,7 @@ fn grant_is_structurally_valid(grant : ApprovalGrant) -> Bool {
     grant.run_id,
     grant.command_digest,
     grant.policy_version,
+    grant.policy_hash,
     grant.nonce,
     grant.issued_at_ms,
     grant.expires_at_ms,
@@ -407,6 +529,9 @@ pub fn verify_grant(
   }
   if grant.policy_version != policy.version {
     return Err(PolicyVersionMismatch)
+  }
+  if grant.policy_hash != policy.content_hash {
+    return Err(PolicyHashMismatch)
   }
   if !policy.is_fresh(now_ms) {
     return Err(PolicyStale)

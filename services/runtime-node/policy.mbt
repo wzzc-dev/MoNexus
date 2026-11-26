@@ -1,34 +1,47 @@
 ///|
-/// Node-side policy gate (A1.2b injection point for A1.3b).
+/// Node-side policy gate (A1.3b).
 ///
 /// The node is an execution plane: it does not own org, task or approval
-/// state and cannot answer Decisions. It only applies the policy snapshot the
-/// primary gives it. Until A1.3b wires the snapshot, the gate fails closed:
-/// every mutating method (exec start/cancel, fs write, PTY open/input/resize/
-/// close, git branch/worktree mutations) is refused with `policy_stale`, while
-/// read-only methods keep working.
+/// state and cannot answer Decisions. It applies exactly the snapshot the
+/// primary publishes, verifies its pinned hash before installing it, and
+/// performs the same `@policy.evaluate` risk check the primary performs before
+/// it ever executes a mutating request.
 ///
-/// A snapshot is a JSON object:
+/// Modes:
 ///
-/// ```json
-/// { "workspace_roots": ["/abs/path"], "allow_all": false }
-/// ```
+/// - `snapshot` — a verified, typed `@policy.PolicySnapshot` is installed.
+///   Every mutating entry point is classified locally; the result must be
+///   `Allow` or carry a valid, one-time approval grant. A missing, stale or
+///   unverifiable policy rejects or holds high-risk work (it is never
+///   default-allowed), while low-risk read-only operations may proceed and
+///   are audited.
+/// - `override` — explicit operator trust (`--allow-workspace` or the legacy
+///   JSON root grant). It deliberately skips the org risk check for
+///   single-machine deployments and tests; it does not bypass the rooted
+///   workspace checks in the runtime core. This is the same behavior A1.2b
+///   shipped and is reported as `policy=override` by `runtime.probe`.
+/// - `fail_closed` — no snapshot and no operator override. Read-only methods
+///   keep working; every mutating method is refused with `policy_stale`.
 ///
-/// `workspace_roots` must contain the node's registered workspace root for
-/// mutating calls to be allowed. `allow_all=true` is an explicit operator
-/// override used by single-machine deployments and tests; it never bypasses
-/// the rooted-workspace check in the runtime core itself.
+/// The legacy JSON snapshot (`from_snapshot`) remains supported for callers
+/// that only need the workspace-root gate; it is an override, not an org
+/// policy.
 
 ///|
 pub(all) struct PolicyGate {
+  /// Legacy JSON root grant (`workspace_roots`, `allow_all`). Only used by the
+  /// override mode.
   snapshot : @json.Json?
   allow_all : Bool
   roots : Array[String]
+  /// Verified typed snapshot distributed by the primary. This is the only
+  /// source that enables the full risk check.
+  verified : @policy.PolicySnapshot?
 }
 
 ///|
 pub fn PolicyGate::fail_closed() -> PolicyGate {
-  { snapshot: None, allow_all: false, roots: [], }
+  { snapshot: None, allow_all: false, roots: [], verified: None }
 }
 
 ///|
@@ -44,12 +57,13 @@ pub fn PolicyGate::allow_workspace(workspace_root : String) -> PolicyGate {
     ),
     allow_all: false,
     roots: [workspace_root],
+    verified: None,
   }
 }
 
 ///|
-/// Install a policy snapshot. Malformed snapshots are rejected; callers must
-/// keep the previous gate or fail closed rather than half-applying one.
+/// Install a legacy JSON snapshot. Malformed snapshots are rejected; callers
+/// must keep the previous gate or fail closed rather than half-applying one.
 pub fn PolicyGate::from_snapshot(snapshot : @json.Json) -> Result[PolicyGate, String] {
   let object = match @contracts.as_object(snapshot) {
     Some(value) => value
@@ -79,22 +93,65 @@ pub fn PolicyGate::from_snapshot(snapshot : @json.Json) -> Result[PolicyGate, St
       }
     None => ()
   }
-  Ok({ snapshot: Some(snapshot), allow_all, roots })
+  Ok({
+    snapshot: Some(snapshot),
+    allow_all,
+    roots,
+    verified: None,
+  })
+}
+
+///|
+/// Install a verified, typed policy snapshot. The caller must have verified
+/// the pinned hash (`PolicyAnnouncement::verify`); a malformed snapshot can
+/// never reach this constructor.
+pub fn PolicyGate::from_policy_snapshot(
+  snapshot : @policy.PolicySnapshot,
+) -> PolicyGate {
+  { snapshot: None, allow_all: false, roots: [], verified: Some(snapshot) }
 }
 
 ///|
 pub fn PolicyGate::has_snapshot(self : PolicyGate) -> Bool {
-  self.snapshot is Some(_)
+  self.verified is Some(_) || self.snapshot is Some(_)
 }
 
 ///|
-/// Check one method. Read-only methods always pass; mutating methods need a
-/// snapshot that grants the node's workspace root (or `allow_all`).
+/// The typed snapshot, when the gate is in `snapshot` mode.
+pub fn PolicyGate::verified_snapshot(
+  self : PolicyGate,
+) -> @policy.PolicySnapshot? {
+  self.verified
+}
+
+///|
+/// Stable mode label for `runtime.probe`: `snapshot`, `override` or
+/// `fail_closed`.
+pub fn PolicyGate::mode(self : PolicyGate) -> String {
+  match self.verified {
+    Some(_) => "snapshot"
+    None =>
+      if self.allow_all || !self.roots.is_empty() {
+        "override"
+      } else {
+        "fail_closed"
+      }
+  }
+}
+
+///|
+/// Check one method's workspace-root eligibility. Read-only methods always
+/// pass; mutating methods need a verified snapshot (root containment is
+/// enforced by the runtime core and `ExecutionRequest::validate`), a legacy
+/// root grant for the node's workspace, or `allow_all`.
 pub fn PolicyGate::authorize(
   self : PolicyGate,
   rpc_method : String,
   workspace_root : String,
 ) -> Result[Unit, @contracts.RpcError] {
+  if self.verified is Some(_) {
+    return Ok(())
+  }
   if !@contracts.runtime_method_mutates(rpc_method) {
     return Ok(())
   }

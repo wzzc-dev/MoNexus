@@ -426,6 +426,7 @@ fn classify_builtin(request : ExecutionRequest) -> BuiltinClass {
   }
   match request.operation {
     FsDelete => return High("file deletion requires owner approval")
+    Control => return Low
     _ => ()
   }
   if request.operation.is_read_only() {

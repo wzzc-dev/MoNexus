@@ -12,6 +12,7 @@ fn grant_with(
   run_id? : String = "run_1",
   command_digest? : String = vector_request().digest(),
   policy_version? : String = "pol-1",
+  policy_hash? : String = test_snapshot().content_hash,
   nonce? : String = "nonce-0123456789abcdef",
   issued_at_ms? : Int64 = TEST_T0,
   expires_at_ms? : Int64 = TEST_T0 + 300_000L,
@@ -23,6 +24,7 @@ fn grant_with(
       run_id~,
       command_digest~,
       policy_version~,
+      policy_hash~,
       nonce~,
       issued_at_ms~,
       expires_at_ms~,
@@ -122,6 +124,37 @@ test "grant: wrong digest is rejected" {
 }
 
 ///|
+test "grant: a different policy snapshot hash is rejected" {
+  let grant = grant_with(
+    policy_hash="0000000000000000000000000000000000000000000000000000000000000000",
+  )
+  match
+    @policy.verify_grant(
+      grant,
+      "run_1",
+      vector_digest(),
+      Some(test_snapshot()),
+      TEST_T0,
+    ) {
+    Ok(_) => fail("grant naming another snapshot hash was accepted")
+    Err(error) => assert_eq(error.label(), "policy_hash_mismatch")
+  }
+}
+
+///|
+test "grant: decoding requires the policy snapshot hash" {
+  let grant = grant_with()
+  let broken = grant.encode().replace(
+    old="\"policy_hash\":\"" + test_snapshot().content_hash + "\",",
+    new="",
+  )
+  match @policy.ApprovalGrant::decode(broken) {
+    Ok(_) => fail("grant without a policy hash was accepted")
+    Err(reason) => assert_true(reason.contains("policy_hash"))
+  }
+}
+
+///|
 test "grant: unknown policy version is rejected" {
   let grant = grant_with(policy_version="pol-2")
   match
@@ -196,6 +229,7 @@ test "grant: lifetime beyond the maximum is rejected" {
       run_id="run_1",
       command_digest=vector_digest(),
       policy_version="pol-1",
+      policy_hash=test_snapshot().content_hash,
       nonce="nonce-0123456789abcdef",
       issued_at_ms=TEST_T0,
       expires_at_ms=TEST_T0 + 600_001L,
@@ -320,6 +354,7 @@ test "grant: errors and encodings do not echo the nonce" {
     @policy.GrantError::DigestMismatch,
     @policy.GrantError::PolicyUnavailable,
     @policy.GrantError::PolicyVersionMismatch,
+    @policy.GrantError::PolicyHashMismatch,
     @policy.GrantError::PolicyStale,
     @policy.GrantError::NotYetValid,
     @policy.GrantError::Expired,

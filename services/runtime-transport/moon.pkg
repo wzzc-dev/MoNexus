@@ -1,5 +1,6 @@
 import {
   "monexus/contracts",
+  "monexus/policy" @policy,
   "moonbitlang/async",
   "moonbitlang/async/aqueue",
   "moonbitlang/async/fs",

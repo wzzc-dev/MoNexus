@@ -264,6 +264,11 @@ pub struct NodeService {
   handlers : HandlerRegistry
   probe : async () -> @json.Json
   outbox : OutboxPort
+  /// A1.3b: install a policy announcement from the primary. The application
+  /// layer verifies the pinned hash, persists the snapshot and replaces its
+  /// gate. `Err` is reported back to the primary; the previous policy stays in
+  /// place, so an unverifiable update can never widen what the node allows.
+  install_policy : async (PolicyAnnouncement) -> Result[Unit, String]
 }
 
 ///|
@@ -271,8 +276,9 @@ pub fn NodeService::new(
   handlers~ : HandlerRegistry,
   probe~ : async () -> @json.Json,
   outbox~ : OutboxPort,
+  install_policy~ : async (PolicyAnnouncement) -> Result[Unit, String],
 ) -> NodeService {
-  { handlers, probe, outbox }
+  { handlers, probe, outbox, install_policy }
 }
 
 ///|
@@ -287,6 +293,7 @@ pub fn NodeService::empty(outbox : OutboxPort) -> NodeService {
         ("capabilities", @contracts.json_string_array([])),
       ]),
     outbox,
+    install_policy: async fn(_announcement) { Ok(()) },
   }
 }
 
@@ -336,6 +343,62 @@ async fn NodeWriter::respond_error(
 }
 
 ///|
+async fn node_send_policy_ack(
+  writer : NodeWriter,
+  version : String,
+  hash : String,
+  outcome : String,
+  reason : String,
+) -> Unit {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("version", @contracts.json_string(clamp_text(version, 128)))
+  params.set("hash", @contracts.json_string(clamp_text(hash, 64)))
+  params.set("outcome", @contracts.json_string(outcome))
+  params.set("reason", @contracts.json_string(safe_detail(reason)))
+  let notification = @contracts.RpcNotification::new(METHOD_POLICY_ACK, params)
+  let _ = writer.send(notification.to_json())
+}
+
+///|
+async fn node_install_policy(
+  writer : NodeWriter,
+  service : NodeService,
+  version : String,
+  hash : String,
+  announcement : Result[PolicyAnnouncement, String],
+) -> Unit {
+  match announcement {
+    Ok(value) =>
+      match (service.install_policy)(value) {
+        Ok(_) =>
+          node_send_policy_ack(
+            writer,
+            version,
+            hash,
+            POLICY_ACK_INSTALLED,
+            "",
+          )
+        Err(message) =>
+          node_send_policy_ack(
+            writer,
+            version,
+            hash,
+            POLICY_ACK_REJECTED,
+            message,
+          )
+      }
+    Err(message) =>
+      node_send_policy_ack(
+        writer,
+        version,
+        hash,
+        POLICY_ACK_REJECTED,
+        message,
+      )
+  }
+}
+
+///|
 /// One authenticated session on a live pinned TLS connection.
 pub struct NodeSession {
   stream : TlsStream
@@ -344,6 +407,10 @@ pub struct NodeSession {
   resume_cursor : Int64
   heartbeat_interval_ms : Int64
   gap : Bool
+  /// Policy snapshot carried by the hello result. It is installed before the
+  /// serve loop accepts application requests, so a reconnect never serves
+  /// under an older policy than the primary announced.
+  policy : PolicyAnnouncement?
 }
 
 ///|
@@ -440,6 +507,19 @@ pub async fn connect_session(
     }
   }
   let gap = @contracts.bool_field_or(object, "gap", false)
+  // A malformed announcement fails the connect rather than being ignored: an
+  // unverifiable policy must never be silently skipped.
+  let policy = match object.get("policy") {
+    Some(value) =>
+      match PolicyAnnouncement::from_json(value) {
+        Ok(announcement) => Some(announcement)
+        Err(message) => {
+          stream.close()
+          return Err(NodeProtocol("invalid policy announcement: " + message))
+        }
+      }
+    None => None
+  }
   let session : NodeSession = {
     stream,
     runtime_id,
@@ -447,6 +527,7 @@ pub async fn connect_session(
     resume_cursor,
     heartbeat_interval_ms,
     gap,
+    policy,
   }
   if gap {
     let params : Map[String, @json.Json] = Map([])
@@ -552,6 +633,19 @@ async fn[X] NodeSession::serve(
 ) -> SessionEnd {
   let writer = node_writer(self.stream)
   let dispatch_mutex = @async.Mutex::Mutex()
+  // Install the policy carried by hello before serving any application
+  // request, and acknowledge it so the primary can audit delivery.
+  match self.policy {
+    Some(announcement) =>
+      node_install_policy(
+        writer,
+        service,
+        announcement.version,
+        announcement.hash,
+        Ok(announcement),
+      )
+    None => ()
+  }
   let mut in_flight : OutboxEvent? = None
   let mut heartbeat_serial = 0
   let mut next_heartbeat = @async.now() + self.heartbeat_interval_ms
@@ -643,6 +737,27 @@ async fn[X] NodeSession::serve(
                   return SessionEnd::SessionDrained
                 } else if notification.method == METHOD_REPLAY_GAP {
                   ()
+                } else if notification.method == METHOD_POLICY_UPDATE {
+                  let version = @contracts.string_field_or(
+                    notification.params,
+                    "version",
+                    "",
+                  )
+                  let hash = @contracts.string_field_or(
+                    notification.params,
+                    "hash",
+                    "",
+                  )
+                  let announcement = PolicyAnnouncement::from_json(
+                    @json.Json::object(notification.params),
+                  )
+                  node_install_policy(
+                    writer,
+                    service,
+                    version,
+                    hash,
+                    announcement,
+                  )
                 } else {
                   ()
                 }

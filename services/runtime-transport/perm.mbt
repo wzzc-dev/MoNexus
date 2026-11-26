@@ -7,7 +7,7 @@
 /// a single `stat(2)` call; it touches no key material.
 
 ///|
-#borrow(path, out_mode, out_kind, out_uid, out_gid)
+#borrow(path, out_mode, out_kind, out_uid, out_gid, out_size)
 extern "C" fn stat_ffi(
   path : Bytes,
   path_len : Int32,
@@ -15,7 +15,20 @@ extern "C" fn stat_ffi(
   out_kind : Ref[Int32],
   out_uid : Ref[Int32],
   out_gid : Ref[Int32],
+  out_size : Ref[Int64],
 ) -> Int32 = "monexus_transport_stat"
+
+///|
+#borrow(path, out_mode, out_kind, out_uid, out_gid, out_size)
+extern "C" fn lstat_ffi(
+  path : Bytes,
+  path_len : Int32,
+  out_mode : Ref[Int32],
+  out_kind : Ref[Int32],
+  out_uid : Ref[Int32],
+  out_gid : Ref[Int32],
+  out_size : Ref[Int64],
+) -> Int32 = "monexus_transport_lstat"
 
 ///|
 pub(all) enum PathKind {
@@ -31,11 +44,11 @@ pub(all) struct PathStat {
   kind : PathKind
   uid : Int
   gid : Int
+  size : Int64
 }
 
 ///|
-/// `None` when the path does not exist or cannot be stat'ed.
-pub fn stat_path(path : String) -> PathStat? {
+fn read_path_stat(path : String, follow_symlink : Bool) -> PathStat? {
   let bytes = @utf8.encode(path)
   if bytes.length() > 4095 {
     return None
@@ -44,7 +57,13 @@ pub fn stat_path(path : String) -> PathStat? {
   let kind = Ref(0)
   let uid = Ref(0)
   let gid = Ref(0)
-  if stat_ffi(bytes, bytes.length(), mode, kind, uid, gid) != 0 {
+  let size : Ref[Int64] = Ref(0L)
+  let status = if follow_symlink {
+    stat_ffi(bytes, bytes.length(), mode, kind, uid, gid, size)
+  } else {
+    lstat_ffi(bytes, bytes.length(), mode, kind, uid, gid, size)
+  }
+  if status != 0 {
     return None
   }
   Some({
@@ -57,7 +76,22 @@ pub fn stat_path(path : String) -> PathStat? {
     },
     uid: uid.val.to_int(),
     gid: gid.val.to_int(),
+    size: size.val,
   })
+}
+
+///|
+/// `None` when the path does not exist or cannot be stat'ed. Follows a final
+/// symlink; use `lstat_path` when the final component itself must be checked.
+pub fn stat_path(path : String) -> PathStat? {
+  read_path_stat(path, true)
+}
+
+///|
+/// Like `stat_path`, but does not follow a final symlink. A symlink is
+/// reported as `SymLink` and cannot masquerade as a regular 0600 state file.
+pub fn lstat_path(path : String) -> PathStat? {
+  read_path_stat(path, false)
 }
 
 ///|

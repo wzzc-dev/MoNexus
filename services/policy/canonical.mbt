@@ -83,3 +83,20 @@ pub fn canonical_string_array(values : Array[String]) -> String {
   }
   out + "]"
 }
+
+///|
+/// Emit a JSON array of `[name, value]` pairs in the given order. The digest
+/// caller sorts and de-duplicates first; values are hashed, never logged.
+pub fn canonical_pairs(pairs : Array[(String, String)]) -> String {
+  let mut out = "["
+  let mut index = 0
+  while index < pairs.length() {
+    if index > 0 {
+      out = out + ","
+    }
+    out = out + "[" + canonical_quote(pairs[index].0) + "," +
+      canonical_quote(pairs[index].1) + "]"
+    index = index + 1
+  }
+  out + "]"
+}

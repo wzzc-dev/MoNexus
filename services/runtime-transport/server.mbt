@@ -367,7 +367,11 @@ async fn PrimaryServer::handle_connection(
     while true {
       match channel_ref.val {
         Some(active) =>
-          if active.is_closed() {
+          // A sealed channel was dropped by revocation, credential rotation or
+          // an explicit test drop. Its outstanding requests already failed and
+          // `channel_for` no longer returns it, so the connection must stop
+          // now; otherwise the node would only notice on heartbeat timeout.
+          if active.is_sealed() {
             break
           }
         None => ()
@@ -750,7 +754,7 @@ async fn PrimaryServer::handle_hello(
       }
     }
   }
-  let result = @contracts.json_object([
+  let entries : Array[(String, @json.Json)] = [
     ("runtime_id", @contracts.json_string(grant.runtime_id)),
     ("session_id", @contracts.json_string(grant.session_id)),
     ("session_credential_id", @contracts.json_string(grant.credential_id)),
@@ -768,7 +772,14 @@ async fn PrimaryServer::handle_hello(
     ("gap", @contracts.json_bool(grant.gap)),
     ("server_time_ms", @contracts.json_int64((self.state.now)())),
     ("draining", @contracts.json_bool(self.state.is_draining())),
-  ])
+  ]
+  // A1.3b: the current policy snapshot travels with the hello result, so the
+  // node always has the primary's latest version after a reconnect.
+  match self.state.policy_announcement() {
+    Some(announcement) => entries.push(("policy", announcement.to_json()))
+    None => ()
+  }
+  let result = @contracts.json_object(entries)
   let response = rpc_result_response(id, result)
   if !self.send_frame(channel, stream, response.to_json()) {
     return {
@@ -1084,6 +1095,57 @@ async fn PrimaryServer::handle_notification(
       drain_sent,
       close: true,
     }
+  } else if method == METHOD_POLICY_ACK {
+    let version = @contracts.string_field_or(
+      notification.params,
+      "version",
+      "",
+    )
+    let hash = @contracts.string_field_or(notification.params, "hash", "")
+    let outcome = @contracts.string_field_or(
+      notification.params,
+      "outcome",
+      POLICY_ACK_REJECTED,
+    )
+    let reason = @contracts.string_field_or(
+      notification.params,
+      "reason",
+      "",
+    )
+    let accepted = outcome == POLICY_ACK_INSTALLED &&
+      self.state.policy_ack_matches(version, hash)
+    // Only an ack naming the current publication changes installed-state.
+    // The provider refuses mutating dispatch and grant minting until the
+    // runtime has acked exactly this version and hash.
+    if self.state.policy_ack_matches(version, hash) {
+      self.state.record_policy_ack(
+        session.runtime_id,
+        version,
+        hash,
+        accepted,
+      )
+    }
+    self.state.audit.record(
+      if accepted {
+        "policy.version_acked"
+      } else {
+        "policy.version_rejected"
+      },
+      session.runtime_id,
+      if accepted {
+        "ok"
+      } else {
+        "rejected"
+      },
+      "version=" +
+      clamp_text(version, 128) +
+      " hash=" +
+      clamp_text(hash, 64) +
+      " reason=" +
+      safe_detail(reason),
+      (self.state.now)(),
+    )
+    outcome_continue(session_id, drain_sent)
   } else {
     self.state.log_line("unknown notification: " + clamp_text(method, 64))
     outcome_continue(session_id, drain_sent)

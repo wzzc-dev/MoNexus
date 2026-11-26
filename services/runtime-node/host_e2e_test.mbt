@@ -160,6 +160,47 @@ fn host_audit_count(state : @transport.PrimaryState, action : String) -> Int {
 }
 
 ///|
+/// A permissive scenario policy: read-only work and the mutating operations
+/// these transport tests exercise are explicitly allowed, so the scenarios
+/// drive the paired path rather than the approval path (approval decisions are
+/// covered by `approval_e2e_test.mbt`).
+fn host_snapshot(version : String) -> @policy.PolicySnapshot {
+  let now = @async.now()
+  let rules = @policy.PolicyRules::new(
+    allow_read_only=true,
+    allowed_operations=["exec", "fs.write", "pty", "git.write"],
+    env_allowlist=["HOME", "LANG", "PATH"],
+  )
+  match
+    @policy.PolicySnapshot::new(
+      version~,
+      issued_at_ms=now - 1_000L,
+      expires_at_ms=now + 3_600_000L,
+      rules~,
+    ) {
+    Ok(value) => value
+    Err(message) => abort("cannot build the scenario policy: " + message)
+  }
+}
+
+///|
+/// Wait until the primary has recorded the node's ack for the current
+/// publication. Mutating calls are refused until this happens.
+async fn host_wait_policy_ack(
+  state : @transport.PrimaryState,
+  runtime_id : String,
+  timeout_ms : Int64,
+) -> Unit {
+  let announcement = match state.policy_announcement() {
+    Some(value) => value
+    None => abort("no policy is published")
+  }
+  host_wait_for("policy ack", timeout_ms, () => {
+    state.policy_installed(runtime_id, announcement.version, announcement.hash)
+  })
+}
+
+///|
 /// Run one scenario: PKI, primary server, paired node host and a live
 /// provider channel. `body` runs while the session is connected; afterwards
 /// the primary drains so `node_serve` stops cleanly.
@@ -178,10 +219,6 @@ async fn host_run_scenario(
   defer @fs.rmdir(pki.dir, recursive=true)
   let base = @fs.tmpdir(prefix=prefix)
   defer @fs.rmdir(base, recursive=true)
-  let workspace = base + "/workspace"
-  @fs.mkdir(workspace, permission=0o700, recursive=true, allow_exist=false) catch {
-    _ => fail("cannot create the test workspace")
-  }
   let handlers = @transport.HandlerRegistry::new()
   let tls = @transport.TlsServerConfig::new(
     bind_host="127.0.0.1",
@@ -214,13 +251,15 @@ async fn host_run_scenario(
       NodeHost::open(
         runtime_id,
         state_base=base,
-        workspace_root=workspace,
-        policy=Some(PolicyGate::allow_workspace(workspace)),
+        workspace_root="",
+        policy=None,
         pty_limits~,
       ) {
       Ok(value) => value
       Err(message) => fail("cannot open the node host: " + message)
     }
+    // The node, its executor, PTY and git all share the runtime work root.
+    let workspace = host.workspace_root()
     let state = server.primary_state()
     let secret = match state.create_pairing_code() {
       Ok(value) => value
@@ -253,6 +292,21 @@ async fn host_run_scenario(
     })
     let machine = @provider_runtime.RuntimeMachine::new(state, runtime_id)
     host_wait_for("runtime session", 10_000L, () => machine.is_connected())
+    // Publish the scenario policy and wait for install plus the primary-side
+    // ack: a mutating call is refused until the runtime has acknowledged the
+    // current publication.
+    let scenario_policy = host_snapshot("pol-scenario")
+    match state.publish_policy(scenario_policy) {
+      Ok(_) => ()
+      Err(message) => fail("cannot publish the scenario policy: " + message)
+    }
+    host_wait_for("scenario policy install", 10_000L, () => {
+      match host.policy().verified_snapshot() {
+        Some(value) => value.version == scenario_policy.version
+        None => false
+      }
+    })
+    host_wait_policy_ack(state, runtime_id, 10_000L)
     let harness : NodeHarness = {
       host,
       machine,
@@ -303,7 +357,13 @@ async test "node host pairs, serves, probes, runs fs and fails closed" {
       assert_true(probe.capabilities.contains("pty"))
       assert_true(probe.capabilities.contains("git"))
       assert_eq(probe.workspace_roots, [h.host.workspace_root()])
+      let installed_policy = match h.host.policy().verified_snapshot() {
+        Some(value) => value
+        None => fail("the scenario policy is not installed")
+      }
       assert_eq(probe.policy, "snapshot")
+      assert_eq(probe.policy_version, installed_policy.version)
+      assert_eq(probe.policy_hash, installed_policy.content_hash)
       assert_true(probe.os != "")
       let profile = probe.machine_profile()
       assert_eq(profile.max_parallel, 1)
@@ -416,16 +476,20 @@ async test "exec runs, refuses duplicates and replays across reconnect" {
       let tracker = @provider_runtime.RunTracker::new(h.runtime_id)
       let run_id = "run-exec-1"
       let client_request_id = "exec-1"
+      // Script files keep the argv out of the built-in high-risk shell
+      // pattern: `sh -c` requires an owner approval, `sh <script>` does not.
+      host_sh(
+        h.workspace,
+        "printf 'sleep 1.2; echo out; echo err 1>&2; exit 0\\n' > exec1.sh\n" +
+        "printf 'touch dup-marker.txt\\n' > dup.sh\n" +
+        "printf 'sleep 30\\n' > cancel.sh\n",
+      )
       tracker.begin(run_id, "exec", client_request_id)
       let (started, existing) = match
         h.machine.exec_start(
           run_id~,
           client_request_id~,
-          argv=[
-            "/bin/sh",
-            "-c",
-            "sleep 1.2; echo out; echo err 1>&2; exit 0",
-          ],
+          argv=["/bin/sh", "exec1.sh"],
         ) {
         Ok(value) => value
         Err(error) => fail("exec start failed: " + error.message)
@@ -438,7 +502,7 @@ async test "exec runs, refuses duplicates and replays across reconnect" {
         h.machine.exec_start(
           run_id~,
           client_request_id~,
-          argv=["/bin/sh", "-c", "touch dup-marker.txt"],
+          argv=["/bin/sh", "dup.sh"],
         ) {
         Ok(value) => value
         Err(error) => fail("duplicate exec start failed: " + error.message)
@@ -479,6 +543,9 @@ async test "exec runs, refuses duplicates and replays across reconnect" {
       assert_eq(settled.phase.text(), "succeeded")
       assert_eq(settled.exit_code, Some(0))
       assert_true(h.machine.is_connected())
+      // The reconnect is a new authenticated session; the primary clears its
+      // installed-policy record and the node re-acks the current snapshot.
+      host_wait_policy_ack(h.state, h.runtime_id, 10_000L)
       // Reconnect happened: at least two authenticated sessions were opened.
       assert_true(host_audit_count(h.state, "runtime.session_opened") >= 2)
       // Replaying the accepted tap settles nothing twice: no new events, no
@@ -519,7 +586,7 @@ async test "exec runs, refuses duplicates and replays across reconnect" {
         h.machine.exec_start(
           run_id="run-exec-2",
           client_request_id="exec-2",
-          argv=["/bin/sh", "-c", "sleep 30"],
+          argv=["/bin/sh", "cancel.sh"],
         ) {
         Ok(value) => value
         Err(error) => fail("cancel test start failed: " + error.message)
@@ -586,16 +653,19 @@ async test "pty sessions and git methods run through the paired transport" {
       )
       let tracker = @provider_runtime.RunTracker::new(h.runtime_id)
       let session_id = "sess-1"
+      // Script files avoid the `sh -c` high-risk pattern, which would require
+      // an owner approval on this scenario's policy.
+      host_sh(
+        h.workspace,
+        "printf 'sleep 0.4\\nseq 1 200\\n' > pty.sh\n" +
+        "printf 'echo should-not-run\\n' > dup-pty.sh\n",
+      )
       tracker.begin(session_id, "pty", "pty-1")
       let (session, existing) = match
         h.machine.pty_open(
           session_id~,
           client_request_id="pty-1",
-          argv=[
-            "/bin/sh",
-            "-c",
-            "sleep 0.4; i=0; while [ $i -lt 200 ]; do printf 'chunk-%03d-abcdefghijklmnopqrstuvwxyz\\n' $i; i=$((i+1)); done",
-          ],
+          argv=["/bin/sh", "pty.sh"],
           rows=24,
           cols=80,
           workspace_root=h.host.workspace_root(),
@@ -610,7 +680,7 @@ async test "pty sessions and git methods run through the paired transport" {
         h.machine.pty_open(
           session_id~,
           client_request_id="pty-1",
-          argv=["/bin/sh", "-c", "echo should-not-run"],
+          argv=["/bin/sh", "dup-pty.sh"],
           workspace_root=h.host.workspace_root(),
         ) {
         Ok(value) => value

@@ -127,6 +127,25 @@ pub struct PrimaryState {
   /// observe run progress without a second durable store. The outbox remains
   /// the node's only durable log.
   recent_events : Array[(String, WireEvent)]
+  /// The current policy snapshot announcement (A1.3b). The primary is the only
+  /// authority for policy: it publishes the snapshot to every live node and
+  /// repeats it in the `runtime.hello` result so a reconnect always receives
+  /// the current version. Not durable; the host re-publishes after restart.
+  policy_publication : Ref[PolicyAnnouncement?]
+  /// The snapshot a runtime last acknowledged installing, per live session.
+  /// Cleared on attach and on publish, so a mutation is only sent after the
+  /// node has acked the current publication. This is the delivery enforcement
+  /// that stops a node which rejected an update (or sits in override mode)
+  /// from silently executing under an older policy.
+  installed_policies : Map[String, InstalledPolicy]
+}
+
+///|
+/// What one runtime acknowledged installing: the announcement version and its
+/// content hash. Written only when the ack names the current publication.
+pub(all) struct InstalledPolicy {
+  version : String
+  hash : String
 }
 
 ///|
@@ -172,6 +191,8 @@ pub async fn PrimaryState::open_with_clock(
     draining: Ref(false),
     channels: Map([]),
     recent_events: [],
+    policy_publication: Ref(None),
+    installed_policies: Map([]),
   }
   match snapshot {
     Some(value) => {
@@ -1101,6 +1122,11 @@ pub fn PrimaryState::attach_channel(
     None => ()
   }
   self.channels.set(runtime_id, channel)
+  // A new session must re-ack the current publication before the primary
+  // sends it any mutation, even if the previous session had acked it: the
+  // node may have restarted without the persisted snapshot (or failed to
+  // install it), and the ack is cheap.
+  self.installed_policies.remove(runtime_id)
 }
 
 ///|
@@ -1145,6 +1171,7 @@ pub fn PrimaryState::drop_channel(
   match self.channels.get(runtime_id) {
     Some(channel) => {
       self.channels.remove(runtime_id)
+      self.installed_policies.remove(runtime_id)
       channel.seal()
       self.audit.record(
         "runtime.channel_closed",
@@ -1161,6 +1188,175 @@ pub fn PrimaryState::drop_channel(
 ///|
 pub fn PrimaryState::channel_count(self : PrimaryState) -> Int {
   self.channels.length()
+}
+
+// ---------------------------------------------------------------------------
+// Policy snapshot distribution (A1.3b)
+// ---------------------------------------------------------------------------
+
+///|
+/// The currently published policy announcement, if any. `runtime.hello`
+/// repeats it on every connect so a node that was offline catches up.
+pub fn PrimaryState::policy_announcement(
+  self : PrimaryState,
+) -> PolicyAnnouncement? {
+  self.policy_publication.val
+}
+
+///|
+/// Publish (or replace) the policy snapshot. The announcement is remembered
+/// for future hellos and pushed to every live channel as
+/// `runtime.policy.update`. A node that cannot receive it keeps its previous
+/// snapshot and fails closed for operations the stale snapshot cannot verify.
+///
+/// Publishing clears every runtime's installed acknowledgement and drops the
+/// current publication's ack state: the primary then refuses mutating
+/// dispatch until each node acks the new publication. Approval grants are
+/// invalidated on two independent paths: the node verifies the grant's
+/// `policy_version` and `policy_hash` against the snapshot it installed, and
+/// the primary provider compares a pending binding's hash with the current
+/// publication before minting and purges pending entries whose hash no longer
+/// matches. A grant minted under the old publication therefore never reaches
+/// a node as a success.
+pub async fn PrimaryState::publish_policy(
+  self : PrimaryState,
+  snapshot : @policy.PolicySnapshot,
+) -> Result[PolicyAnnouncement, String] {
+  let announcement = match PolicyAnnouncement::from_snapshot(snapshot) {
+    Ok(value) => value
+    Err(message) => return Err(message)
+  }
+  self.policy_publication.val = Some(announcement)
+  // Every live runtime must acknowledge this publication before the primary
+  // sends it another mutation or mints a grant for it.
+  let stale_acks = self.installed_policies.length()
+  self.installed_policies.clear()
+  let now_ms = (self.now)()
+  self.audit.record(
+    "policy.version_published",
+    "",
+    "ok",
+    "version=" +
+    clamp_text(announcement.version, 128) +
+    " hash=" +
+    announcement.hash +
+    " expires_at_ms=" +
+    snapshot.expires_at_ms.to_string() +
+    " cleared_acks=" +
+    stale_acks.to_string(),
+    now_ms,
+  )
+  let channels : Array[SessionChannel] = []
+  for _runtime_id, channel in self.channels {
+    channels.push(channel)
+  }
+  let mut delivered = 0
+  let mut failed = 0
+  for channel in channels {
+    match channel.notify(METHOD_POLICY_UPDATE, announcement.to_params()) {
+      Ok(_) => delivered = delivered + 1
+      Err(_) => failed = failed + 1
+    }
+  }
+  self.audit.record(
+    "policy.version_delivered",
+    "",
+    if failed > 0 {
+      "partial"
+    } else {
+      "ok"
+    },
+    "version=" +
+    clamp_text(announcement.version, 128) +
+    " delivered=" +
+    delivered.to_string() +
+    " failed=" +
+    failed.to_string(),
+    now_ms,
+  )
+  Ok(announcement)
+}
+
+///|
+/// Whether an acknowledgement names the currently published snapshot. An ack
+/// for an older version means the node missed an update (or acknowledged a
+/// stale one) and is audited as rejected rather than silently accepted.
+pub fn PrimaryState::policy_ack_matches(
+  self : PrimaryState,
+  version : String,
+  hash : String,
+) -> Bool {
+  match self.policy_publication.val {
+    Some(announcement) =>
+      announcement.version == version && announcement.hash == hash
+    None => false
+  }
+}
+
+///|
+/// Record what a runtime acknowledged installing. Only an ack naming the
+/// current publication changes the record: `installed=true` marks the runtime
+/// ready for mutating dispatch; `installed=false` (the node rejected the
+/// current publication) clears readiness. An ack for any other announcement is
+/// ignored here because it says nothing about the current publication.
+pub fn PrimaryState::record_policy_ack(
+  self : PrimaryState,
+  runtime_id : String,
+  version : String,
+  hash : String,
+  installed : Bool,
+) -> Unit {
+  if !self.policy_ack_matches(version, hash) {
+    return
+  }
+  if installed {
+    self.installed_policies.set(runtime_id, { version, hash })
+  } else {
+    self.installed_policies.remove(runtime_id)
+  }
+}
+
+///|
+/// Whether this runtime acknowledged installing exactly the current
+/// publication. Mutating dispatch and grant minting require this.
+pub fn PrimaryState::policy_installed(
+  self : PrimaryState,
+  runtime_id : String,
+  version : String,
+  hash : String,
+) -> Bool {
+  match self.policy_publication.val {
+    Some(announcement) =>
+      if announcement.version != version || announcement.hash != hash {
+        return false
+      }
+    None => return false
+  }
+  match self.installed_policies.get(runtime_id) {
+    Some(record) => record.version == version && record.hash == hash
+    None => false
+  }
+}
+
+///|
+/// Number of live runtimes that have acked the current publication. Used by
+/// diagnostics and tests; the provider enforces per-runtime readiness.
+pub fn PrimaryState::installed_policy_count(self : PrimaryState) -> Int {
+  self.installed_policies.length()
+}
+
+///|
+/// Record a primary-side audit event. The runtime machine provider uses this
+/// for policy/approval decisions: the primary owns audit, the node keeps only
+/// its snapshot and result cache.
+pub fn PrimaryState::record_audit(
+  self : PrimaryState,
+  action : String,
+  subject : String,
+  outcome : String,
+  detail : String,
+) -> Unit {
+  self.audit.record(action, subject, outcome, detail, (self.now)())
 }
 
 ///|

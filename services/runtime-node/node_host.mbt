@@ -8,7 +8,9 @@
 ///   the 0600 bearer token and the runtime core's state root;
 /// - the runtime execution core (`monexus/runtime`), opened before serving so
 ///   interrupted runs are durably finalized as `lost`;
-/// - a rooted workspace (the runtime work dir, or an explicit `--workspace`);
+/// - a rooted workspace: the runtime core's work dir. An explicit
+///   `--workspace` must resolve to that same real root, because exec children,
+///   fs, PTY and git all run there and the policy digest binds that path;
 /// - the policy gate and the bounded idempotency cache.
 ///
 /// Pairing and the session loop belong to the transport (`monexus/runtime-
@@ -28,6 +30,31 @@ pub const NODE_TOKEN_FILE_NAME : String = "token"
 
 ///|
 pub const NODE_IDENTITY_FILE_NAME : String = "identity.json"
+
+///|
+/// Persisted policy announcement. The file lives in the node's 0700 state
+/// directory, is written 0600 and contains only the public snapshot and its
+/// content hash. It is re-verified on every open; a tampered file is ignored
+/// and the gate stays fail-closed (or operator-overridden).
+pub const NODE_POLICY_FILE_NAME : String = "policy.json"
+
+///|
+/// Durable replay memory for consumed approval-grant nonces. Written 0600 in
+/// the 0700 state directory before an approved request executes, so a restart
+/// cannot present an already-used grant again.
+pub const NODE_NONCES_FILE_NAME : String = "consumed_nonces.json"
+
+///|
+/// Durable idempotency tombstones/results for one-shot mutations (fs, PTY,
+/// git and control calls). Written 0600 in the 0700 state directory; a
+/// `pending` entry means the request was accepted and must not run twice.
+pub const NODE_IDEMPOTENCY_FILE_NAME : String = "idempotency.json"
+
+///|
+/// Bound for the consumed-nonce file. 1024 live grants encoded as
+/// `[nonce,expiry]` fit comfortably; an oversized file is refused rather than
+/// partially loaded, because forgetting a nonce is a replay window.
+pub const MAX_NONCE_FILE_BYTES : Int64 = 262_144L
 
 ///|
 pub fn node_capabilities() -> Array[String] {
@@ -59,6 +86,18 @@ pub struct NodeHost {
   workspace_root : String
   mut policy : PolicyGate
   cache : IdempotencyCache
+  /// Durable idempotency for mutations that have no durable run record of
+  /// their own (fs, PTY, git and control calls). Loaded at open and persisted
+  /// before dispatch.
+  durable : DurableIdempotency
+  /// Bounded replay memory for consumed approval grant nonces. This is the
+  /// only approval-related state the node keeps: it does not hold Decisions,
+  /// pending approvals or grants, and cannot approve anything itself. It is
+  /// serialized to the 0600 nonce file before an approved request executes.
+  nonces : @policy.ConsumedNonces
+  /// Node-local bounded audit ring for policy decisions and snapshot
+  /// installation. The primary remains the system of record.
+  audit : @transport.AuditLog
 }
 
 ///|
@@ -82,6 +121,14 @@ pub fn NodeHost::workspace_root(self : NodeHost) -> String {
 }
 
 ///|
+/// Release the runtime executor. The state directory (policy, nonces,
+/// idempotency tombstones) stays on disk, so a later `open` for the same
+/// runtime id resumes with the same replay memory.
+pub fn NodeHost::close(self : NodeHost) -> Unit {
+  self.executor.close()
+}
+
+///|
 pub fn NodeHost::policy(self : NodeHost) -> PolicyGate {
   self.policy
 }
@@ -92,6 +139,206 @@ pub fn NodeHost::policy(self : NodeHost) -> PolicyGate {
 /// before this call, leaving the previous gate in place.
 pub fn NodeHost::set_policy(self : NodeHost, policy : PolicyGate) -> Unit {
   self.policy = policy
+}
+
+///|
+pub fn NodeHost::policy_path(self : NodeHost) -> String {
+  self.state_dir + "/" + NODE_POLICY_FILE_NAME
+}
+
+///|
+/// Node-local audit text (redacted, bounded). Used by tests and doctor output.
+pub fn NodeHost::audit_text(self : NodeHost) -> String {
+  self.audit.text()
+}
+
+///|
+fn node_audit(
+  host : NodeHost,
+  action : String,
+  outcome : String,
+  detail : String,
+) -> Unit {
+  host.audit.record(
+    action,
+    host.runtime_id,
+    outcome,
+    detail,
+    @async.now(),
+  )
+}
+
+///|
+async fn NodeHost::persist_consumed_nonces(self : NodeHost) -> Result[Unit, String] {
+  self.nonces.prune_expired(@async.now())
+  let text = self.nonces.encode()
+  if text.length().to_int64() > MAX_NONCE_FILE_BYTES {
+    return Err("consumed nonce file would exceed its bound")
+  }
+  save_node_state_file(
+    self.state_dir + "/" + NODE_NONCES_FILE_NAME,
+    text,
+    "consumed nonce file",
+  )
+}
+
+///|
+/// Write a bounded node state file atomically: 0600 with full fsync inside the
+/// already validated 0700 state directory.
+async fn save_node_state_file(
+  path : String,
+  text : String,
+  label : String,
+) -> Result[Unit, String] {
+  let dir = durable_parent_dir(path)
+  if dir != "" {
+    match @transport.validate_private_dir(dir, "runtime state dir") {
+      Ok(_) => ()
+      Err(message) => return Err(message)
+    }
+  }
+  let temp = path + ".tmp"
+  @fs.write_file(temp, text, permission=0o600, sync=@fs.SyncMode::Full) catch {
+    error => return Err("cannot write " + label + ": " + error.to_string())
+  }
+  @fs.chmod(temp, 0o600) catch { _ => () }
+  @fs.rename(temp, path, replace=true) catch {
+    error => return Err("cannot replace " + label + ": " + error.to_string())
+  }
+  Ok(())
+}
+
+///|
+/// Restore the consumed-nonce file. A missing file is an empty memory; a
+/// malformed, oversized or non-0600 file fails the open rather than silently
+/// forgetting nonces that could still be replayed.
+async fn load_consumed_nonces(
+  path : String,
+  now_ms : Int64,
+) -> Result[@policy.ConsumedNonces, String] {
+  let exists = @fs.exists(path) catch { _ => false }
+  if !exists {
+    return Ok(@policy.ConsumedNonces::new())
+  }
+  let stat = match @transport.lstat_path(path) {
+    None => return Err("consumed nonce file is missing")
+    Some(value) => value
+  }
+  match stat.kind {
+    @transport.PathKind::Regular =>
+      if (stat.mode & 0o777) != 0o600 {
+        return Err(
+          "consumed nonce file must be 0600 (found mode " +
+          @transport.mode_text(stat.mode) + ")",
+        )
+      }
+    _ => return Err("consumed nonce file is not a regular file")
+  }
+  if stat.size > MAX_NONCE_FILE_BYTES {
+    return Err("consumed nonce file exceeds its bound")
+  }
+  let data = @fs.read_file(path) catch {
+    error => return Err("cannot read consumed nonce file: " + error.to_string())
+  }
+  let text = data.text() catch {
+    error =>
+      return Err("cannot decode consumed nonce file: " + error.to_string())
+  }
+  let nonces = match @policy.ConsumedNonces::decode(text) {
+    Ok(value) => value
+    Err(message) => return Err("consumed nonce file is invalid: " + message)
+  }
+  nonces.prune_expired(now_ms)
+  Ok(nonces)
+}
+
+///|
+/// Install a policy announcement pushed by the primary. The pinned hash is
+/// re-verified here; only a valid snapshot replaces the gate. The announcement
+/// is persisted 0600 in the node state directory so a restart resumes under
+/// the same policy, and re-verified when it is loaded again.
+pub async fn NodeHost::install_policy_announcement(
+  self : NodeHost,
+  announcement : @transport.PolicyAnnouncement,
+) -> Result[Unit, String] {
+  let snapshot = match announcement.verify() {
+    Ok(value) => value
+    Err(message) => {
+      node_audit(
+        self,
+        "policy.snapshot_rejected",
+        "rejected",
+        "source=primary version=" +
+        announcement.version +
+        " reason=" +
+        message,
+      )
+      return Err(message)
+    }
+  }
+  // Monotonic delivery: a valid but older announcement must not roll the node
+  // back. Same version text must carry the identical pinned hash (a
+  // same-version republish with different rules is a new generation and needs
+  // a strictly newer version whose issued_at advances).
+  match self.policy.verified_snapshot() {
+    Some(installed) => {
+      let rejection = if snapshot.version == installed.version {
+        if snapshot.content_hash != installed.content_hash {
+          Some("same policy version with a different snapshot hash")
+        } else {
+          None
+        }
+      } else if snapshot.issued_at_ms <= installed.issued_at_ms {
+        Some("policy announcement is older than the installed generation")
+      } else {
+        None
+      }
+      match rejection {
+        Some(reason) => {
+          node_audit(
+            self,
+            "policy.snapshot_rejected",
+            "rejected",
+            "source=primary version=" +
+            announcement.version +
+            " reason=" +
+            reason,
+          )
+          return Err(reason)
+        }
+        None => ()
+      }
+    }
+    None => ()
+  }
+  let text = announcement.to_json().stringify()
+  match
+    @transport.save_policy_announcement(self.policy_path(), text) {
+    Ok(_) => ()
+    Err(message) => {
+      node_audit(
+        self,
+        "policy.snapshot_rejected",
+        "rejected",
+        "source=primary version=" +
+        announcement.version +
+        " reason=" +
+        message,
+      )
+      return Err(message)
+    }
+  }
+  self.policy = PolicyGate::from_policy_snapshot(snapshot)
+  node_audit(
+    self,
+    "policy.snapshot_installed",
+    "ok",
+    "source=primary version=" +
+    snapshot.version +
+    " hash=" +
+    snapshot.content_hash,
+  )
+  Ok(())
 }
 
 ///|
@@ -161,7 +408,8 @@ async fn create_identity(
 /// `state_base` defaults to `$MONEXUS_RUNTIME_DIR` or
 /// `~/.monexus/runtime`; the identity and token live in
 /// `<state_base>/<runtime_id>/`. `workspace_root` defaults to the runtime
-/// core's own work directory, which is created 0700 on first open.
+/// core's own work directory, which is created 0700 on first open; an explicit
+/// value must resolve to the same real path or the open is refused.
 pub async fn NodeHost::open(
   runtime_id : String,
   state_base~ : String = "",
@@ -223,21 +471,120 @@ pub async fn NodeHost::open(
     Ok(value) => value
     Err(message) => return Err("cannot open runtime executor: " + message)
   }
-  let requested = if workspace_root.trim() == "" {
-    executor.state_root() + "/work"
-  } else {
-    workspace_root.trim().to_owned()
+  // The execution root is the runtime core's work directory. fs, PTY, git and
+  // exec must all name the same real directory, otherwise a policy digest
+  // could classify one path while exec children run in another. An explicit
+  // `--workspace` is accepted only when it resolves to that same real root.
+  let execution_root = @fs.realpath(executor.state_root() + "/work") catch {
+    error => {
+      executor.close()
+      return Err("cannot resolve the runtime execution root: " + error.to_string())
+    }
   }
-  let workspace = match @runtime.RootedDir::open(requested) {
+  if workspace_root.trim() != "" {
+    let requested_real = @fs.realpath(workspace_root.trim()) catch {
+      error => {
+        executor.close()
+        return Err(
+          "cannot resolve the requested workspace root: " + error.to_string(),
+        )
+      }
+    }
+    if requested_real != execution_root {
+      executor.close()
+      return Err(
+        "an explicit workspace root must resolve to the runtime execution root (" +
+        execution_root +
+        "); exec, fs, PTY and git all run there",
+      )
+    }
+  }
+  let workspace = match @runtime.RootedDir::open(execution_root) {
     Ok(value) => value
     Err(message) => {
       executor.close()
       return Err("cannot open runtime workspace: " + message)
     }
   }
+  // Restore the last policy snapshot the primary published. The file is
+  // re-verified against its pinned hash; a missing or tampered file leaves the
+  // node fail-closed until the next successful install.
+  let audit = @transport.AuditLog::new()
+  let policy_path = state_dir + "/" + NODE_POLICY_FILE_NAME
+  let policy_file_exists = @fs.exists(policy_path) catch { _ => false }
+  let restored : @policy.PolicySnapshot? = if policy_file_exists {
+    match @transport.load_policy_announcement(policy_path) {
+      Ok(announcement) =>
+        match announcement.verify() {
+          Ok(snapshot) => {
+            audit.record(
+              "policy.snapshot_restored",
+              runtime_id,
+              "ok",
+              "source=disk version=" +
+              snapshot.version +
+              " hash=" +
+              snapshot.content_hash,
+              @async.now(),
+            )
+            Some(snapshot)
+          }
+          Err(message) => {
+            audit.record(
+              "policy.snapshot_rejected",
+              runtime_id,
+              "rejected",
+              "source=disk reason=" + message,
+              @async.now(),
+            )
+            None
+          }
+        }
+      Err(message) => {
+        audit.record(
+          "policy.snapshot_rejected",
+          runtime_id,
+          "rejected",
+          "source=disk reason=" + message,
+          @async.now(),
+        )
+        None
+      }
+    }
+  } else {
+    None
+  }
+  // An explicit policy argument (operator override or a test gate) wins over
+  // the restored file; otherwise the persisted primary snapshot is used.
   let effective_policy = match policy {
     Some(value) => value
-    None => PolicyGate::fail_closed()
+    None =>
+      match restored {
+        Some(snapshot) => PolicyGate::from_policy_snapshot(snapshot)
+        None => PolicyGate::fail_closed()
+      }
+  }
+  // Restore crash-safe replay memory. Both files are 0600 in the 0700 state
+  // dir; a malformed store fails the open instead of silently forgetting a
+  // consumed nonce or an accepted-but-unanswered mutation.
+  let nonces = match
+    load_consumed_nonces(
+      state_dir + "/" + NODE_NONCES_FILE_NAME,
+      @async.now(),
+    ) {
+    Ok(value) => value
+    Err(message) => {
+      executor.close()
+      return Err(message)
+    }
+  }
+  let durable = match
+    DurableIdempotency::open(state_dir + "/" + NODE_IDEMPOTENCY_FILE_NAME) {
+    Ok(value) => value
+    Err(message) => {
+      executor.close()
+      return Err(message)
+    }
   }
   Ok({
     runtime_id,
@@ -249,6 +596,9 @@ pub async fn NodeHost::open(
     workspace_root: workspace.root(),
     policy: effective_policy,
     cache: IdempotencyCache::new(),
+    durable,
+    nonces,
+    audit,
   })
 }
 
@@ -337,10 +687,11 @@ async fn platform_facts() -> (String, String, String) {
 /// host's own API (no ACP connection, no shell interpolation of user text).
 pub async fn NodeHost::probe_profile(self : NodeHost) -> @json.Json {
   let (os, arch, hostname) = platform_facts()
-  let policy_text = if self.policy.has_snapshot() {
-    "snapshot"
-  } else {
-    "fail_closed"
+  let policy_text = self.policy.mode()
+  let (policy_version, policy_hash) = match
+    self.policy.verified_snapshot() {
+    Some(snapshot) => (snapshot.version, snapshot.content_hash)
+    None => ("", "")
   }
   @contracts.json_object([
     ("runtime_id", @contracts.json_string(self.runtime_id)),
@@ -363,6 +714,8 @@ pub async fn NodeHost::probe_profile(self : NodeHost) -> @json.Json {
       ]),
     ),
     ("policy", @contracts.json_string(policy_text)),
+    ("policy_version", @contracts.json_string(policy_version)),
+    ("policy_hash", @contracts.json_string(policy_hash)),
     ("state_version", @contracts.json_int(NODE_STATE_VERSION)),
   ])
 }
@@ -423,7 +776,11 @@ pub fn NodeHost::service(
     self.probe_profile()
   }
   let outbox = self.outbox_port()
-  @transport.NodeService::new(handlers~, probe~, outbox~)
+  let install_policy : async (@transport.PolicyAnnouncement) -> Result[Unit, String] =
+    async fn(announcement) {
+      self.install_policy_announcement(announcement)
+    }
+  @transport.NodeService::new(handlers~, probe~, outbox~, install_policy~)
 }
 
 ///|

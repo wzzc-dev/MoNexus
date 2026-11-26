@@ -1,6 +1,8 @@
 import {
   "monexus/contracts" @contracts,
+  "monexus/policy" @policy,
   "monexus/runtime-transport" @transport,
+  "moonbitlang/async",
   "moonbitlang/core/json",
 }
 
