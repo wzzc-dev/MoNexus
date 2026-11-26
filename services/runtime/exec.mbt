@@ -257,6 +257,9 @@ pub struct RuntimeExecutor {
   git : Ref[@git_runtime.GitRuntime?]
   git_root : Ref[String]
   git_limits : @git_runtime.GitLimits
+  /// Streaming ACP-process runtime (A1.4), sharing the same durable outbox and
+  /// rooted work directory. It is transport-agnostic and owns no socket.
+  process : ProcessRuntime
 }
 
 ///|
@@ -595,6 +598,7 @@ pub async fn RuntimeExecutor::open_with_limits(
     git: Ref(None),
     git_root: Ref(""),
     git_limits,
+    process: ProcessRuntime::new(outbox, state.work_dir(), ProcessLimits::new()),
   }
   match executor.recover(events) {
     Ok(_) => ()
@@ -604,6 +608,13 @@ pub async fn RuntimeExecutor::open_with_limits(
     }
   }
   match executor.recover_pty(events) {
+    Ok(_) => ()
+    Err(message) => {
+      executor.outbox.close()
+      return Err(message)
+    }
+  }
+  match executor.process.recover(events) {
     Ok(_) => ()
     Err(message) => {
       executor.outbox.close()
@@ -621,6 +632,13 @@ pub fn RuntimeExecutor::runtime_id(self : RuntimeExecutor) -> String {
 ///|
 pub fn RuntimeExecutor::state_root(self : RuntimeExecutor) -> String {
   self.state.root()
+}
+
+///|
+/// The streaming-process runtime bound to this executor's outbox and work
+/// root. Node dispatch uses this for `runtime.process.*`.
+pub fn RuntimeExecutor::process(self : RuntimeExecutor) -> ProcessRuntime {
+  self.process
 }
 
 ///|

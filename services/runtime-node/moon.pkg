@@ -8,6 +8,7 @@ import {
   "moonbitlang/async",
   "moonbitlang/async/fs",
   "moonbitlang/async/process",
+  "moonbitlang/core/encoding/base64",
   "moonbitlang/core/env",
   "moonbitlang/core/json",
 }
@@ -16,4 +17,6 @@ supported_targets = "native"
 
 import {
   "monexus/providers/runtime" @provider_runtime,
+  "monexus/providers/agent" @agent,
+  "monexus/providers/runtime-agent" @provider_runtime_agent,
 } for "test"

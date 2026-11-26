@@ -500,3 +500,63 @@ async test "enabling start_run does not backfill Runs for historical fires" {
   }
   assert_eq(runs_after_direct.length(), 0)
 }
+
+// ---------------------------------------------------------------------------
+// A1.4 runtime agent launcher registration.
+// ---------------------------------------------------------------------------
+
+///|
+fn host_test_runtime_machine(id : String) -> @contracts.MachineRecord {
+  {
+    id,
+    kind: @contracts.MACHINE_KIND_RUNTIME,
+    name: "runtime-" + id,
+    host: id,
+    port: 0,
+    user: "",
+    identity: "",
+    use_ssh_config: false,
+    host_key_policy: @contracts.MACHINE_HOST_KEY_POLICY_ACCEPT_NEW,
+    known_hosts_file: "",
+    status: "online",
+    profile: None,
+    ssh_effective: Map([]),
+    ssh_effective_error: "",
+    last_seen: "2026-01-01T00:00:00.000Z",
+    last_error: "",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  }
+}
+
+///|
+async test "runtime machine requires a registered paired launcher, never SSH" {
+  let state = host_test_state("/tmp/monexus-host-runtime-agent-test", false) catch {
+    error => fail(error.to_string())
+  }
+  let machine_id = "mch_runtime_agent_test"
+  match state.store.put_machine(host_test_runtime_machine(machine_id)) {
+    Ok(_) => ()
+    Err(message) => fail("cannot put machine: " + message)
+  }
+  // No launcher yet: honest unsupported, not a local or SSH fallback.
+  match agent_launcher_for_machine(state, machine_id) {
+    Ok(_) => fail("runtime machine must not resolve without a paired channel")
+    Err(error) =>
+      assert_true(error.message.contains("paired transport"))
+  }
+  let launcher = @agent.RemoteLauncher::new(start=async fn(_spec) {
+    Err("unused in registry test")
+  })
+  state.register_runtime_agent_launcher(machine_id, launcher)
+  match agent_launcher_for_machine(state, machine_id) {
+    Ok(@agent.ProcessLauncher::Runtime(_)) => ()
+    Ok(_) => fail("runtime machine resolved to the wrong launcher kind")
+    Err(error) => fail("registered launcher was not used: " + error.message)
+  }
+  // A missing machine is still a clear not-found error.
+  match agent_launcher_for_machine(state, "mch_missing") {
+    Ok(_) => fail("missing machine resolved")
+    Err(error) => assert_true(error.message.contains("machine not found"))
+  }
+}

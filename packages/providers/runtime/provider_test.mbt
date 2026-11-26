@@ -241,3 +241,78 @@ test "run and pty snapshots decode the node wire shape" {
   assert_true(pty.running)
   assert_eq(pty.output_seq, 2L)
 }
+
+///|
+test "process events settle once and a missing process record is lost" {
+  let tracker = RunTracker::new("rt-process")
+  tracker.begin("proc-1", "process", "crid-1")
+  let started = test_event(
+    1L,
+    "proc-1",
+    1L,
+    "runtime.process.started",
+    @contracts.json_object([
+      ("status", @contracts.json_string(@contracts.RUN_STATUS_RUNNING)),
+    ]),
+  )
+  assert_true(tracker.observe(started))
+  assert_eq(tracker.get("proc-1").unwrap().kind, "process")
+  assert_true(tracker.get("proc-1").unwrap().is_process())
+  assert_eq(tracker.get("proc-1").unwrap().phase.text(), "running")
+  // Stream data is polled, not evented: no stdout event exists for a process.
+  let exited = test_event(
+    2L,
+    "proc-1",
+    2L,
+    "runtime.process.exited",
+    @contracts.json_object([
+      ("status", @contracts.json_string(@contracts.RUN_STATUS_SUCCEEDED)),
+      ("exit_code", @contracts.json_int(0)),
+      ("stop_reason", @contracts.json_string("exited")),
+      ("ended_at", @contracts.json_string("2026-01-01T00:00:00Z")),
+    ]),
+  )
+  assert_true(tracker.observe(exited))
+  assert_eq(tracker.get("proc-1").unwrap().phase.text(), "succeeded")
+  // Duplicate/replayed terminal events never re-settle.
+  assert_true(!tracker.observe(exited))
+  assert_eq(tracker.get("proc-1").unwrap().phase.text(), "succeeded")
+  // A reconnect where the node has no record settles lost, never success.
+  tracker.begin("proc-2", "process", "crid-2")
+  let lost = tracker.reconcile_process_status("proc-2", None, None)
+  assert_true(lost)
+  assert_eq(tracker.get("proc-2").unwrap().phase.text(), "lost")
+  assert_true(!tracker.reconcile_process_status("proc-2", None, None))
+}
+
+///|
+test "connection loss marks process runs interrupted, not settled" {
+  let tracker = RunTracker::new("rt-process")
+  tracker.begin("proc-1", "process", "crid-1")
+  let _ = tracker.observe(
+    test_event(
+      1L,
+      "proc-1",
+      1L,
+      "runtime.process.started",
+      @contracts.json_object([
+        ("status", @contracts.json_string(@contracts.RUN_STATUS_RUNNING)),
+      ]),
+    ),
+  )
+  assert_eq(tracker.mark_connection_lost(), 1)
+  assert_eq(tracker.get("proc-1").unwrap().phase.text(), "interrupted")
+  // A terminal event replayed after reconnect still settles the same run once.
+  let exited = test_event(
+    2L,
+    "proc-1",
+    2L,
+    "runtime.process.exited",
+    @contracts.json_object([
+      ("status", @contracts.json_string(@contracts.RUN_STATUS_LOST)),
+      ("stop_reason", @contracts.json_string("host_restarted")),
+    ]),
+  )
+  assert_true(tracker.observe(exited))
+  assert_eq(tracker.get("proc-1").unwrap().phase.text(), "lost")
+}

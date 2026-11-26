@@ -1,0 +1,9 @@
+import {
+  "monexus/contracts" @contracts,
+  "monexus/providers/agent" @agent,
+  "monexus/providers/runtime" @provider_runtime,
+  "moonbitlang/async",
+  "moonbitlang/core/encoding/base64",
+}
+
+supported_targets = "native"

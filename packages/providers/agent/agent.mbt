@@ -121,9 +121,7 @@ pub(all) enum RuntimeMessage {
 /// launcher is retained so an EOF can be classified without asking the caller
 /// which transport it used.
 pub struct AgentProcess {
-  writer : @process.WriteToProcess
-  reader : @process.ReadFromProcess
-  process : @process.Process
+  transport : AgentTransport
   launcher : ProcessLauncher
   write_lock : @async.Mutex
   next_id : Ref[Int]
@@ -131,8 +129,60 @@ pub struct AgentProcess {
 }
 
 ///|
+/// Bounded, offset-addressed remote stdio reader. Bytes are accumulated until
+/// a newline so a UTF-8 sequence split across chunks is never decoded
+/// mid-codepoint; an evicted ring range (`gap`/`dropped`) or an oversized line
+/// is a permanent protocol error, never silently skipped.
+struct RemoteByteReader {
+  offset : Ref[Int64]
+  buffer : Array[Byte]
+  eof : Ref[Bool]
+  total_bytes : Ref[Int64]
+  broken : Ref[String]
+}
+
+///|
+fn remote_reader() -> RemoteByteReader {
+  {
+    offset: Ref(0L),
+    buffer: [],
+    eof: Ref(false),
+    total_bytes: Ref(0L),
+    broken: Ref(""),
+  }
+}
+
+///|
+/// One streaming process on a paired runtime node.
+struct RemoteProcess {
+  api : RemoteApi
+  run_id : String
+  pid : Int
+  stdout : RemoteByteReader
+  stderr : RemoteByteReader
+  cancel_sent : Ref[Bool]
+}
+
+///|
+/// The transport behind one ACP stdio session. Local and SSH launches use OS
+/// pipes; a runtime launch polls `runtime.process.stdout|stderr` by offset.
+/// Everything above this enum still sees only `AgentProcess`.
+pub(all) enum AgentTransport {
+  Local(@process.WriteToProcess, @process.ReadFromProcess, @process.Process)
+  Remote(RemoteProcess)
+}
+
+///|
+/// A single stdout/stderr line is bounded. ACP frames are far smaller; this is
+/// a safety ceiling against a misbehaving adapter, not a protocol limit.
+pub const MAX_REMOTE_AGENT_LINE_BYTES : Int = 1_048_576
+
+///|
 pub fn AgentProcess::pid(self : AgentProcess) -> Int {
-  self.process.pid.to_int()
+  match self.transport {
+    AgentTransport::Local(_, _, process) => process.pid.to_int()
+    AgentTransport::Remote(remote) => remote.pid
+  }
 }
 
 ///|
@@ -142,7 +192,19 @@ pub fn AgentProcess::pid(self : AgentProcess) -> Int {
 pub fn AgentProcess::is_ssh(self : AgentProcess) -> Bool {
   match self.launcher {
     ProcessLauncher::Ssh(_) => true
-    ProcessLauncher::Local => false
+    ProcessLauncher::Local | ProcessLauncher::Runtime(_) => false
+  }
+}
+
+///|
+/// True when the process runs on a paired runtime node. The pump applies
+/// ADR-0011 semantics to runtime EOFs: no reattach exists in A1, a lost
+/// transport or missing exit record is `lost`, and a node-observed non-lost
+/// exit mid-turn is `interrupted`. No runtime EOF is ever success.
+pub fn AgentProcess::is_runtime(self : AgentProcess) -> Bool {
+  match self.launcher {
+    ProcessLauncher::Runtime(_) => true
+    ProcessLauncher::Local | ProcessLauncher::Ssh(_) => false
   }
 }
 
@@ -152,9 +214,13 @@ pub fn AgentProcess::is_ssh(self : AgentProcess) -> Bool {
 /// "unknown" (`None`) so a broken transport can never park the host forever.
 /// A process killed by a signal returns the negative signal number.
 pub async fn AgentProcess::exit_status(self : AgentProcess) -> Int? {
+  let process = match self.transport {
+    AgentTransport::Local(_, _, process) => process
+    AgentTransport::Remote(_) => return None
+  }
   let mut attempts = 0
   while attempts < 40 {
-    let observed = self.process.try_wait() catch { _ => return None }
+    let observed = process.try_wait() catch { _ => return None }
     match observed {
       Some(value) => return Some(value.to_int())
       None => ()
@@ -163,6 +229,42 @@ pub async fn AgentProcess::exit_status(self : AgentProcess) -> Int? {
     @async.sleep(50)
   }
   None
+}
+
+///|
+/// One bounded observation of a remote process's terminal record. `None` means
+/// the node had no live record (lost); an `Err` means the transport could not
+/// answer, which the pump also treats as lost. Never retries with a second
+/// start: A1 has no reattach.
+pub async fn AgentProcess::remote_exit(self : AgentProcess) -> RemoteExit? {
+  match self.transport {
+    AgentTransport::Remote(remote) => {
+      match (remote.api.exit)() {
+        Ok(Some(value)) => Some(value)
+        Ok(None) | Err(_) => None
+      }
+    }
+    _ => None
+  }
+}
+
+///|
+/// The first unrecoverable remote stdout condition (`gap`, `dropped`, an
+/// oversized line or a transport error), or "" when the stream is intact. A
+/// non-empty value always settles the session lost.
+pub fn AgentProcess::stream_error(self : AgentProcess) -> String {
+  match self.transport {
+    AgentTransport::Remote(remote) => remote.stdout.broken.val
+    _ => ""
+  }
+}
+
+///|
+pub fn AgentProcess::run_id(self : AgentProcess) -> String {
+  match self.transport {
+    AgentTransport::Remote(remote) => remote.run_id
+    _ => ""
+  }
 }
 
 ///|
@@ -175,11 +277,22 @@ pub async fn AgentProcess::write_line(
   if self.closed.val {
     return false
   }
-  self.writer.write(line + "\n") catch {
-    _ => {
-      self.closed.val = true
-      return false
-    }
+  match self.transport {
+    AgentTransport::Local(writer, _, _) =>
+      writer.write(line + "\n") catch {
+        _ => {
+          self.closed.val = true
+          return false
+        }
+      }
+    AgentTransport::Remote(remote) =>
+      match (remote.api.write_stdin)(@utf8.encode(line + "\n")) {
+        Ok(_) => ()
+        Err(_) => {
+          self.closed.val = true
+          return false
+        }
+      }
   }
   true
 }
@@ -204,34 +317,172 @@ pub fn AgentProcess::next_id(self : AgentProcess, prefix : String) -> String {
 /// returned as `Line` so a stdout adapter (or a stray log line) still reaches
 /// the transcript instead of vanishing.
 pub async fn AgentProcess::next_message(self : AgentProcess) -> RuntimeMessage {
+  match self.transport {
+    AgentTransport::Local(_, reader, _) =>
+      while true {
+        let line = reader.read_until("\n") catch {
+          _ => return RuntimeMessage::Eof
+        }
+        let text = match line {
+          Some(value) => value
+          None => return RuntimeMessage::Eof
+        }
+        match parse_agent_line(text) {
+          Some(message) => return message
+          None => continue
+        }
+      } nobreak {
+        RuntimeMessage::Eof
+      }
+    AgentTransport::Remote(remote) => self.remote_next_message(remote)
+  }
+}
+
+///|
+/// Parse one raw stdout line, dropping blank lines. Kept separate so both the
+/// pipe and remote readers use exactly the same JSON/line rules.
+fn parse_agent_line(text : String) -> RuntimeMessage? {
+  let clean = text.trim().to_owned()
+  if clean == "" {
+    return None
+  }
+  let parsed = @json.parse(clean) catch {
+    _ => return Some(RuntimeMessage::Line(clean))
+  }
+  Some(RuntimeMessage::JsonMessage(parsed))
+}
+
+///|
+async fn AgentProcess::remote_next_message(
+  self : AgentProcess,
+  remote : RemoteProcess,
+) -> RuntimeMessage {
   while true {
-    let line = self.reader.read_until("\n") catch {
-      _ => return RuntimeMessage::Eof
+    match remote_take_line(remote.stdout) {
+      Some(text) =>
+        match parse_agent_line(text) {
+          Some(message) => return message
+          None => ()
+        }
+      None => {
+        if remote.stdout.broken.val != "" || remote.stdout.eof.val {
+          return RuntimeMessage::Eof
+        }
+        let chunk = match (remote.api.read_stdout)(remote.stdout.offset.val) {
+          Ok(value) => value
+          Err(message) => {
+            remote_mark_broken(remote.stdout, "stdout read failed: " + message)
+            return RuntimeMessage::Eof
+          }
+        }
+        let had_data = chunk.data.length() > 0
+        remote_append_chunk(remote.stdout, chunk)
+        if !had_data && !remote.stdout.eof.val {
+          @async.sleep(5)
+        }
+      }
     }
-    let text = match line {
-      Some(value) => value
-      None => return RuntimeMessage::Eof
-    }
-    let clean = text.trim().to_owned()
-    if clean == "" {
-      continue
-    }
-    let parsed = @json.parse(clean) catch {
-      _ => return RuntimeMessage::Line(clean)
-    }
-    return RuntimeMessage::JsonMessage(parsed)
   } nobreak {
     RuntimeMessage::Eof
   }
 }
 
 ///|
+fn remote_mark_broken(reader : RemoteByteReader, reason : String) -> Unit {
+  if reader.broken.val == "" {
+    reader.broken.val = reason
+  }
+  reader.eof.val = true
+}
+
+///|
+/// Append one chunk to a bounded line reader. A gap/dropped/offset mismatch is
+/// unrecoverable (no reattach in A1); an oversized line is capped instead of
+/// growing without bound.
+fn remote_append_chunk(reader : RemoteByteReader, chunk : RemoteChunk) -> Unit {
+  if chunk.gap {
+    remote_mark_broken(reader, "stdout ring gap")
+    return
+  }
+  if chunk.dropped {
+    remote_mark_broken(reader, "stdout bytes dropped")
+    return
+  }
+  if chunk.offset != reader.offset.val {
+    remote_mark_broken(reader, "stdout offset mismatch")
+    return
+  }
+  reader.total_bytes.val = chunk.total_bytes
+  reader.offset.val = chunk.next_offset
+  if reader.buffer.length() + chunk.data.length() > MAX_REMOTE_AGENT_LINE_BYTES {
+    remote_mark_broken(reader, "agent output line exceeds the cap")
+    return
+  }
+  for index in 0..<chunk.data.length() {
+    reader.buffer.push(chunk.data[index])
+  }
+  if chunk.eof {
+    reader.eof.val = true
+  }
+}
+
+///|
+/// Take one newline-terminated line, or the final partial line once EOF is
+/// observed. Bytes are decoded only after a complete line is available, so a
+/// multi-byte UTF-8 character split across chunks stays intact.
+fn remote_take_line(reader : RemoteByteReader) -> String? {
+  let mut newline = -1
+  for index in 0..<reader.buffer.length() {
+    if reader.buffer[index].to_int() == 10 {
+      newline = index
+      break
+    }
+  }
+  if newline < 0 {
+    if reader.eof.val && reader.buffer.length() > 0 {
+      let line = reader.buffer[:].to_owned()
+      reader.buffer.clear()
+      return Some(decode_agent_bytes(line))
+    }
+    return None
+  }
+  let line : Array[Byte] = []
+  for index in 0..<newline {
+    line.push(reader.buffer[index])
+  }
+  let tail : Array[Byte] = []
+  for index in (newline + 1)..<reader.buffer.length() {
+    tail.push(reader.buffer[index])
+  }
+  reader.buffer.clear()
+  for byte in tail {
+    reader.buffer.push(byte)
+  }
+  Some(decode_agent_bytes(line))
+}
+
+///|
+fn decode_agent_bytes(bytes : Array[Byte]) -> String {
+  @utf8.decode_lossy(Bytes::from_array(bytes[:])[:], ignore_bom=false)
+}
+
+///|
 /// Stop the child and close the pipes. Safe to call more than once.
-pub fn AgentProcess::interrupt(self : AgentProcess) -> Unit {
+pub async fn AgentProcess::interrupt(self : AgentProcess) -> Unit {
   self.closed.val = true
-  self.writer.close()
-  self.process.cancel()
-  self.reader.close()
+  match self.transport {
+    AgentTransport::Local(writer, reader, process) => {
+      writer.close()
+      process.cancel()
+      reader.close()
+    }
+    AgentTransport::Remote(remote) => {
+      if !remote.cancel_sent.val {
+        remote.cancel_sent.val = true
+        let _ = (remote.api.cancel)()
+      }
+    }
+  }
 }
 
 ///|
@@ -587,6 +838,48 @@ async fn drain_stderr(
 }
 
 ///|
+/// Drain a remote process's stderr by offset. A broken/evicted stderr stream
+/// only stops the drain: stderr is diagnostic and never settles the session.
+/// Lines are passed through the same host redaction callback as SSH/local.
+async fn drain_remote_stderr(
+  remote : RemoteProcess,
+  on_line : async (String) -> Unit,
+) -> Unit {
+  while true {
+    match remote_take_line(remote.stderr) {
+      Some(text) => {
+        let clean = text.trim(chars="\r\n").to_owned()
+        if clean != "" {
+          on_line(clean)
+        }
+      }
+      None => {
+        if remote.stderr.broken.val != "" || remote.stderr.eof.val {
+          return
+        }
+        let chunk = match (remote.api.read_stderr)(remote.stderr.offset.val) {
+          Ok(value) => value
+          Err(message) => {
+            remote_mark_broken(
+              remote.stderr,
+              "stderr read failed: " + message,
+            )
+            return
+          }
+        }
+        let had_data = chunk.data.length() > 0
+        remote_append_chunk(remote.stderr, chunk)
+        if !had_data && !remote.stderr.eof.val {
+          @async.sleep(20)
+        }
+      }
+    }
+  } nobreak {
+    ()
+  }
+}
+
+///|
 /// Spawn one agent process inside `group` through `launcher`. The caller keeps
 /// the task group alive for as long as the session should live; `no_wait=false`
 /// ties the process lifetime to that group.
@@ -603,6 +896,56 @@ pub async fn[G] spawn_agent(
   on_stderr : async (String) -> Unit,
   launcher~ : ProcessLauncher = ProcessLauncher::Local,
 ) -> Result[AgentProcess, String] {
+  match launcher {
+    ProcessLauncher::Runtime(remote) => {
+      // A runtime launch sends only argv and a node-rooted cwd. `spec.env` is
+      // deliberately ignored: the node supplies its own minimal environment
+      // and login credentials, and the primary ships no model keys, private
+      // keys or ~/.ssh. CLAUDECODE is absent from the node allowlist, so the
+      // nested-invocation rule holds without an `env -u` wrapper.
+      let (command, effective_args) = match
+        effective_agent_command(spec.mode, spec.command, spec.args) {
+        Ok(value) => value
+        Err(message) => return Err(message)
+      }
+      let argv : Array[String] = [command]
+      for arg in effective_args {
+        argv.push(arg)
+      }
+      let started = match
+        (remote.start)(
+          RemoteStartSpec::new(
+            argv~,
+            cwd=spec.cwd.trim().to_owned(),
+            risk="",
+          ),
+        ) {
+        Ok(value) => value
+        Err(message) => return Err(message)
+      }
+      let remote_process : RemoteProcess = {
+        api: started.api,
+        run_id: started.run_id,
+        pid: started.pid,
+        stdout: remote_reader(),
+        stderr: remote_reader(),
+        cancel_sent: Ref(false),
+      }
+      ignore(
+        group.spawn(no_wait=true, allow_failure=true) <| () => {
+          drain_remote_stderr(remote_process, on_line => on_stderr(on_line))
+        },
+      )
+      return Ok({
+        transport: AgentTransport::Remote(remote_process),
+        launcher,
+        write_lock: @async.Mutex::Mutex(),
+        next_id: Ref(0),
+        closed: Ref(false),
+      })
+    }
+    _ => ()
+  }
   let (argv0, argv, cwd) = match
     launch_argv(launcher, spec.mode, spec.command, spec.args, spec.cwd) {
     Ok(value) => value
@@ -610,7 +953,7 @@ pub async fn[G] spawn_agent(
   }
   let is_ssh = match launcher {
     ProcessLauncher::Ssh(_) => true
-    ProcessLauncher::Local => false
+    ProcessLauncher::Local | ProcessLauncher::Runtime(_) => false
   }
   let extra_env : Map[String, String] = if is_ssh { Map([]) } else { spec.env }
   let stdin_pair = @process.write_to_process() catch {
@@ -655,9 +998,7 @@ pub async fn[G] spawn_agent(
     },
   )
   Ok({
-    writer,
-    reader,
-    process,
+    transport: AgentTransport::Local(writer, reader, process),
     launcher,
     write_lock: @async.Mutex::Mutex(),
     next_id: Ref(0),
@@ -716,10 +1057,10 @@ async fn probe_acp(base : @contracts.AgentReadiness, spec : AgentSpec) -> @contr
       Err(message) =>
         return readiness_failure(base, "SpawnFailed", "unknown", message)
     }
-    defer process.interrupt()
     let handshake = @async.with_timeout_opt(timeout_ms, async fn() {
       probe_handshake(process, spec.cwd)
     })
+    process.interrupt()
     match handshake {
       Some(Ok(info)) => {
         {

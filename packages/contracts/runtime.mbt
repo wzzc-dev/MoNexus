@@ -51,6 +51,31 @@ pub const METHOD_RUNTIME_PTY_CLOSE : String = "runtime.pty.close"
 pub const METHOD_RUNTIME_PTY_STATUS : String = "runtime.pty.status"
 
 ///|
+/// Streaming process methods (A1.4). A process is a long-lived argv-only child
+/// with an open stdin, used by the host's AgentRuntime to run an ACP adapter on
+/// a paired runtime. Unlike `exec.start` there is no implicit timeout and no
+/// end-of-run log path: output is read by absolute byte offset through
+/// `stdout`/`stderr`, and stdin is written incrementally through `stdin`.
+/// `run_id` is the stable identity across reconnects; `client_request_id`
+/// makes `start` idempotent.
+pub const METHOD_RUNTIME_PROCESS_START : String = "runtime.process.start"
+
+///|
+pub const METHOD_RUNTIME_PROCESS_STDIN : String = "runtime.process.stdin"
+
+///|
+pub const METHOD_RUNTIME_PROCESS_STDOUT : String = "runtime.process.stdout"
+
+///|
+pub const METHOD_RUNTIME_PROCESS_STDERR : String = "runtime.process.stderr"
+
+///|
+pub const METHOD_RUNTIME_PROCESS_EXIT : String = "runtime.process.exit"
+
+///|
+pub const METHOD_RUNTIME_PROCESS_CANCEL : String = "runtime.process.cancel"
+
+///|
 pub const METHOD_RUNTIME_GIT_STATUS : String = "runtime.git.status"
 
 ///|
@@ -101,6 +126,12 @@ pub fn runtime_application_methods() -> Array[String] {
     METHOD_RUNTIME_PTY_RESIZE,
     METHOD_RUNTIME_PTY_CLOSE,
     METHOD_RUNTIME_PTY_STATUS,
+    METHOD_RUNTIME_PROCESS_START,
+    METHOD_RUNTIME_PROCESS_STDIN,
+    METHOD_RUNTIME_PROCESS_STDOUT,
+    METHOD_RUNTIME_PROCESS_STDERR,
+    METHOD_RUNTIME_PROCESS_EXIT,
+    METHOD_RUNTIME_PROCESS_CANCEL,
     METHOD_RUNTIME_GIT_STATUS,
     METHOD_RUNTIME_GIT_DIFF,
     METHOD_RUNTIME_GIT_LOG,
@@ -128,6 +159,9 @@ pub fn runtime_method_mutates(method : String) -> Bool {
   method == METHOD_RUNTIME_PTY_INPUT ||
   method == METHOD_RUNTIME_PTY_RESIZE ||
   method == METHOD_RUNTIME_PTY_CLOSE ||
+  method == METHOD_RUNTIME_PROCESS_START ||
+  method == METHOD_RUNTIME_PROCESS_STDIN ||
+  method == METHOD_RUNTIME_PROCESS_CANCEL ||
   method == METHOD_RUNTIME_GIT_BRANCH_CREATE ||
   method == METHOD_RUNTIME_GIT_CHECKOUT ||
   method == METHOD_RUNTIME_GIT_WORKTREE_ADD ||

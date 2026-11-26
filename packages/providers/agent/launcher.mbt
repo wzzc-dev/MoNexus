@@ -15,6 +15,131 @@
 pub(all) enum ProcessLauncher {
   Local
   Ssh(@ssh.SshTarget)
+  /// An AgentRuntime process launched on a paired runtime node through
+  /// `runtime.process.*`. The handle is stdio only; the machine/provider axis
+  /// never returns an ACP connection (ADR-0003, ADR-0012 §6).
+  Runtime(RemoteLauncher)
+}
+
+///|
+/// What the host asks a runtime node to start: an argv-only agent process in a
+/// node-rooted workspace directory. There is deliberately no `env` field: the
+/// node uses its own environment allowlist and login credentials, and the host
+/// never ships model keys, private keys or `~/.ssh` (Goal 3).
+pub(all) struct RemoteStartSpec {
+  argv : Array[String]
+  cwd : String
+  risk : String
+}
+
+///|
+pub fn RemoteStartSpec::new(
+  argv~ : Array[String],
+  cwd~ : String = "",
+  risk~ : String = "",
+) -> RemoteStartSpec {
+  { argv, cwd, risk, }
+}
+
+///|
+/// The stable identity of a started remote process. `run_id` survives a
+/// reconnect; the node's `client_request_id` makes the start idempotent.
+pub(all) struct RemoteStarted {
+  run_id : String
+  pid : Int
+  api : RemoteApi
+}
+
+///|
+pub fn RemoteStarted::new(
+  run_id : String,
+  pid : Int,
+  api : RemoteApi,
+) -> RemoteStarted {
+  { run_id, pid, api, }
+}
+
+///|
+/// One bounded stdout/stderr chunk, already base64-decoded. Offsets are
+/// absolute within the stream. `gap` means the node's ring evicted bytes the
+/// primary had not read yet: the protocol stream is unrecoverable in A1 (no
+/// reattach), so the ACP session must end `lost`, never fake success.
+pub(all) struct RemoteChunk {
+  offset : Int64
+  next_offset : Int64
+  data : Bytes
+  eof : Bool
+  gap : Bool
+  dropped : Bool
+  total_bytes : Int64
+}
+
+///|
+/// Terminal observation of a remote process. `status` is a runtime run status
+/// (`succeeded`, `failed`, `cancelled`, `lost`); `None` means the node had no
+/// live record for the run id (host restart, unknown run).
+pub(all) struct RemoteExit {
+  status : String
+  exit_code : Int?
+  signal : Int?
+  stop_reason : String
+  success : Bool
+}
+
+///|
+/// The stdio/control surface of one remote process. Everything is async and
+/// bounded by the node; the agent layer polls `read_*` by absolute offset and
+/// never retries a read as if it were a write.
+pub(all) struct RemoteApi {
+  write_stdin : async (Bytes) -> Result[Unit, String]
+  read_stdout : async (Int64) -> Result[RemoteChunk, String]
+  read_stderr : async (Int64) -> Result[RemoteChunk, String]
+  exit : async () -> Result[RemoteExit?, String]
+  cancel : async () -> Result[Unit, String]
+}
+
+///|
+pub fn RemoteApi::new(
+  write_stdin~ : async (Bytes) -> Result[Unit, String],
+  read_stdout~ : async (Int64) -> Result[RemoteChunk, String],
+  read_stderr~ : async (Int64) -> Result[RemoteChunk, String],
+  exit~ : async () -> Result[RemoteExit?, String],
+  cancel~ : async () -> Result[Unit, String],
+) -> RemoteApi {
+  { write_stdin, read_stdout, read_stderr, exit, cancel, }
+}
+
+///|
+/// Adapter seam from the primary's `RuntimeMachine` (`runtime.process.*`) to
+/// the transport-only launcher the AgentRuntime consumes. It is constructed by
+/// the host (or a test) and registered per machine id; it carries no ACP.
+pub(all) struct RemoteLauncher {
+  start : async (RemoteStartSpec) -> Result[RemoteStarted, String]
+}
+
+///|
+pub fn RemoteLauncher::new(
+  start~ : async (RemoteStartSpec) -> Result[RemoteStarted, String],
+) -> RemoteLauncher {
+  { start, }
+}
+
+///|
+/// ADR-0011 classification for a runtime-node process. A missing exit record
+/// or a `lost` node status means the transport/node could not observe the
+/// process: `lost`, never success. Any other terminal status is the agent
+/// exiting mid-turn: `interrupted`.
+pub fn runtime_eof_stop_reason(exit : RemoteExit?) -> String {
+  match exit {
+    None => @contracts.AGENT_STOP_LOST
+    Some(value) =>
+      if value.status == @contracts.RUN_STATUS_LOST ||
+        value.stop_reason == @contracts.AGENT_STOP_LOST {
+        @contracts.AGENT_STOP_LOST
+      } else {
+        @contracts.AGENT_STOP_INTERRUPTED
+      }
+  }
 }
 
 ///|
@@ -187,5 +312,9 @@ pub async fn launch_argv(
       let argv = @ssh.ssh_stdio_argv(target, remote)
       Ok((argv[0], argv[1:].to_owned(), ""))
     }
+    ProcessLauncher::Runtime(_) =>
+      Err(
+        "runtime launcher is stdio-only and does not build a local argv",
+      )
   }
 }
