@@ -1123,12 +1123,77 @@ async fn credential_live_scan_dir(
 }
 
 ///|
+/// Optional live-e2e tuning knob. Empty when unset, which keeps every default
+/// (built-in preset, CI, offline runs) byte-identical.
+fn credential_live_env(name : String) -> String {
+  match @env.get_env_var(name) {
+    Some(value) => value.trim().to_owned()
+    None => ""
+  }
+}
+
+///|
+/// Resolve the live e2e profile name. Without any upstream override the name
+/// is used as-is, so the built-in `anthropic` preset (or an already stored
+/// profile) keeps working exactly as before. With an override, persist a
+/// profile that points the loopback proxy at the override target; each empty
+/// override field keeps the known preset's value (or the contract default for
+/// a brand-new profile name).
+fn credential_live_profile(
+  state : HostState,
+  name : String,
+  scheme : String,
+  host : String,
+  base_path : String,
+  auth_header : String,
+  auth_scheme : String,
+) -> String raise {
+  let overridden = scheme != "" ||
+    host != "" ||
+    base_path != "" ||
+    auth_header != "" ||
+    auth_scheme != ""
+  if !overridden {
+    return name
+  }
+  let base = match @contracts.CredentialProfile::builtin(name) {
+    Some(value) => value
+    None =>
+      match state.store.get_credential_profile(name) {
+        Ok(Some(value)) => value
+        // A fresh override-only profile starts from the contract defaults
+        // (https, authorization/Bearer); the caller supplies what it needs.
+        _ => @contracts.CredentialProfile::new(name~, upstream_host="")
+      }
+  }
+  let profile = @contracts.CredentialProfile::new(
+    name~,
+    upstream_scheme=if scheme == "" { base.upstream_scheme } else { scheme },
+    upstream_host=if host == "" { base.upstream_host } else { host },
+    upstream_base_path=if base_path == "" {
+      base.upstream_base_path
+    } else {
+      base_path
+    },
+    auth_header=if auth_header == "" { base.auth_header } else { auth_header },
+    auth_scheme=if auth_scheme == "" { base.auth_scheme } else { auth_scheme },
+  )
+  match state.store.put_credential_profile(profile) {
+    Ok(_) => ()
+    Err(message) => fail("cannot store the live credential profile: " + message)
+  }
+  name
+}
+
+///|
 /// A5.1 live model-call end to end. The test uses an explicitly supplied model
 /// key (`MONEXUS_E2E_CREDENTIAL_KEY`); without one it skips and says so, so CI
 /// stays offline and deterministic. With a key it proves the loopback proxy
 /// really swaps the capability token for the upstream credential, that the
 /// secret/token never land in persisted host surfaces, and that the same call
-/// fails closed after revocation.
+/// fails closed after revocation. The upstream profile can be steered with
+/// the optional `MONEXUS_E2E_CREDENTIAL_*` overrides so the same test can run
+/// against a local Anthropic-compatible gateway.
 async test "live managed model call and revocation fail closed" {
   let key = match @env.get_env_var("MONEXUS_E2E_CREDENTIAL_KEY") {
     Some(value) => value.trim().to_owned()
@@ -1143,6 +1208,11 @@ async test "live managed model call and revocation fail closed" {
   let model = match @env.get_env_var("MONEXUS_E2E_CREDENTIAL_MODEL") {
     Some(value) => value.trim().to_owned()
     None => "claude-haiku-4-5"
+  }
+  let profile_name = match
+    credential_live_env("MONEXUS_E2E_CREDENTIAL_PROFILE") {
+    "" => "anthropic"
+    value => value
   }
   let root = @fs.tmpdir(prefix="monexus-host-cred-live") catch {
     _ => fail("cannot create the live credential root")
@@ -1160,6 +1230,15 @@ async test "live managed model call and revocation fail closed" {
     @contracts.CREDENTIAL_DEFAULT_LEASE_TTL_MS,
     @contracts.CREDENTIAL_DEFAULT_COOLDOWN_MS,
   )
+  let live_profile = credential_live_profile(
+    state,
+    profile_name,
+    credential_live_env("MONEXUS_E2E_CREDENTIAL_UPSTREAM_SCHEME"),
+    credential_live_env("MONEXUS_E2E_CREDENTIAL_UPSTREAM_HOST"),
+    credential_live_env("MONEXUS_E2E_CREDENTIAL_UPSTREAM_BASE_PATH"),
+    credential_live_env("MONEXUS_E2E_CREDENTIAL_AUTH_HEADER"),
+    credential_live_env("MONEXUS_E2E_CREDENTIAL_AUTH_SCHEME"),
+  )
   let enroll_text = credential_test_rpc(
     state,
     @contracts.METHOD_CREDENTIAL_ENROLL,
@@ -1174,91 +1253,146 @@ async test "live managed model call and revocation fail closed" {
       credential_id,
       "",
       CREDENTIAL_TEST_AGENT,
-      "anthropic",
+      live_profile,
     ),
     "live-bind",
   )
   ignore(credential_test_binding_id(bind_text))
-  let prepared = match
-    credential_test_prepare(state, "", CREDENTIAL_TEST_AGENT, "anthropic") {
-    Ok(Some(value)) => value
-    Ok(None) => fail("the live credential binding was not prepared")
-    Err(error) => fail("cannot prepare the live credential: " + error.message())
-  }
-  assert_true(!prepared.is_remote())
-  let env = prepared.env()
-  let proxy_url = match env.get(@contracts.CREDENTIAL_ENV_PROXY_URL) {
-    Some(value) => value
-    None => fail("the prepared environment has no proxy URL")
-  }
-  let token = match env.get(@contracts.CREDENTIAL_ENV_PROXY_TOKEN) {
-    Some(value) => value
-    None => fail("the prepared environment has no proxy token")
-  }
-  assert_true(token.has_prefix(@contracts.CREDENTIAL_TOKEN_PREFIX))
-  let body = "{\"model\":\"" +
-    model +
-    "\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"
-  let headers : @http.Headers = Map([])
-  headers.set(@http.CaseInsensitiveString("authorization"), "Bearer " + token)
-  headers.set(@http.CaseInsensitiveString("content-type"), "application/json")
-  let (response, response_body) = @http.post(
-    proxy_url + "/v1/messages",
-    body,
-    headers~,
-  )
-  let response_text = response_body.text() catch { _ => "" }
-  if response.code != 200 {
-    fail(
-      "live managed model call failed: HTTP " +
-      response.code.to_string() +
-      " " +
-      response_text,
+  // The loopback proxy's accept loop is a child of the task group that
+  // prepared it, and `with_task_group` cancels children when its body
+  // returns. Hold one group open across prepare, the model call, the secret
+  // scan, revocation and the post-revoke call so the proxy really serves
+  // them; the previous short-lived helper group left a listener that
+  // accepted TCP but never answered.
+  @async.with_task_group(async fn(group : @async.TaskGroup[Unit]) -> Unit {
+    let prepared = match
+      prepare_agent_credential(
+        state,
+        group,
+        "",
+        CREDENTIAL_TEST_AGENT,
+        live_profile,
+      ) {
+      Ok(Some(value)) => value
+      Ok(None) => fail("the live credential binding was not prepared")
+      Err(error) =>
+        fail("cannot prepare the live credential: " + error.message())
+    }
+    assert_true(!prepared.is_remote())
+    let env = prepared.env()
+    let proxy_url = match env.get(@contracts.CREDENTIAL_ENV_PROXY_URL) {
+      Some(value) => value
+      None => fail("the prepared environment has no proxy URL")
+    }
+    let token = match env.get(@contracts.CREDENTIAL_ENV_PROXY_TOKEN) {
+      Some(value) => value
+      None => fail("the prepared environment has no proxy token")
+    }
+    assert_true(token.has_prefix(@contracts.CREDENTIAL_TOKEN_PREFIX))
+    let body = "{\"model\":\"" +
+      model +
+      "\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"
+    let headers : @http.Headers = Map([])
+    headers.set(
+      @http.CaseInsensitiveString("authorization"),
+      "Bearer " + token,
     )
-  }
-  // Persisted surfaces, including SQLite and any WAL files, must not contain
-  // the real key or the capability token. The one credential file is the
-  // store's legitimate 0600 envelope and is skipped by exact path.
-  let secret_path = root + "/state/credentials/" + credential_id + ".json"
-  credential_live_scan_dir(root, secret_path, key)
-  credential_live_scan_dir(root, secret_path, token)
-  let event_text = credential_test_event_text(state)
-  assert_true(!event_text.contains(key))
-  assert_true(!event_text.contains(token))
-  let revoke_params : Map[String, @json.Json] = Map([])
-  revoke_params.set("credential_id", @contracts.json_string(credential_id))
-  let revoke_text = credential_test_rpc(
-    state,
-    @contracts.METHOD_CREDENTIAL_REVOKE,
-    revoke_params,
-    "live-revoke",
-  )
-  assert_true(revoke_text.contains(@contracts.CREDENTIAL_STATE_REVOKED))
-  // The secret is gone from disk and the same call now fails closed.
-  credential_live_scan_dir(root, "", key)
-  assert_true(
-    !(@fs.exists(root + "/state/credentials/" + credential_id + ".json") catch {
-      _ => false
-    }),
-  )
-  let second_code = @async.with_timeout_opt(3_000, async fn() -> Int32 {
-    let (second, second_body) = @http.post(
+    headers.set(@http.CaseInsensitiveString("content-type"), "application/json")
+    let (response, response_body) = @http.post(
       proxy_url + "/v1/messages",
       body,
       headers~,
-    ) catch {
-      _ => return -1
+    )
+    let response_text = response_body.text() catch { _ => "" }
+    if response.code != 200 {
+      fail(
+        "live managed model call failed: HTTP " +
+        response.code.to_string() +
+        " " +
+        response_text,
+      )
     }
-    ignore(second_body.text() catch { _ => "" })
-    second.code
+    // A 200 alone would also pass for an empty or error-shaped body, so
+    // require a message-shaped response with at least one content block
+    // (or the assistant role). The body never carries the key or the
+    // capability token, so it is safe to surface in the failure text.
+    let response_json = @json.parse(response_text) catch {
+      _ => fail("the live model response is not JSON: " + response_text)
+    }
+    let response_object = match @contracts.as_object(response_json) {
+      Some(value) => value
+      None =>
+        fail("the live model response is not a JSON object: " + response_text)
+    }
+    let content_blocks = match response_object.get("content") {
+      Some(@json.Json::Array(items)) => items.length()
+      _ => 0
+    }
+    let assistant_role = @contracts.string_field_or(response_object, "role", "")
+    if content_blocks == 0 && assistant_role != "assistant" {
+      fail("the live model response has no assistant content: " + response_text)
+    }
+    println(
+      "live managed model call: HTTP 200 model=" +
+      @contracts.string_field_or(response_object, "model", model) +
+      " content_blocks=" +
+      content_blocks.to_string(),
+    )
+    // Persisted surfaces, including SQLite and any WAL files, must not
+    // contain the real key or the capability token. The one credential file
+    // is the store's legitimate 0600 envelope and is skipped by exact path.
+    let secret_path = root + "/state/credentials/" + credential_id + ".json"
+    credential_live_scan_dir(root, secret_path, key)
+    credential_live_scan_dir(root, secret_path, token)
+    let event_text = credential_test_event_text(state)
+    assert_true(!event_text.contains(key))
+    assert_true(!event_text.contains(token))
+    let revoke_params : Map[String, @json.Json] = Map([])
+    revoke_params.set("credential_id", @contracts.json_string(credential_id))
+    let revoke_text = credential_test_rpc(
+      state,
+      @contracts.METHOD_CREDENTIAL_REVOKE,
+      revoke_params,
+      "live-revoke",
+    )
+    assert_true(revoke_text.contains(@contracts.CREDENTIAL_STATE_REVOKED))
+    // The secret is gone from disk and the same call now fails closed.
+    credential_live_scan_dir(root, "", key)
+    assert_true(
+      !(@fs.exists(root + "/state/credentials/" + credential_id + ".json") catch {
+        _ => false
+      }),
+    )
+    let second_code = @async.with_timeout_opt(3_000, async fn() -> Int32 {
+      let (second, second_body) = @http.post(
+        proxy_url + "/v1/messages",
+        body,
+        headers~,
+      ) catch {
+        _ => return -1
+      }
+      ignore(second_body.text() catch { _ => "" })
+      second.code
+    })
+    match second_code {
+      Some(code) => {
+        println("live post-revoke model call: code=" + code.to_string())
+        assert_true(code != 200)
+      }
+      None => println("live post-revoke model call: timed out (no 200)")
+    }
+    match
+      prepare_agent_credential(
+        state,
+        group,
+        "",
+        CREDENTIAL_TEST_AGENT,
+        live_profile,
+      ) {
+      Ok(_) => fail("a revoked credential must not prepare again")
+      Err(error) =>
+        assert_eq(error.reason, @contracts.CREDENTIAL_REASON_REVOKED)
+    }
   })
-  match second_code {
-    Some(code) => assert_true(code != 200)
-    None => ()
-  }
-  match credential_test_prepare(state, "", CREDENTIAL_TEST_AGENT, "anthropic") {
-    Ok(_) => fail("a revoked credential must not prepare again")
-    Err(error) => assert_eq(error.reason, @contracts.CREDENTIAL_REASON_REVOKED)
-  }
   store.close()
 }
