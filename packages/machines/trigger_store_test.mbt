@@ -123,6 +123,7 @@ fn trigger_test_fire(
   task_id : String,
   seq_base : Int64,
   now_ms : Int64,
+  run_intent~ : Bool = true,
 ) -> @contracts.TriggerWriteOutcome raise {
   let task = trigger_test_task(record, fire_key, task_id)
   let task_event = trigger_test_envelope(
@@ -139,6 +140,7 @@ fn trigger_test_fire(
     fire_key~,
     event_id~,
     task_id=task.id,
+    run_intent~,
     created_at="2026-01-01T00:00:00.000Z",
   )
   let record_after = { ..record, last_fired_at: "2026-01-01T00:00:00.000Z" }
@@ -528,6 +530,78 @@ test "a reopened store replays without creating a second Task" {
   }
   assert_eq(persisted.dedupe_hits, 1)
   reopened.close()
+}
+
+///|
+test "pending run catch-up drains a batch larger than five and skips no-run fires" {
+  let store = trigger_test_store()
+  let record = trigger_test_record("trg_1", "batch", "")
+  trigger_test_create(store, record, 1L)
+  // Seven fires from one batch: the old five-row read would strand the rest
+  // until another Task created a later batch.
+  for i in 0..<7 {
+    let n = i.to_string()
+    let outcome = trigger_test_fire(
+      store,
+      record,
+      "event:evt_" + n,
+      "evt_" + n,
+      "tsk_" + n,
+      10L + (i * 2).to_int64(),
+      1_700_000_000_000L + i.to_int64(),
+    )
+    assert_eq(outcome, @contracts.TriggerApplied)
+  }
+  let pending = match store.get_trigger_fires_missing_run("trg_1", 100) {
+    Ok(value) => value
+    Err(message) => fail("cannot read pending fires: " + message)
+  }
+  assert_eq(pending.length(), 7)
+  for fire in pending {
+    assert_true(fire.run_intent)
+    let linked = match
+      store.set_trigger_fire_run_id("trg_1", fire.fire_key, "run_" + fire.task_id) {
+      Ok(value) => value
+      Err(message) => fail("cannot link a run: " + message)
+    }
+    assert_true(linked)
+  }
+  let drained = match store.get_trigger_fires_missing_run("trg_1", 100) {
+    Ok(value) => value
+    Err(message) => fail("cannot re-read pending fires: " + message)
+  }
+  assert_eq(drained.length(), 0)
+
+  // A fire created while start_run=false is not a catch-up candidate, even
+  // after the trigger is flipped to start_run=true.
+  let no_run = trigger_test_fire(
+    store,
+    record,
+    "event:evt_old",
+    "evt_old",
+    "tsk_old",
+    40L,
+    1_700_000_001_000L,
+    run_intent=false,
+  )
+  assert_eq(no_run, @contracts.TriggerApplied)
+  let still_pending = match store.get_trigger_fires_missing_run("trg_1", 100) {
+    Ok(value) => value
+    Err(message) => fail("cannot read no-run fire: " + message)
+  }
+  assert_eq(still_pending.length(), 0)
+  let old = match store.get_trigger_fire_row("trg_1", "event:evt_old") {
+    Ok(value) => value
+    Err(message) => fail("cannot read no-run row: " + message)
+  }
+  assert_true(!old.run_intent)
+  assert_eq(old.run_id, "")
+  let linked_old = match
+    store.set_trigger_fire_run_id("trg_1", "event:evt_old", "run_old") {
+    Ok(value) => value
+    Err(message) => fail("cannot reject a no-run link: " + message)
+  }
+  assert_true(!linked_old)
 }
 
 ///|

@@ -74,7 +74,7 @@ jobs:
 
       - name: Smoke
         run: |
-          for script in machine workspace task agent_ssh agent; do
+          for script in machine workspace task agent_ssh agent trigger; do
             echo "::group::scripts/${script}_smoke.sh"
             bash "scripts/${script}_smoke.sh"
             echo "::endgroup::"

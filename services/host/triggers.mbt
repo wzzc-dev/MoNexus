@@ -7,14 +7,22 @@
 /// persisted cursor `meta.trigger.event_cursor`; it does not use the in-memory
 /// ring and does not add a second event log.
 ///
-/// A trigger can only create a Task. There is no command, argv, environment,
-/// approval or policy field anywhere below, and no path from a payload to an
-/// argument vector. Runs are still not started by triggers (`start_run=true`
-/// is answered with `unsupported` until A3.2); every source creates its Task
-/// with the same event and projection shape as `task.create`.
+/// A trigger can only create a Task, plus one `mode=agent` Run when
+/// `target.start_run=true`. There is no command, argv, environment, approval
+/// or policy field anywhere below, and no path from a payload to an argument
+/// vector. The Run is queued through the existing `run.create` handler after
+/// the Task transaction commits, keyed by
+/// `trigger:<trigger_id>:<fire_key>` so a crash between the two commits
+/// retries into the same Run (ADR-0014 §5).
 
 ///|
 const TRIGGER_LOOP_INTERVAL_MS : Int = 200
+
+///|
+/// Even with no new matching events, retry pending `start_run` fires this
+/// often so a backlog larger than one drain batch does not wait for a new
+/// Task. 25 ticks at 200 ms is about five seconds.
+const TRIGGER_RUN_CATCHUP_EVERY_TICKS : Int = 25
 
 ///|
 const TRIGGER_RECENT_FIRES : Int = 20
@@ -377,18 +385,16 @@ fn trigger_validate_target(
   if target.goal_template.length() > @contracts.TRIGGER_GOAL_MAX {
     return Err(trigger_invalid("target.goal_template is too long"))
   }
-  if target.start_run {
-    return Err(
-      trigger_unsupported(
-        "start_run is not implemented; the trigger creates a planned Task only",
-      ),
-    )
-  }
   if target.agent_id != "" && !@contracts.trigger_agent_id_valid(target.agent_id) {
     return Err(trigger_invalid("target.agent_id is invalid"))
   }
-  if agent_id_required && target.agent_id == "" {
+  if (agent_id_required || target.start_run) && target.agent_id == "" {
     return Err(trigger_invalid("target.agent_id is required for start_run"))
+  }
+  if target.start_run && target.workspace_id == "" {
+    return Err(
+      trigger_invalid("target.workspace_id is required for start_run"),
+    )
   }
   if target.workspace_id != "" {
     match state.store.get_workspace(target.workspace_id) {
@@ -642,7 +648,11 @@ fn trigger_prepare(
     workspace_id=target.workspace_id,
     verify=target.verify,
     created_at=timestamp,
-    status=@contracts.TASK_STATUS_PLANNED,
+    status=if target.start_run {
+      @contracts.TASK_STATUS_READY
+    } else {
+      @contracts.TASK_STATUS_PLANNED
+    },
     origin=Some(origin),
   )
   let task_events : Array[@contracts.EventEnvelope] = []
@@ -678,6 +688,7 @@ fn trigger_prepare(
     scheduled_for_ms~,
     key_id~,
     task_id=task.id,
+    run_intent=record.target.start_run,
     coalesced~,
     depth~,
     created_at=timestamp,
@@ -806,6 +817,239 @@ fn trigger_attempt(
 }
 
 // ---------------------------------------------------------------------------
+// start_run: queue one agent Run through the existing run.create handler
+// ---------------------------------------------------------------------------
+
+///|
+/// Extract `result.run.id` (or the error message) from a run.create response.
+fn trigger_run_response_id(text : String) -> Result[String, String] {
+  let parsed = @json.parse(text) catch {
+    _ => return Err("run.create returned non-JSON")
+  }
+  let object = match @contracts.as_object(parsed) {
+    Some(value) => value
+    None => return Err("run.create response is not an object")
+  }
+  match object.get("error") {
+    Some(@json.Json::Object(fields)) => {
+      let message = @contracts.string_field_or(fields, "message", "run.create failed")
+      return Err(message)
+    }
+    _ => ()
+  }
+  let result = match object.get("result") {
+    Some(@json.Json::Object(fields)) => fields
+    _ => return Err("run.create response has no result")
+  }
+  let run = match result.get("run") {
+    Some(@json.Json::Object(fields)) => fields
+    _ => return Err("run.create response has no run")
+  }
+  match @contracts.string_field(run, "id") {
+    Some(value) if value != "" => Ok(value)
+    _ => Err("run.create response has no run.id")
+  }
+}
+
+///|
+/// Queue the single `mode=agent` Run a fire is allowed to create
+/// (ADR-0014 §5). Call without the state mutex: the existing `run.create`
+/// handler owns validation, policy, the task state machine and dispatch. The
+/// fire's `trigger:<trigger_id>:<fire_key>` idempotency key makes a retry
+/// return the same Run instead of creating a second one.
+async fn trigger_start_run_for_fire(
+  state : HostState,
+  trigger_id : String,
+  fire_key : String,
+) -> Result[String, String] {
+  state.mutex.acquire()
+  let trigger = match state.store.get_trigger(trigger_id) {
+    Ok(Some(value)) => value
+    Ok(None) => {
+      state.mutex.release()
+      return Ok("")
+    }
+    Err(message) => {
+      state.mutex.release()
+      return Err("cannot read trigger: " + message)
+    }
+  }
+  if !trigger.target.start_run {
+    state.mutex.release()
+    return Ok("")
+  }
+  let fire = match state.store.get_trigger_fire_row(trigger_id, fire_key) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      return Err("cannot read trigger fire: " + message)
+    }
+  }
+  if fire.id == "" || fire.task_id == "" {
+    state.mutex.release()
+    return Ok("")
+  }
+  // A fire created while `start_run=false` never starts a Run, even if the
+  // trigger is later flipped to `start_run=true`.
+  if !fire.run_intent {
+    state.mutex.release()
+    return Ok("")
+  }
+  if fire.run_id != "" {
+    state.mutex.release()
+    return Ok(fire.run_id)
+  }
+  let task = match state.store.get_task(fire.task_id) {
+    Ok(Some(value)) => value
+    Ok(None) => {
+      state.mutex.release()
+      return Err("trigger Task disappeared: " + fire.task_id)
+    }
+    Err(message) => {
+      state.mutex.release()
+      return Err("cannot read trigger Task: " + message)
+    }
+  }
+  let workspace_id = if task.workspace_id != "" {
+    task.workspace_id
+  } else {
+    trigger.target.workspace_id
+  }
+  let agent_id = if trigger.target.agent_id != "" {
+    trigger.target.agent_id
+  } else {
+    task.agent_id
+  }
+  state.mutex.release()
+  if workspace_id == "" || agent_id == "" {
+    return Err("start_run target has no workspace_id/agent_id")
+  }
+  let client_request_id = "trigger-run:" + trigger_id + ":" + fire_key
+  let idempotency_key = @contracts.trigger_run_idempotency(trigger_id, fire_key)
+  let params : Map[String, @json.Json] = Map([
+    ("client_request_id", @contracts.json_string(client_request_id)),
+    ("task_id", @contracts.json_string(task.id)),
+    ("workspace_id", @contracts.json_string(workspace_id)),
+    ("mode", @contracts.json_string(@contracts.RUN_MODE_AGENT)),
+    ("agent_id", @contracts.json_string(agent_id)),
+    ("prompt", @contracts.json_string(task.goal)),
+    ("idempotency_key", @contracts.json_string(idempotency_key)),
+  ])
+  let queue : @aqueue.Queue[String] = @aqueue.Queue(kind=Unbounded)
+  let sink : Sink = { queue, subscribed: Ref(false), closed: Ref(false) }
+  let request : @contracts.RpcRequest = {
+    id: client_request_id,
+    method: @contracts.METHOD_RUN_CREATE,
+    params,
+  }
+  handle_run_create(state, sink, request, client_request_id)
+  let response = @async.with_timeout_opt(5_000, async fn() { queue.get() })
+  let text = match response {
+    Some(value) => value
+    None => return Err("run.create did not respond")
+  }
+  let run_id = match trigger_run_response_id(text) {
+    Ok(value) => value
+    Err(message) => return Err(message)
+  }
+  state.mutex.acquire()
+  let linked = state.store.set_trigger_fire_run_id(
+    trigger_id,
+    fire_key,
+    run_id,
+  )
+  state.mutex.release()
+  match linked {
+    Ok(_) => ()
+    Err(message) => return Err("cannot link trigger fire to run: " + message)
+  }
+  audit(
+    state,
+    "trigger.run.start",
+    "host",
+    "trigger/" + trigger_id,
+    "queued",
+    target=task.id,
+    run_id~,
+    detail="source=" + fire.source + "\nfire_key=" + fire_key +
+      "\ntask_id=" + task.id + "\nrun_id=" + run_id,
+  )
+  Ok(run_id)
+}
+
+///|
+/// Retry every fire of one trigger whose Task committed but whose Run did
+/// not. Bounded so the dispatcher never chases an old backlog in one tick.
+async fn trigger_start_pending_runs_for_trigger(
+  state : HostState,
+  trigger_id : String,
+) -> Unit {
+  state.mutex.acquire()
+  let trigger = match state.store.get_trigger(trigger_id) {
+    Ok(Some(value)) => value
+    Ok(None) => {
+      state.mutex.release()
+      return
+    }
+    Err(_) => {
+      state.mutex.release()
+      return
+    }
+  }
+  if !trigger.target.start_run {
+    state.mutex.release()
+    return
+  }
+  // Drain a bounded backlog per call. The store caps the batch at 100; the
+  // dispatcher also re-runs this periodically, so a larger backlog drains
+  // over subsequent ticks even when no new Tasks are created.
+  let fires = match state.store.get_trigger_fires_missing_run(trigger_id, 100) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      println(
+        "monexus-host: cannot read fires missing a run for " + trigger_id +
+        ": " + message,
+      )
+      return
+    }
+  }
+  state.mutex.release()
+  for fire in fires {
+    match trigger_start_run_for_fire(state, trigger_id, fire.fire_key) {
+      Ok(_) => ()
+      Err(message) =>
+        println(
+          "monexus-host: cannot start run for trigger " + trigger_id +
+          " fire " + fire.fire_key + ": " + message,
+        )
+    }
+  }
+}
+
+///|
+/// Startup/catch-up pass for `start_run` triggers (ADR-0014 §5): a crash
+/// between the Task commit and `run.create` is repaired with the same
+/// idempotency key.
+async fn trigger_start_pending_runs(state : HostState) -> Unit {
+  state.mutex.acquire()
+  let records = match state.store.list_triggers() {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      println("monexus-host: cannot list triggers for run catch-up: " + message)
+      return
+    }
+  }
+  state.mutex.release()
+  for record in records {
+    if record.target.start_run {
+      trigger_start_pending_runs_for_trigger(state, record.id)
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Event dispatcher
 // ---------------------------------------------------------------------------
 
@@ -925,7 +1169,8 @@ fn trigger_process_event(
   state : HostState,
   event : @contracts.EventEnvelope,
   now_ms : Int64,
-) -> Result[Unit, String] {
+) -> Result[Bool, String] {
+  let mut created = false
   let records = match state.store.list_triggers() {
     Ok(value) => value
     Err(message) => return Err(message)
@@ -1004,7 +1249,11 @@ fn trigger_process_event(
       Err(message) => return Err(message)
     }
     match attempt.outcome {
-      TRIGGER_ATTEMPT_CREATED | TRIGGER_ATTEMPT_DUPLICATE => continue
+      TRIGGER_ATTEMPT_CREATED => {
+        created = true
+        continue
+      }
+      TRIGGER_ATTEMPT_DUPLICATE => continue
       TRIGGER_ATTEMPT_DISABLED => {
         match trigger_reject(
           state,
@@ -1049,7 +1298,7 @@ fn trigger_process_event(
       }
     }
   }
-  Ok(())
+  Ok(created)
 }
 
 ///|
@@ -1077,8 +1326,10 @@ async fn trigger_loop(state : HostState) -> Unit {
       0L
     }
   }
+  let mut ticks = 0
   for ;; {
     @async.sleep(TRIGGER_LOOP_INTERVAL_MS)
+    ticks = ticks + 1
     state.mutex.acquire()
     let now_ms = @async.now()
     match trigger_expire_sweep(state, now_ms) {
@@ -1094,9 +1345,13 @@ async fn trigger_loop(state : HostState) -> Unit {
       }
     }
     let mut processed = 0
+    let mut created_any = false
     for event in events {
       match trigger_process_event(state, event, now_ms) {
-        Ok(_) => {
+        Ok(created) => {
+          if created {
+            created_any = true
+          }
           cursor = event.seq
           processed = processed + 1
         }
@@ -1117,6 +1372,15 @@ async fn trigger_loop(state : HostState) -> Unit {
       }
     }
     state.mutex.release()
+    // `run.create` takes the same mutex, so start_run is queued after the
+    // batch commit and outside the lock. The fire ledger makes the retry
+    // idempotent when a crash lands between the Task and the Run. Created
+    // fires get an immediate pass; the periodic pass drains older backlogs
+    // even when no new Task is being created.
+    if created_any || ticks >= TRIGGER_RUN_CATCHUP_EVERY_TICKS {
+      ticks = 0
+      trigger_start_pending_runs(state)
+    }
   }
 }
 
@@ -2071,7 +2335,29 @@ async fn handle_trigger_rpc(
       let outcome = trigger_fire_locked(state, request.params, client_request_id)
       state.mutex.release()
       match outcome {
-        Ok(attempt) =>
+        Ok(attempt) => {
+          // The manual fire follows the same Task-then-Run split as every
+          // other source: queue the optional Run after the commit, outside
+          // the state mutex, and report its id to the caller.
+          let mut run_id = attempt.run_id
+          match @contracts.trigger_id_param(request.params) {
+            Ok(trigger_id) => {
+              match
+                trigger_start_run_for_fire(
+                  state,
+                  trigger_id,
+                  @contracts.trigger_manual_fire_key(client_request_id),
+                ) {
+                Ok(value) => run_id = value
+                Err(message) =>
+                  println(
+                    "monexus-host: cannot start run for manual trigger fire: " +
+                    message,
+                  )
+              }
+            }
+            Err(_) => ()
+          }
           send_machine_result(
             state,
             sink,
@@ -2079,10 +2365,11 @@ async fn handle_trigger_rpc(
             client_request_id,
             @contracts.trigger_fire_result(
               attempt.task_id,
-              attempt.run_id,
+              run_id,
               attempt.outcome == TRIGGER_ATTEMPT_DUPLICATE,
             ),
           )
+        }
         Err(error) => send_machine_error(state, sink, request, client_request_id, error)
       }
     }

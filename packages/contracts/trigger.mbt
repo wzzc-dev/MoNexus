@@ -477,6 +477,10 @@ pub(all) struct TriggerFire {
   key_id : String
   task_id : String
   run_id : String
+  /// True when this fire was created by a target with `start_run=true`; the
+  /// catch-up path only starts Runs for such fires, so enabling `start_run`
+  /// later never retroactively runs historical Tasks.
+  run_intent : Bool
   coalesced : Bool
   depth : Int
   created_at : String
@@ -494,6 +498,7 @@ pub fn TriggerFire::new(
   key_id~ : String = "",
   task_id~ : String = "",
   run_id~ : String = "",
+  run_intent~ : Bool = true,
   coalesced~ : Bool = false,
   depth~ : Int = 1,
 ) -> TriggerFire {
@@ -507,6 +512,7 @@ pub fn TriggerFire::new(
     key_id,
     task_id,
     run_id,
+    run_intent,
     coalesced,
     depth,
     created_at,
@@ -551,6 +557,7 @@ pub fn trigger_fire_from_json(json : @json.Json) -> TriggerFire? {
     key_id: string_field_or(object, "key_id", ""),
     task_id: string_field_or(object, "task_id", ""),
     run_id: string_field_or(object, "run_id", ""),
+    run_intent: bool_field_or(object, "run_intent", true),
     coalesced: bool_field_or(object, "coalesced", false),
     depth: int_field_or(object, "depth", 1),
     created_at: string_field_or(object, "created_at", ""),

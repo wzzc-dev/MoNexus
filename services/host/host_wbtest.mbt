@@ -275,3 +275,228 @@ async test "flag-off HTTP split: /hooks is 401, /ws needs bearer, others 404" {
     server.close()
   })
 }
+
+// ---------------------------------------------------------------------------
+// A3.2 start_run catch-up regression tests.
+// ---------------------------------------------------------------------------
+
+///|
+const HOST_TEST_RUN_WS : String = "ws_01HZZZZZZZZZZZZZZZZZZZZZZY"
+
+///|
+const HOST_TEST_RUN_TRIGGER : String = "trg_01HZZZZZZZZZZZZZZZZZZZZZZY"
+
+///|
+fn host_test_run_trigger(
+  id : String,
+  start_run : Bool,
+) -> @contracts.TriggerRecord {
+  let target = @contracts.TriggerTarget::new(
+    title_template="Batch {{event_id}}",
+    goal_template="run for {{event_id}}",
+    agent_id="mock",
+    workspace_id=HOST_TEST_RUN_WS,
+    start_run~,
+  )
+  let source = @contracts.TriggerSource::new(event_type="task.created")
+  @contracts.TriggerRecord::new(
+    id~,
+    org_id=@contracts.ORG_LOCAL,
+    name="host-run-" + id,
+    kind=@contracts.TRIGGER_TYPE_EVENT,
+    target~,
+    source~,
+    config_hash="hash-" + id,
+    created_by="owner",
+    created_at="2026-01-01T00:00:00.000Z",
+    active_from_seq=0L,
+  )
+}
+
+///|
+fn host_test_put_run_workspace(state : HostState) -> Unit raise {
+  let workspace : @contracts.WorkspaceRecord = {
+    id: HOST_TEST_RUN_WS,
+    machine_id: "",
+    kind: @contracts.WORKSPACE_KIND_LOCAL,
+    root: "/tmp/monexus-host-run-workspace",
+    name: "run-workspace",
+    git_root: "",
+    is_git: false,
+    state: @contracts.WORKSPACE_STATE_AVAILABLE,
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  }
+  match state.store.put_workspace(workspace) {
+    Ok(_) => ()
+    Err(message) => fail("cannot put workspace: " + message)
+  }
+}
+
+///|
+fn host_test_install_run_trigger(
+  state : HostState,
+  record : @contracts.TriggerRecord,
+) -> Unit raise {
+  let event = @contracts.EventEnvelope::new(
+    id="evt_" + record.id + "_created",
+    org_id=@contracts.ORG_LOCAL,
+    event_type=@contracts.EVENT_TRIGGER_CREATED,
+    ts="2026-01-01T00:00:00.000Z",
+    subject="trigger/" + record.id,
+    seq=1L,
+    payload=@contracts.trigger_created_payload(record),
+    idempotency_key="trigger/" + record.id + "/created",
+  )
+  match state.store.record_trigger_event(event, record) {
+    Ok(_) => ()
+    Err(message) => fail("cannot install trigger: " + message)
+  }
+  state.next_seq = 100L
+}
+
+///|
+fn host_test_seed_event(index : Int) -> @contracts.EventEnvelope {
+  let n = index.to_string()
+  @contracts.EventEnvelope::new(
+    id="evt_batch_" + n,
+    org_id=@contracts.ORG_LOCAL,
+    event_type=@contracts.EVENT_TASK_CREATED,
+    ts="2026-01-01T00:00:01.000Z",
+    subject="task/seeded_" + n,
+    seq=10L + index.to_int64(),
+    payload=@contracts.json_object([
+      ("seed", @contracts.json_string(n)),
+    ]),
+    idempotency_key="seed/" + n,
+  )
+}
+
+///|
+async test "start_run catch-up drains seven fires from one event batch" {
+  let state = host_test_state("/tmp/monexus-host-run-batch-test", true) catch {
+    error => fail(error.to_string())
+  }
+  host_test_put_run_workspace(state) catch {
+    error => fail(error.to_string())
+  }
+  let record = host_test_run_trigger(HOST_TEST_RUN_TRIGGER, true)
+  host_test_install_run_trigger(state, record) catch {
+    error => fail(error.to_string())
+  }
+  // One dispatcher batch creates seven ready Tasks and seven fire-ledger rows.
+  for i in 0..<7 {
+    let created = match trigger_process_event(state, host_test_seed_event(i), 1_700_000_000_000L) {
+      Ok(value) => value
+      Err(message) => fail("cannot process event: " + message)
+    }
+    assert_true(created)
+  }
+  let pending = match state.store.get_trigger_fires_missing_run(record.id, 100) {
+    Ok(value) => value
+    Err(message) => fail("cannot read pending fires: " + message)
+  }
+  assert_eq(pending.length(), 7)
+  trigger_start_pending_runs_for_trigger(state, record.id)
+  let fires = match state.store.get_trigger_fires(record.id, 100) {
+    Ok(value) => value
+    Err(message) => fail("cannot read fire ledger: " + message)
+  }
+  assert_eq(fires.length(), 7)
+  for fire in fires {
+    assert_true(fire.run_id != "")
+    match state.store.find_run_by_idempotency(
+      @contracts.trigger_run_idempotency(record.id, fire.fire_key),
+    ) {
+      Ok(Some(run)) => assert_eq(run.id, fire.run_id)
+      Ok(None) => fail("fire has no idempotent Run: " + fire.fire_key)
+      Err(message) => fail("cannot look up Run: " + message)
+    }
+  }
+  let runs = match state.store.list_runs("", "") {
+    Ok(value) => value
+    Err(message) => fail("cannot list Runs: " + message)
+  }
+  assert_eq(runs.length(), 7)
+}
+
+///|
+async test "enabling start_run does not backfill Runs for historical fires" {
+  let state = host_test_state("/tmp/monexus-host-run-old-test", true) catch {
+    error => fail(error.to_string())
+  }
+  host_test_put_run_workspace(state) catch {
+    error => fail(error.to_string())
+  }
+  let record = host_test_run_trigger(HOST_TEST_RUN_TRIGGER, false)
+  host_test_install_run_trigger(state, record) catch {
+    error => fail(error.to_string())
+  }
+  for i in 0..<3 {
+    let created = match trigger_process_event(state, host_test_seed_event(i), 1_700_000_000_000L) {
+      Ok(value) => value
+      Err(message) => fail("cannot process event: " + message)
+    }
+    assert_true(created)
+  }
+  let fires_before = match state.store.get_trigger_fires(record.id, 100) {
+    Ok(value) => value
+    Err(message) => fail("cannot read fire ledger: " + message)
+  }
+  assert_eq(fires_before.length(), 3)
+  for fire in fires_before {
+    assert_true(!fire.run_intent)
+    assert_eq(fire.run_id, "")
+  }
+  // Flip start_run on through the same optimistic update path the owner uses.
+  let current = match state.store.get_trigger(record.id) {
+    Ok(Some(value)) => value
+    Ok(None) => fail("trigger disappeared")
+    Err(message) => fail("cannot read trigger: " + message)
+  }
+  let updated = {
+    ..current,
+    target: { ..current.target, start_run: true },
+    version: current.version + 1,
+    updated_at: "2026-01-01T00:00:02.000Z",
+  }
+  let update_event = @contracts.EventEnvelope::new(
+    id="evt_" + record.id + "_updated",
+    org_id=@contracts.ORG_LOCAL,
+    event_type=@contracts.EVENT_TRIGGER_UPDATED,
+    ts=updated.updated_at,
+    subject="trigger/" + record.id,
+    seq=200L,
+    payload=@contracts.trigger_updated_payload(updated, ["target"], "owner"),
+    idempotency_key="trigger/" + record.id + "/updated/2",
+  )
+  match state.store.record_trigger_update_event(update_event, updated, current.version) {
+    Ok(@contracts.TriggerApplied) => ()
+    Ok(_) => fail("trigger update was not applied")
+    Err(message) => fail("trigger update failed: " + message)
+  }
+  trigger_start_pending_runs_for_trigger(state, record.id)
+  let runs = match state.store.list_runs("", "") {
+    Ok(value) => value
+    Err(message) => fail("cannot list Runs: " + message)
+  }
+  assert_eq(runs.length(), 0)
+  let fires_after = match state.store.get_trigger_fires(record.id, 100) {
+    Ok(value) => value
+    Err(message) => fail("cannot re-read fire ledger: " + message)
+  }
+  for fire in fires_after {
+    assert_eq(fire.run_id, "")
+  }
+  // A direct start attempt for an old fire is a no-op too.
+  let old_fire = fires_after[0]
+  match trigger_start_run_for_fire(state, record.id, old_fire.fire_key) {
+    Ok(value) => assert_eq(value, "")
+    Err(message) => fail("old fire tried to start a Run: " + message)
+  }
+  let runs_after_direct = match state.store.list_runs("", "") {
+    Ok(value) => value
+    Err(message) => fail("cannot list Runs after direct attempt: " + message)
+  }
+  assert_eq(runs_after_direct.length(), 0)
+}

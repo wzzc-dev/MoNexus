@@ -347,12 +347,69 @@ monexus host rpc --method audit.list --params '{"limit":100}'
 
 ## 9. Schedule and webhook triggers
 
-Trigger dispatch is opt-in. Start the host with `--trigger-enabled true` (or
-`MONEXUS_TRIGGER_ENABLED=1`); the default is off. When off, every `trigger.*`
-RPC returns `unsupported` and `POST /hooks/<trigger_id>` returns the same
-uniform 401 as an unknown key; the rest of the host behaves as before. A
-trigger can only create a planned Task — `start_run=true` is still answered
-with `unsupported` (A3.2).
+Trigger dispatch is opt-in and remains **off by default** while A3 completes
+acceptance. Start the host with `--trigger-enabled true` (or
+`MONEXUS_TRIGGER_ENABLED=1`); when off, every `trigger.*` RPC returns
+`unsupported` and `POST /hooks/<trigger_id>` returns the same uniform 401 as
+an unknown key; the rest of the host behaves as before. Event, schedule and
+webhook triggers are wired in the host and covered by
+`scripts/trigger_smoke.sh`; the owner enables the flag explicitly after A3.2
+sign-off.
+
+A trigger creates a Task, never an execution. With `target.start_run=false`
+(default) the Task is `planned`; with `target.start_run=true` the Task is
+created `ready` and the host queues one `mode=agent` Run through the existing
+`run.create` path after the Task commit. `start_run=true` requires
+`target.agent_id` and `target.workspace_id`, and the Run carries the
+idempotency key `trigger:<trigger_id>:<fire_key>`; retrying the same fire
+returns the same Run. A trigger has no command, argv, environment, policy or
+approval field, never executes the goal itself, and never creates, grants or
+answers a Decision: a tool permission still goes to the owner Inbox as
+`decision.requested`, and a denied or expired permission leaves the Run
+not-successful. Disabling a trigger stops new Tasks but does not cancel an
+existing Task or Run.
+
+### Trigger target and Runs
+
+`target` accepts `title_template`, `goal_template`, `agent_id`,
+`workspace_id`, `project_id`, `verify`, and `start_run`. Template variables
+come from the declared event fields or webhook `payload_fields`; they are
+bounded and redacted, are treated as untrusted text, and cannot set a command,
+environment, agent, workspace, project, policy, approval or `start_run`.
+`verify` is allowed only as a subset of the referenced project's `verify`
+list. The trigger-created Run is scheduled and governed exactly like an
+owner-created Run: per-machine concurrency, policy, evidence gate, recovery
+and cancellation all apply.
+
+### Event and manual triggers
+
+Create an event trigger with `"type":"event"`. `source` accepts exactly:
+
+| field | meaning |
+| --- | --- |
+| `event_type` | exact type (`run.failed`) or one trailing `*` prefix (`run.*`, `machine.*`); no other wildcard, regex or boolean expression |
+| `subject_prefix` | optional string prefix for the event subject |
+| `correlation_id` | optional exact correlation filter |
+| `ignore_self` | default `true`; skip events produced by the trigger's own Tasks/Runs |
+| `payload_fields` | declared scalar fields from the event payload (names ≤64 characters) exposed as `{{name}}` variables |
+
+Templates in event triggers can also use `{{event_type}}`, `{{event_subject}}`,
+`{{event_id}}`, `{{event_seq}}`, `{{event_ts}}` and `{{correlation_id}}`.
+High-volume and meta events — `host.heartbeat`, `audit.recorded`,
+`trigger.*`, `run.progress`, `run.heartbeat`, `agent.session.output` and
+`agent.session.updated` — never match. The dispatcher reads the persisted
+event log with cursor `meta.trigger.event_cursor`, so a restart resumes where
+it stopped; replaying the same event hits `(trigger_id, fire_key)` and only
+increments `dedupe_hits`. Trigger-created Tasks carry provenance
+(`trigger_id`, `fire_key`, `root_trigger_id`, `depth`); a chain deeper than 8 is
+rejected with `trigger.rejected reason=cascade_depth`, and `ignore_self`
+prevents a trigger from feeding itself.
+
+`trigger.fire` (`{"trigger_id":..., "note":...}`) is the owner's manual test
+path. It uses `source=manual` and `fire_key=manual:<request_id>`, goes through
+the same validation, rate limits, Task creation and optional Run start, and
+returns `{task_id, run_id, duplicate}`. It is not an execute or approval
+shortcut.
 
 ### Schedule triggers
 
@@ -455,6 +512,51 @@ forward the original method, path and raw body bytes unchanged, preserve
 `Content-Length`, disable caching and body rewriting, and do not rely on
 forwarding headers: the host ignores `X-Forwarded-*` and never trusts a claimed
 client address. Protect or do not expose `/ws` through the same proxy.
+
+### Lifecycle, expiry and incident response
+
+`trigger.list` (`state` filter `active`/`disabled`/`expired`, optional `type`)
+enumerates triggers; `trigger.get` returns the record, its recent fire ledger
+rows (`fire_key`, `source`, `task_id`, `run_id`, `coalesced`, `depth`) and
+webhook key metadata without any secret. `trigger.update` requires
+`expected_version` and rejects a stale version with `conflict`. There is no
+delete in A3: disable or expire, then audit the retained events and fire
+ledger.
+
+`trigger.disable` is idempotent and stops new Tasks immediately; the fire
+transaction re-reads `enabled`/`expires_at`, so there is no check-then-fire
+window. It does **not** cancel an existing Task or Run, nor does it answer a
+pending Decision. `expires_at` is RFC3339 UTC; after it passes the trigger is
+`expired`, `trigger.expired` is emitted once, and new fires are rejected.
+Restoring an expired trigger needs an update setting both `enabled=true` and a
+future `expires_at`.
+
+For an incident:
+
+1. **Unplug the whole surface first.** Stop the host and restart it without
+   `--trigger-enabled` (or with the environment variable unset); every
+   `trigger.*` call then returns `unsupported` and `/hooks/*` returns 401.
+   Existing Tasks/Runs/Decisions keep running normally.
+2. **Disable every trigger.** Page `trigger.list` and call `trigger.disable`
+   for each id. Use `trigger.source.revoke` for every `webhook_keys[].key_id`
+   seen in `trigger.get`, then remove the corresponding
+   `<state-dir>/secrets/webhook/<key_id>.key` files. Revocation is immediate
+   for new requests and never touches existing Tasks.
+3. **Audit what fired.** `trigger.get` gives per-trigger `recent_fires` with
+   `fire_key`, `source`, `task_id` and `run_id`; `events.list` returns the
+   `trigger.fired` / `trigger.rejected` events (subjects `trigger/<id>`) —
+   inspect `reason` (`rate_limited`, `cascade_depth`, `missed_window`,
+   `history_gap`, `clock_skew`, webhook authentication reasons) and
+   `coalesced`/`depth`. For a specific Run, `audit.list {"run_id":...}` shows
+   the `trigger.run.start` record (source, fire_key, task and run ids) plus
+   the normal policy/Decision audit trail.
+4. **Stop the work explicitly if needed.** Disable does not cancel work;
+   use `run.cancel` / `task.cancel`. Any Decision raised by a trigger-created
+   Run stays in the owner Inbox until the owner answers it — a trigger cannot
+   answer or grant it.
+5. **Secrets stay out of the report.** Events, audit detail and logs never
+   contain the HMAC secret; never copy the 0600 key file into an incident
+   bundle, and rotate by adding a new key before revoking the old one.
 
 ## 10. Environment variables
 
