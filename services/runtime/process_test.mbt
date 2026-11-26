@@ -77,8 +77,11 @@ async test "process start streams stdout/stderr/exit and is argv-only" {
   let executor = process_executor(root)
   let runtime = executor.process()
   @async.with_task_group(async fn(group : @async.TaskGroup[Unit]) -> Unit {
+    // The child blocks on stdin, so it cannot exit before `start` returns its
+    // running snapshot: an instantly-exiting child (exit 3 on its own) made
+    // the RUNNING assertion a race that CI lost.
     let spec = ProcessSpec::new(argv=[
-      "/bin/sh", "-c", "printf 'hello'; printf 'oops' >&2; exit 3",
+      "/bin/sh", "-c", "printf 'hello'; printf 'oops' >&2; read go; exit 3",
     ])
     let (info, existing) = match
       runtime.start(group, client_request_id="crid-stream", run_id="proc-stream", spec~) {
@@ -87,6 +90,10 @@ async test "process start streams stdout/stderr/exit and is argv-only" {
     }
     assert_true(!existing)
     assert_eq(info.status, @contracts.RUN_STATUS_RUNNING)
+    match runtime.write_stdin("proc-stream", @utf8.encode("go\n")) {
+      Ok(_) => ()
+      Err(message) => fail("stdin write failed: " + message)
+    }
     let done = process_wait(runtime, "proc-stream", 10_000L)
     assert_eq(done.status, @contracts.RUN_STATUS_FAILED)
     assert_eq(done.exit_code, Some(3))
