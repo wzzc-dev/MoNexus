@@ -363,6 +363,12 @@ pub(all) struct AgentSessionRecord {
   /// Frozen skill snapshot for this session (metadata only; no bodies).
   skill_snapshot : Array[SkillSnapshotEntry]
   artifacts : Array[String]
+  /// A5: the `(machine, agent, profile)` binding that supplied this session's
+  /// managed credential, and the credential version used. Empty when the
+  /// session runs without a managed credential (the V0.1 path). These are
+  /// metadata only; no secret or proxy token is ever recorded here.
+  credential_binding_id : String
+  credential_version : Int
   started_at : String
   updated_at : String
   ended_at : String
@@ -400,6 +406,8 @@ pub fn AgentSessionRecord::new(
     memory_bytes: 0,
     skill_snapshot: [],
     artifacts: [],
+    credential_binding_id: "",
+    credential_version: 0,
     started_at,
     updated_at: started_at,
     ended_at: "",
@@ -437,6 +445,8 @@ pub fn AgentSessionRecord::to_json(self : AgentSessionRecord) -> @json.Json {
     ("memory_injected", json_bool(self.memory_injected)),
     ("memory_bytes", json_int(self.memory_bytes)),
     ("artifacts", artifacts),
+    ("credential_binding_id", json_string(self.credential_binding_id)),
+    ("credential_version", json_int(self.credential_version)),
     ("started_at", json_string(self.started_at)),
     ("updated_at", json_string(self.updated_at)),
     ("ended_at", json_string(self.ended_at)),
@@ -484,6 +494,8 @@ pub fn agent_session_from_json(json : @json.Json) -> AgentSessionRecord? {
       None => []
     },
     artifacts: string_array_field(object, "artifacts"),
+    credential_binding_id: string_field_or(object, "credential_binding_id", ""),
+    credential_version: int_field_or(object, "credential_version", 0),
     started_at: string_field_or(object, "started_at", ""),
     updated_at: string_field_or(object, "updated_at", ""),
     ended_at: string_field_or(object, "ended_at", ""),

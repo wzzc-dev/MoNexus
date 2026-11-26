@@ -2,6 +2,7 @@ pkgtype(kind: "executable")
 
 import {
   "monexus/contracts" @contracts,
+  "monexus/credentials",
   "monexus/host-client" @client,
   "monexus/machines" @machines,
   "monexus/policy" @policy,

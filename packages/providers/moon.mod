@@ -10,6 +10,7 @@ description = "MoNexus provider contracts: SSH and PTY (M1)"
 
 import {
   "monexus/contracts@0.1.0",
+  "monexus/credentials@0.1.0",
   "monexus/policy@0.1.0",
   "monexus/recipes@0.1.0",
   "monexus/runtime-transport@0.1.0",

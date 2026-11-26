@@ -1,5 +1,6 @@
 import {
   "monexus/contracts" @contracts,
+  "monexus/credentials" @credentials,
   "monexus/providers/agent" @agent,
   "monexus/providers/runtime" @provider_runtime,
   "moonbitlang/async",

@@ -798,8 +798,144 @@ copy the token file or a pairing code into a report.
   `129 passed, 1 skipped, 0 failed` and exited 0; the skipped row was the real
   ACP model turn (`M4_REAL_ACP` not set). CI runs the same command as the
   `Runtime e2e` step in `.github/workflows/ci.yml`.
+## 11. Managed account credentials (A5)
 
-## 11. Environment variables
+Managed model accounts are opt-in. With `credential.enabled=false` (default)
+the host keeps the V0.1 path exactly: no proxy environment, every
+`credential.*` RPC answers `credential_disabled`, no credential events are
+written, and readiness does not consult managed accounts.
+
+```bash
+monexus-host serve --credential-enabled true --credential-storage auto \
+  --credential-lease-ttl-ms 900000 --credential-cooldown-ms 600000
+# or MONEXUS_CREDENTIAL_ENABLED=1
+```
+
+`--credential-storage auto` uses the Keychain when the host detects macOS and
+the file backend elsewhere. The file backend is a `0700` directory with `0600`
+files under `<state-dir>/credentials/`; wrong permissions are refused, never
+repaired silently. `--credential-storage file` forces that backend; asking for
+`keychain` on a non-macOS host fails closed (`unsupported`) instead of falling
+back. The Keychain backend feeds the secret through stdin, never argv, but it
+was not exercised in this Linux environment and is reported as unverified.
+
+### Local Agent (the host machine)
+
+1. Put the secret in a `0600` JSON params file so it never enters argv or shell
+   history, then enroll:
+
+   ```bash
+   install -m 0600 /dev/null /tmp/mx-enroll.json
+   $EDITOR /tmp/mx-enroll.json   # {"kind":"api_key","secret":"..."}
+   monexus-host rpc --method credential.enroll --params-file /tmp/mx-enroll.json
+   rm -f /tmp/mx-enroll.json
+   # → {"credential":{"id":"crd_...","version":1,...}}; the secret is not echoed
+   ```
+
+2. Bind the credential to one Agent and profile. An empty `machine_id` means
+   the primary's own machine:
+
+   ```bash
+   monexus-host rpc --method credential.binding.create --params '{
+     "credential_id":"crd_...","agent_id":"claude","profile":"default"}'
+   ```
+
+3. Start the Agent with `"credential_profile":"default"` (optional when only
+   one active binding exists). The Agent environment receives only
+   `MONEXUS_CREDENTIAL_PROXY_URL=http://127.0.0.1:<port>` and
+   `MONEXUS_CREDENTIAL_PROXY_TOKEN=mxp_...`; the real key stays in the store
+   and the loopback proxy swaps the token for the upstream credential. The
+   host spawns Agents with a fixed base allowlist (`PATH`, `HOME`, `LANG`,
+   `LC_ALL`, `TMPDIR`, `USER`, `SHELL`, `TERM`) instead of inheriting its whole
+   environment, so host secrets cannot leak into `/proc/<pid>/environ`.
+
+4. Rotate by enrolling the new secret into the same credential (version+1;
+   old version is rejected and live proxies stop):
+
+   ```bash
+   install -m 0600 /dev/null /tmp/mx-rotate.json
+   $EDITOR /tmp/mx-rotate.json   # {"credential_id":"crd_...","secret":"..."}
+   monexus-host rpc --method credential.rotate --params-file /tmp/mx-rotate.json
+   rm -f /tmp/mx-rotate.json
+   ```
+
+5. Revoke with `credential.revoke {"credential_id":"crd_..."}` (or
+   `binding_id`). Revocation marks the binding, closes its proxies and tokens,
+   deletes the stored secret, and makes new starts fail readiness.
+
+6. Inspect with `credential.status` and `credential.doctor`; both report
+   storage, permissions/readiness, version and fingerprint but never the
+   secret. `credential.binding.list` lists metadata only.
+
+### Remote Agent (paired runtime node)
+
+The primary never holds, receives or forwards the remote secret. The node
+registers the secret on itself, offline, with its own login:
+
+```bash
+# On the node
+install -m 0600 /dev/null /tmp/node-key
+$EDITOR /tmp/node-key
+monexus-host runtime credential-enroll --runtime-id rt_... \
+  --profile default --secret-file /tmp/node-key
+rm -f /tmp/node-key
+# → profile, version, fingerprint, storage, state_dir
+monexus-host runtime credential-status --runtime-id rt_...
+monexus-host runtime credential-revoke --runtime-id rt_... --profile default
+```
+
+`runtime credential-enroll` is a local node command, not a node RPC: the node
+service registers only `runtime.credential.status`, `.lease` and `.revoke`, all
+of which carry binding metadata and fixed reasons, never a secret.
+
+On the primary, create a metadata-only mirror binding with the node's printed
+`credential_id`, `version` and `fingerprint`:
+
+```bash
+monexus-host rpc --method credential.binding.create --params '{
+  "credential_id":"crd_...","machine_id":"mch_...","agent_id":"claude",
+  "profile":"default","node_enrolled":true,"version":1,
+  "fingerprint":"<sha256 from the node>","storage":"file","kind":"api_key"}'
+```
+
+`credential.enroll` (and a rotate carrying a secret) is refused for a remote
+machine — enroll on the node instead. SSH machines are refused with
+`credential_proxy_unsupported`; there is no second best-effort delivery path.
+
+At `agent.start` the primary sends only the binding tuple. The node verifies
+its local profile, version and fingerprint, starts a node-local loopback proxy
+with a short-lived `mxs_` token, and fails closed when the primary lease is
+expired. Node leases are renewed from the primary over the paired channel; with
+the primary unreachable beyond `--credential-lease-ttl-ms` (default 15
+minutes) the node stops authorizing new calls and records
+`credential.lease.expired`. `credential.revoke` sends a metadata-only revoke
+signal: the node deletes its local secret immediately when reachable, otherwise
+at lease expiry, and syncs revocation before accepting new sessions after a
+reconnect. Workspace, primary events and primary state never see the node
+secret.
+
+Remote rotation is node-local: re-run `runtime credential-enroll` with the new
+secret, then mirror the new metadata with
+`credential.rotate {"credential_id":"crd_...","version":N,"fingerprint":"..."}`
+(no `secret`; the primary rejects one for a node-owned credential).
+
+### Limits and rollback
+
+- One credential has exactly one live binding. A second binding returns
+  `credential_reused`; unbound Agent/machine pairs get no proxy coordinates.
+- The `mxp_`/`mxs_` session token is a capability, not the real key. Agent
+  output and persisted surfaces redact it and the real secret patterns
+  (`mxp_`, `mxs_`, `Bearer`, `sk-`, `KEY=value`, private-key blocks); token
+  copies die with the session or revocation.
+- To roll back, revoke every binding first (releases proxies and tokens), then
+  restart with `--credential-enabled false`. Revoked metadata stays for audit
+  and cannot be revived; a rollback never degrades to plaintext injection.
+- Readiness failures are deduplicated with a cooldown
+  (`--credential-cooldown-ms`, default 10 minutes) and become one readable
+  Decision per `(agent, machine, binding, reason)`; they never auto-retry in a
+  storm.
+
+## 12. Environment variables
 
 | variable | purpose |
 | --- | --- |

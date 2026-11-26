@@ -401,6 +401,7 @@ async fn runtime_attach_once(state : HostState) -> Unit {
     if !live.contains(machine_id) {
       state.runtime_machines.remove(machine_id)
       state.runtime_agent_launchers.remove(machine_id)
+      state.credential_ports.remove(machine_id)
       detached.push(machine_id)
     }
   }
@@ -419,6 +420,15 @@ async fn runtime_attach_once(state : HostState) -> Unit {
       )
       state.runtime_machines.set(machine_id, machine)
       state.runtime_agent_launchers.set(machine_id, launcher)
+      if state.credential_enabled {
+        // A5.2: lease/status/revoke signals for a node-local credential use
+        // this live channel. The port carries binding metadata only; the
+        // secret stays on the node and is never sent over the wire.
+        state.credential_ports.set(
+          machine_id,
+          @provider_runtime_agent.runtime_credential_port(machine),
+        )
+      }
       attached.push(machine_id)
     }
   }

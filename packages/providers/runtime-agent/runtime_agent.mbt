@@ -23,6 +23,28 @@ pub fn runtime_agent_env_allowlist() -> Array[String] {
 }
 
 ///|
+///|
+fn process_credential_of(
+  value : @agent.RemoteCredential?,
+) -> @provider_runtime.ProcessCredential? {
+  match value {
+    Some(item) =>
+      Some(
+        @provider_runtime.ProcessCredential::new(
+          binding_id=item.binding_id,
+          credential_id=item.credential_id,
+          machine_id=item.machine_id,
+          agent_id=item.agent_id,
+          profile=item.profile,
+          version=item.version,
+          fingerprint=item.fingerprint,
+        ),
+      )
+    None => None
+  }
+}
+
+///|
 fn exit_of(snapshot : @provider_runtime.ProcessSnapshot) -> @agent.RemoteExit {
   {
     status: snapshot.status,
@@ -135,6 +157,7 @@ pub fn runtime_agent_launcher(
             cwd=cwd,
             inherit_env=allowlist,
             risk=spec.risk,
+            credential=process_credential_of(spec.credential),
             approval=context,
           ) {
           Ok((process, _existing)) => Ok(process)
@@ -149,6 +172,7 @@ pub fn runtime_agent_launcher(
             cwd=cwd,
             inherit_env=allowlist,
             risk=spec.risk,
+            credential=process_credential_of(spec.credential),
           ) {
           Ok((process, _existing)) => Ok(process)
           Err(error) => Err(error.message)
@@ -214,4 +238,50 @@ pub fn runtime_agent_launcher(
     )
     Ok(@agent.RemoteStarted::new(process.run_id, process.pid, api))
   })
+}
+
+///|
+/// Adapter from a paired runtime machine to the primary's metadata-only
+/// credential signals (A5.2). Both calls carry binding metadata and fixed
+/// reasons only; the secret and the node session token never cross here.
+pub fn runtime_credential_port(
+  machine : @provider_runtime.RuntimeMachine,
+) -> @credentials.RemoteCredentialPort {
+  @credentials.RemoteCredentialPort::new(
+    lease=async fn(signal) {
+      let crid = @contracts.new_id("crd", @async.now())
+      match
+        machine.credential_lease(
+          binding_id=signal.binding_id,
+          credential_id=signal.credential_id,
+          machine_id=signal.machine_id,
+          agent_id=signal.agent_id,
+          profile=signal.profile,
+          version=signal.version,
+          fingerprint=signal.fingerprint,
+          lease_ttl_ms=signal.lease_ttl_ms,
+          client_request_id=crid,
+        ) {
+        Ok(_) => Ok(())
+        Err(error) => Err(error.message)
+      }
+    },
+    revoke=async fn(signal) {
+      let crid = @contracts.new_id("crd", @async.now())
+      match
+        machine.credential_revoke(
+          binding_id=signal.binding_id,
+          credential_id=signal.credential_id,
+          machine_id=signal.machine_id,
+          agent_id=signal.agent_id,
+          profile=signal.profile,
+          version=signal.version,
+          fingerprint=signal.fingerprint,
+          client_request_id=crid,
+        ) {
+        Ok(_) => Ok(())
+        Err(error) => Err(error.message)
+      }
+    },
+  )
 }

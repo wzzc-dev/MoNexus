@@ -7,13 +7,13 @@
 /// the answer is written back on the same stdio pipe.
 
 ///|
-const AGENT_TRANSCRIPT_CAP : Int = 131_072
+const AGENT_TRANSCRIPT_CAP : Int32 = 131_072
 
 ///|
-const AGENT_STDERR_CAP : Int = 2_048
+const AGENT_STDERR_CAP : Int32 = 2_048
 
 ///|
-const AGENT_DIFF_CAP : Int = 65_536
+const AGENT_DIFF_CAP : Int32 = 65_536
 
 ///|
 const AGENTS_FILE : String = "AGENTS.md"
@@ -93,12 +93,7 @@ async fn ensure_agent_home(
     )
   }
   let home = state.state_dir + "/agents/" + agent_id
-  @fs.mkdir(
-    home,
-    permission=0o700,
-    recursive=true,
-    allow_exist=true,
-  ) catch {
+  @fs.mkdir(home, permission=0o700, recursive=true, allow_exist=true) catch {
     error => return Err("cannot create agent home: " + error.to_string())
   }
   @fs.mkdir(
@@ -116,15 +111,13 @@ async fn ensure_agent_home(
       "This file is the read-only operating contract for this agent.\n" +
       "MoNexus never modifies it from an agent session; MEMORY.md is the\n" +
       "audited writable memory file.\n"
-    @fs.write_file(
-      agents_path,
-      template,
-      permission=0o444,
-    ) catch {
+    @fs.write_file(agents_path, template, permission=0o444) catch {
       error => return Err("cannot write AGENTS.md: " + error.to_string())
     }
   }
-  @fs.chmod(agents_path, 0o444) catch { _ => () }
+  @fs.chmod(agents_path, 0o444) catch {
+    _ => ()
+  }
   let memory_path = home + "/" + MEMORY_FILE
   let memory_exists = @fs.exists(memory_path) catch { _ => false }
   if !memory_exists {
@@ -132,7 +125,9 @@ async fn ensure_agent_home(
       error => return Err("cannot write MEMORY.md: " + error.to_string())
     }
   }
-  @fs.chmod(memory_path, 0o644) catch { _ => () }
+  @fs.chmod(memory_path, 0o644) catch {
+    _ => ()
+  }
   Ok(home)
 }
 
@@ -154,7 +149,7 @@ async fn read_agent_file(
 
 ///|
 /// Take at most `limit` UTF-16 code units from the head of `text`.
-fn cap_text(text : String, limit : Int) -> String {
+fn cap_text(text : String, limit : Int32) -> String {
   if limit <= 0 {
     return ""
   }
@@ -171,8 +166,8 @@ fn compose_memory_prompt(
   agents : String,
   memory : String,
   prompt : String,
-  limit : Int,
-) -> (String, Int) {
+  limit : Int32,
+) -> (String, Int32) {
   let remaining = limit.max(0)
   let agents_part = cap_text(agents, remaining)
   let memory_part = cap_text(memory, remaining - agents_part.length())
@@ -238,7 +233,7 @@ async fn append_transcript(
       text: combined.substring(start=overflow),
     }
   } else {
-    runtime.transcript.val = { base: current.base, text: combined }
+    runtime.transcript.val = { base: current.base, text: combined, }
   }
   state.mutex.release()
 }
@@ -263,9 +258,7 @@ async fn write_memory_artifact(
   runtime : AgentSessionRuntime,
 ) -> String? {
   let memory_path = runtime.home + "/" + MEMORY_FILE
-  let after = @fs.read_file(memory_path).text() catch {
-    _ => return None
-  }
+  let after = @fs.read_file(memory_path).text() catch { _ => return None }
   let diff = memory_diff(runtime.memory_before, after)
   if diff == "" {
     return None
@@ -275,7 +268,9 @@ async fn write_memory_artifact(
   let path = runtime.home + "/artifacts/" + runtime.id + "-memory.diff"
   @fs.write_file(path, diff, permission=0o600) catch {
     error => {
-      println("monexus-host: cannot write memory artifact: " + error.to_string())
+      println(
+        "monexus-host: cannot write memory artifact: " + error.to_string(),
+      )
       return None
     }
   }
@@ -373,6 +368,7 @@ async fn finalize_agent_session(
   }
   runtime.finalized.val = true
   state.mutex.release()
+  stop_session_credential_proxy(state, runtime.id)
   runtime.process.interrupt()
   let artifact_id = write_memory_artifact(state, runtime)
   let now = @async.now()
@@ -381,13 +377,14 @@ async fn finalize_agent_session(
   expire_session_decisions(state, runtime.id, timestamp)
   let record = match state.store.get_agent_session(runtime.id) {
     Ok(Some(value)) => value
-    _ => @contracts.AgentSessionRecord::new(
-      id=runtime.id,
-      agent_id=runtime.agent_id,
-      mode=@contracts.AGENT_MODE_ACP,
-      cwd="",
-      started_at=timestamp,
-    )
+    _ =>
+      @contracts.AgentSessionRecord::new(
+        id=runtime.id,
+        agent_id=runtime.agent_id,
+        mode=@contracts.AGENT_MODE_ACP,
+        cwd="",
+        started_at=timestamp,
+      )
   }
   let artifacts = record.artifacts
   match artifact_id {
@@ -443,12 +440,12 @@ fn agent_json_id_key(id : @json.Json) -> String {
 }
 
 ///|
-fn permission_options(params : Map[String, @json.Json]) -> Array[
-  @contracts.DecisionOption,
-] {
+fn permission_options(
+  params : Map[String, @json.Json],
+) -> Array[@contracts.DecisionOption] {
   let options : Array[@contracts.DecisionOption] = []
   match params.get("options") {
-    Some(@json.Json::Array(items)) => {
+    Some(@json.Json::Array(items)) =>
       for item in items {
         match @contracts.as_object(item) {
           Some(fields) => {
@@ -466,14 +463,16 @@ fn permission_options(params : Map[String, @json.Json]) -> Array[
           None => ()
         }
       }
-    }
     _ => ()
   }
   options
 }
 
 ///|
-fn decision_title(params : Map[String, @json.Json], agent_id : String) -> String {
+fn decision_title(
+  params : Map[String, @json.Json],
+  agent_id : String,
+) -> String {
   match params.get("toolCall") {
     Some(@json.Json::Object(fields)) =>
       match @contracts.string_field(fields, "title") {
@@ -488,12 +487,11 @@ fn decision_title(params : Map[String, @json.Json], agent_id : String) -> String
 fn decision_detail(params : Map[String, @json.Json]) -> String {
   match params.get("toolCall") {
     Some(value) => value.stringify()
-    None => {
+    None =>
       match params.get("_meta") {
         Some(value) => value.stringify()
         None => ""
       }
-    }
   }
 }
 
@@ -636,7 +634,7 @@ async fn handle_agent_request(
       }
       record_permission_decision(state, runtime, id, object)
     }
-    _ => {
+    _ =>
       ignore(
         runtime.process.write_json(
           @agent.acp_rpc_error(
@@ -646,7 +644,6 @@ async fn handle_agent_request(
           ),
         ),
       )
-    }
   }
 }
 
@@ -683,7 +680,11 @@ async fn handle_agent_response(
   } else {
     match fields.get("result") {
       Some(@json.Json::Object(result)) =>
-        @contracts.string_field_or(result, "stopReason", @contracts.AGENT_STOP_END_TURN)
+        @contracts.string_field_or(
+          result,
+          "stopReason",
+          @contracts.AGENT_STOP_END_TURN,
+        )
       _ => @contracts.AGENT_STOP_END_TURN
     }
   }
@@ -699,7 +700,12 @@ async fn handle_agent_response(
       let _ = state.append_agent_session_event(
         @contracts.EVENT_AGENT_SESSION_OUTPUT,
         runtime.id,
-        @contracts.agent_output_payload(runtime.id, turn, stop_reason, turn_text),
+        @contracts.agent_output_payload(
+          runtime.id,
+          turn,
+          stop_reason,
+          turn_text,
+        ),
         updated,
       )
     }
@@ -727,8 +733,7 @@ async fn handle_agent_message(
       match fields.get("id") {
         Some(id) =>
           handle_agent_request(state, runtime, method_name, id, params)
-        None =>
-          handle_agent_notification(state, runtime, method_name, params)
+        None => handle_agent_notification(state, runtime, method_name, params)
       }
     }
     _ => handle_agent_response(state, runtime, fields)
@@ -800,9 +805,7 @@ async fn agent_session_pump(
 // ---------------------------------------------------------------------------
 
 ///|
-fn agent_spec_from_params(
-  params : Map[String, @json.Json],
-) -> @agent.AgentSpec {
+fn agent_spec_from_params(params : Map[String, @json.Json]) -> @agent.AgentSpec {
   @agent.AgentSpec::new(
     agent_id=@contracts.agent_id_param(params),
     mode=@contracts.agent_mode_param(params),
@@ -839,7 +842,11 @@ fn record_readiness(
       kind=@contracts.DECISION_KIND_READINESS,
       title="Agent not ready: " + readiness.agent_id,
       detail=readiness.error +
-      (if readiness.detail == "" { "" } else { " (" + readiness.detail + ")" }),
+        (if readiness.detail == "" {
+          ""
+        } else {
+          " (" + readiness.detail + ")"
+        }),
       session_id="",
       agent_id=readiness.agent_id,
       options=[],
@@ -866,9 +873,7 @@ async fn handle_agent_probe(
   state.mutex.acquire()
   record_readiness(state, readiness)
   state.mutex.release()
-  let result = @contracts.json_object([
-    ("readiness", readiness.to_json()),
-  ])
+  let result = @contracts.json_object([("readiness", readiness.to_json())])
   send_machine_result(state, sink, request, client_request_id, result)
 }
 
@@ -883,10 +888,13 @@ struct AgentTarget {
   cwd : String
   workspace_id : String
   worktree_id : String
+  /// Machine that owns the cwd. Empty means the primary's own machine.
+  machine_id : String
   launcher : @agent.ProcessLauncher
 }
 
 ///|
+
 ///|
 /// Register the launcher for one paired runtime machine. Called by the
 /// transport attach layer once a primary session exists; tests register the
@@ -963,6 +971,7 @@ async fn agent_target_dir(
   let explicit_machine = @contracts.agent_machine_param(params).trim().to_owned()
   let mut cwd = explicit_cwd.trim().to_owned()
   let mut resolved_workspace = workspace_id
+  let mut target_machine = ""
   let mut launcher = @agent.ProcessLauncher::Local
   // A1.5: an explicit machine makes the target unambiguous. Runtime machines
   // have no workspace record (the provider surface only opens local/SSH
@@ -1011,13 +1020,20 @@ async fn agent_target_dir(
         Err(error) => return Err(error)
       }
     }
-    return Ok({ cwd, workspace_id: resolved_workspace, worktree_id, launcher })
+    return Ok({
+      cwd,
+      workspace_id: resolved_workspace,
+      worktree_id,
+      machine_id: record.id,
+      launcher,
+    })
   }
   if worktree_id != "" {
     let record = match lookup_worktree(state, worktree_id) {
       Ok(value) => value
       Err(error) => return Err(error)
     }
+    target_machine = record.machine_id
     if !machine_is_local(state, record.machine_id) {
       let kind = machine_kind_of(state, record.machine_id)
       if kind != @contracts.MACHINE_KIND_RUNTIME && !@agent.agent_ssh_enabled() {
@@ -1027,8 +1043,7 @@ async fn agent_target_dir(
           ),
         )
       }
-      launcher = match
-        agent_launcher_for_machine(state, record.machine_id) {
+      launcher = match agent_launcher_for_machine(state, record.machine_id) {
         Ok(value) => value
         Err(error) => return Err(error)
       }
@@ -1044,6 +1059,7 @@ async fn agent_target_dir(
       Ok(value) => value
       Err(error) => return Err(error)
     }
+    target_machine = record.machine_id
     if !machine_is_local(state, record.machine_id) {
       let kind = machine_kind_of(state, record.machine_id)
       if kind != @contracts.MACHINE_KIND_RUNTIME && !@agent.agent_ssh_enabled() {
@@ -1053,8 +1069,7 @@ async fn agent_target_dir(
           ),
         )
       }
-      launcher = match
-        agent_launcher_for_machine(state, record.machine_id) {
+      launcher = match agent_launcher_for_machine(state, record.machine_id) {
         Ok(value) => value
         Err(error) => return Err(error)
       }
@@ -1069,7 +1084,13 @@ async fn agent_target_dir(
       None => "."
     }
   }
-  Ok({ cwd, workspace_id: resolved_workspace, worktree_id, launcher })
+  Ok({
+    cwd,
+    workspace_id: resolved_workspace,
+    worktree_id,
+    machine_id: target_machine,
+    launcher,
+  })
 }
 
 ///|
@@ -1226,21 +1247,39 @@ async fn handle_agent_start(
   let home = match ensure_agent_home(state, agent_id) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_internal(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_internal(message),
+      )
       return
     }
   }
   let agents_text = match read_agent_file(state, agent_id, AGENTS_FILE) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_internal(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_internal(message),
+      )
       return
     }
   }
   let memory_text = match read_agent_file(state, agent_id, MEMORY_FILE) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_internal(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_internal(message),
+      )
       return
     }
   }
@@ -1291,6 +1330,37 @@ async fn handle_agent_start(
       return
     }
   }
+  // Credential preparation happens before the spawn: readiness checks the
+  // managed account, the local proxy starts on loopback, and a failure turns
+  // into one readable Decision (deduplicated by the cooldown window).
+  let credential_profile = @contracts.credential_profile_param(request.params)
+  let prepared = match
+    prepare_agent_credential(
+      state,
+      group,
+      target.machine_id,
+      agent_id,
+      credential_profile,
+    ) {
+    Ok(value) => value
+    Err(failure) => {
+      record_credential_readiness_failure(
+        state,
+        target.machine_id,
+        agent_id,
+        credential_profile,
+        failure.reason,
+      )
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        credential_rpc_error(failure.reason, detail=failure.detail),
+      )
+      return
+    }
+  }
   let (composed, memory_bytes) = @skills.compose_skill_prompt(
     agents_text,
     memory_text,
@@ -1298,9 +1368,45 @@ async fn handle_agent_start(
     prompt,
     memory_limit,
   )
-  let spec_env = @contracts.agent_env_from_json(request.params)
+  let spawn_env = @contracts.agent_env_from_json(request.params)
   if skill_setup.token != "" {
-    spec_env.set("MONEXUS_SKILL_TOKEN", skill_setup.token)
+    spawn_env.set("MONEXUS_SKILL_TOKEN", skill_setup.token)
+  }
+  let mut remote_credential : @agent.RemoteCredential? = None
+  let mut credential_binding_id = ""
+  let mut credential_version = 0
+  match prepared {
+    Some(value) => {
+      let binding = value.binding()
+      credential_binding_id = binding.id
+      credential_version = binding.version
+      if value.is_remote() {
+        // The node receives identity metadata only and starts its own local
+        // proxy; the primary never holds this secret.
+        remote_credential = Some(
+          @agent.RemoteCredential::new(
+            binding_id=binding.id,
+            credential_id=binding.credential_id,
+            machine_id=binding.machine_id,
+            agent_id=binding.agent_id,
+            profile=binding.profile,
+            version=binding.version,
+            fingerprint=binding.fingerprint,
+          ),
+        )
+      } else {
+        // Session-scoped proxy coordinates are injected into the spawn env
+        // only. Persisted session records and events never see them.
+        for name, value in value.env() {
+          spawn_env.set(name, value)
+        }
+        match value.proxy {
+          Some(proxy) => state.credential_proxies.set(session_id, proxy)
+          None => ()
+        }
+      }
+    }
+    None => ()
   }
   let spec = @agent.AgentSpec::new(
     agent_id~,
@@ -1308,7 +1414,8 @@ async fn handle_agent_start(
     command=@contracts.agent_command_param(request.params),
     args=@contracts.agent_args_param(request.params),
     cwd~,
-    env=spec_env,
+    env=spawn_env,
+    credential=remote_credential,
   )
   let stderr_tail : Ref[String] = Ref("")
   let stderr_raw : Ref[String] = Ref("")
@@ -1321,18 +1428,14 @@ async fn handle_agent_start(
       spec,
       async fn(line) {
         record_agent_stderr(
-          state,
-          session_id,
-          stderr_raw,
-          stderr_in_key,
-          stderr_tail,
-          line,
+          state, session_id, stderr_raw, stderr_in_key, stderr_tail, line,
         )
       },
-      launcher=launcher,
+      launcher~,
     ) {
     Ok(value) => value
     Err(message) => {
+      stop_session_credential_proxy(state, session_id)
       let readiness = @contracts.AgentReadiness::new(
         ok=false,
         agent_id~,
@@ -1412,18 +1515,20 @@ async fn handle_agent_start(
         load_session = info.load_session
       }
       failure => {
+        stop_session_credential_proxy(state, session_id)
         process.interrupt()
         let (detail, auth) = match failure {
           Some(Err(message)) => {
             let classified = @agent.classify_readiness_failure(message)
             (message, classified)
           }
-          None => (
-            "handshake timed out after " +
-            @agent.agent_timeout_ms().to_string() +
-            "ms",
-            "unknown",
-          )
+          None =>
+            (
+              "handshake timed out after " +
+              @agent.agent_timeout_ms().to_string() +
+              "ms",
+              "unknown",
+            )
           _ => ("handshake failed", "unknown")
         }
         let readiness = @contracts.AgentReadiness::new(
@@ -1481,18 +1586,24 @@ async fn handle_agent_start(
     agent_name,
     acp_version,
     load_session,
-    turns: if prompt == "" { 0 } else { 1 },
+    turns: if prompt == "" {
+      0
+    } else {
+      1
+    },
     memory_injected: memory_bytes > 0,
     memory_bytes,
     skill_snapshot: skill_session_snapshot(skill_setup.entries),
+    credential_binding_id,
+    credential_version,
     updated_at: timestamp,
   }
   let runtime : AgentSessionRuntime = {
     id: session_id,
-    agent_id: agent_id,
+    agent_id,
     acp_session_id,
     process,
-    transcript: Ref({ base: 0L, text: "" }),
+    transcript: Ref({ base: 0L, text: "", }),
     pending: Map([]),
     active_prompts: Map([]),
     turn_text: Ref(""),
@@ -1518,6 +1629,7 @@ async fn handle_agent_start(
     Ok(_) => state.agent_sessions.set(session_id, runtime)
     Err(message) => {
       state.mutex.release()
+      stop_session_credential_proxy(state, session_id)
       process.interrupt()
       finalize_skill_session(state, skill_setup.token, session_id, home)
       agent_io_error(
@@ -1614,10 +1726,9 @@ async fn handle_agent_start(
   }
   match state.group.val {
     Some(active) =>
-      active.spawn_bg(
-        allow_failure=true,
-        () => agent_session_pump(state, runtime),
-      )
+      active.spawn_bg(allow_failure=true, () => {
+        agent_session_pump(state, runtime)
+      })
     None => ()
   }
   send_machine_result(
@@ -1643,14 +1754,26 @@ async fn handle_agent_send(
   let session_id = match @contracts.agent_session_id_param(request.params) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_invalid(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_invalid(message),
+      )
       return
     }
   }
   let text = match @contracts.agent_text_param(request.params) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_invalid(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_invalid(message),
+      )
       return
     }
   }
@@ -1788,7 +1911,13 @@ async fn handle_agent_read(
   let session_id = match @contracts.agent_session_id_param(request.params) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_invalid(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_invalid(message),
+      )
       return
     }
   }
@@ -1821,12 +1950,11 @@ async fn handle_agent_read(
   }
   let transcript = match state.agent_sessions.get(session_id) {
     Some(runtime) => runtime.transcript.val
-    None => {
+    None =>
       match state.agent_transcripts.get(session_id) {
         Some(value) => value
-        None => { base: 0L, text: "" }
+        None => { base: 0L, text: "", }
       }
-    }
   }
   let length = transcript.text.length()
   let start = transcript.base
@@ -1844,12 +1972,9 @@ async fn handle_agent_read(
     let offset = (cursor - start).to_int()
     transcript.text.substring(start=offset)
   }
-  let pending = match state.store.list_decisions(
-    @contracts.DECISION_STATUS_PENDING,
-    session_id,
-  ) {
-    Ok(records) =>
-      if records.length() > 0 { records[0].id } else { "" }
+  let pending = match
+    state.store.list_decisions(@contracts.DECISION_STATUS_PENDING, session_id) {
+    Ok(records) => if records.length() > 0 { records[0].id } else { "" }
     Err(_) => ""
   }
   let runtime_state = match state.agent_sessions.get(session_id) {
@@ -1864,12 +1989,7 @@ async fn handle_agent_read(
     None => record.state
   }
   let projected = { ..record, state: runtime_state, }
-  let result = @contracts.agent_read_result(
-    projected,
-    end,
-    text,
-    pending,
-  )
+  let result = @contracts.agent_read_result(projected, end, text, pending)
   state.mutex.release()
   send_machine_result(state, sink, request, client_request_id, result)
 }
@@ -1909,7 +2029,13 @@ async fn handle_agent_stop(
   let session_id = match @contracts.agent_session_id_param(request.params) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_invalid(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_invalid(message),
+      )
       return
     }
   }
@@ -1976,7 +2102,13 @@ async fn handle_agent_resume(
   let session_id = match @contracts.agent_session_id_param(request.params) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_invalid(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_invalid(message),
+      )
       return
     }
   }
@@ -2062,14 +2194,27 @@ async fn handle_agent_resume(
   let home = match ensure_agent_home(state, record.agent_id) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_internal(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_internal(message),
+      )
       return
     }
   }
-  let memory_before = match read_agent_file(state, record.agent_id, MEMORY_FILE) {
+  let memory_before = match
+    read_agent_file(state, record.agent_id, MEMORY_FILE) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_internal(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_internal(message),
+      )
       return
     }
   }
@@ -2090,12 +2235,7 @@ async fn handle_agent_resume(
   let process = match
     @agent.spawn_agent(group, spec, async fn(line) {
       record_agent_stderr(
-        state,
-        session_id,
-        stderr_raw,
-        stderr_in_key,
-        stderr_tail,
-        line,
+        state, session_id, stderr_raw, stderr_in_key, stderr_tail, line,
       )
     }) {
     Ok(value) => value
@@ -2110,16 +2250,13 @@ async fn handle_agent_resume(
       return
     }
   }
-  let loaded = @async.with_timeout_opt(
-    @agent.agent_timeout_ms(),
-    async fn() {
-      match @agent.acp_initialize(process) {
-        Ok(_) => ()
-        Err(message) => return Err(message)
-      }
-      @agent.acp_load_session(process, record.acp_session_id, record.cwd)
-    },
-  )
+  let loaded = @async.with_timeout_opt(@agent.agent_timeout_ms(), async fn() {
+    match @agent.acp_initialize(process) {
+      Ok(_) => ()
+      Err(message) => return Err(message)
+    }
+    @agent.acp_load_session(process, record.acp_session_id, record.cwd)
+  })
   match loaded {
     Some(Ok(_)) => ()
     failure => {
@@ -2149,7 +2286,7 @@ async fn handle_agent_resume(
     agent_id: record.agent_id,
     acp_session_id: record.acp_session_id,
     process,
-    transcript: Ref({ base: 0L, text: "" }),
+    transcript: Ref({ base: 0L, text: "", }),
     pending: Map([]),
     active_prompts: Map([]),
     turn_text: Ref(""),
@@ -2195,10 +2332,9 @@ async fn handle_agent_resume(
   state.mutex.release()
   match state.group.val {
     Some(active) =>
-      active.spawn_bg(
-        allow_failure=true,
-        () => agent_session_pump(state, runtime),
-      )
+      active.spawn_bg(allow_failure=true, () => {
+        agent_session_pump(state, runtime)
+      })
     None => ()
   }
   send_machine_result(
@@ -2225,14 +2361,26 @@ async fn handle_agent_memory_read(
   let file = match @contracts.agent_memory_file_param(request.params) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_invalid(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_invalid(message),
+      )
       return
     }
   }
   let content = match read_agent_file(state, agent_id, file) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_internal(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_internal(message),
+      )
       return
     }
   }
@@ -2256,7 +2404,13 @@ async fn handle_agent_memory_write(
   let file = match @contracts.agent_memory_file_param(request.params) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_invalid(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_invalid(message),
+      )
       return
     }
   }
@@ -2275,7 +2429,13 @@ async fn handle_agent_memory_write(
   let home = match ensure_agent_home(state, agent_id) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_internal(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_internal(message),
+      )
       return
     }
   }
@@ -2374,7 +2534,7 @@ async fn handle_decision_list(
             record.option_id,
             run_status,
           ),
-          run_status: run_status,
+          run_status,
         }
         if bucket == "" || item.inbox == bucket {
           enriched.push(item)
@@ -2411,7 +2571,13 @@ async fn handle_decision_respond(
   let decision_id = match @contracts.decision_id_param(request.params) {
     Ok(value) => value
     Err(message) => {
-      agent_io_error(state, sink, request, client_request_id, agent_invalid(message))
+      agent_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        agent_invalid(message),
+      )
       return
     }
   }
@@ -2458,14 +2624,7 @@ async fn handle_decision_respond(
   if record.kind == @contracts.DECISION_KIND_VERIFY {
     state.mutex.release()
     handle_verify_decision_respond(
-      state,
-      sink,
-      request,
-      client_request_id,
-      record,
-      option_id,
-      answer_text,
-      answered_by,
+      state, sink, request, client_request_id, record, option_id, answer_text, answered_by,
     )
     return
   }
@@ -2526,9 +2685,8 @@ async fn handle_decision_respond(
         @agent.acp_cancelled_result()
       }
       let written = match runtime {
-        Some(rt) => rt.process.write_json(
-          @agent.acp_rpc_result(value.acp_id, reply),
-        )
+        Some(rt) =>
+          rt.process.write_json(@agent.acp_rpc_result(value.acp_id, reply))
         None => false
       }
       if written {
@@ -2597,7 +2755,11 @@ async fn handle_decision_respond(
       audit(
         state,
         "decision.respond",
-        if answered_by == "" { "owner" } else { answered_by },
+        if answered_by == "" {
+          "owner"
+        } else {
+          answered_by
+        },
         "decision/" + decision_id,
         "answered",
         target=record.run_id,
@@ -2621,14 +2783,22 @@ async fn handle_decision_respond(
           state,
           record.run_id,
           option_id,
-          if answered_by == "" { "owner" } else { answered_by },
+          if answered_by == "" {
+            "owner"
+          } else {
+            answered_by
+          },
         )
       } else if record.kind == @contracts.DECISION_KIND_RECOVERY {
         handle_recovery_decision_respond(
           state,
           record.run_id,
           option_id,
-          if answered_by == "" { "owner" } else { answered_by },
+          if answered_by == "" {
+            "owner"
+          } else {
+            answered_by
+          },
         )
       }
       if delivered || record.kind != @contracts.DECISION_KIND_PERMISSION {
@@ -2699,10 +2869,8 @@ pub async fn reconcile_agent_sessions(
       expire_session_decisions(state, record.id, timestamp)
     }
   }
-  let p = match state.store.list_decisions(
-    @contracts.DECISION_STATUS_PENDING,
-    "",
-  ) {
+  let p = match
+    state.store.list_decisions(@contracts.DECISION_STATUS_PENDING, "") {
     Ok(records) => records
     Err(message) => {
       state.mutex.release()

@@ -1,9 +1,11 @@
 # ADR-0016：账户托管（A5）——平台凭据存储、按机器/Agent 绑定与本地代理注入
 
-- 状态：Proposed（A5 设计；A1/策略/readiness 稳定后实施；待 owner 评审）
+- 状态：Proposed（A5 设计）；**2026-11-26 实施修订：远端托管改为节点本地注册/持有，§5 原「主控按需交付 secret」被取代**（见下）
 - 日期：2026-11-26
 - 依据：`docs/v0.2-plan.md` §1.1（D8）、§1.2（D9）、§2.5（A5）、§3；`docs/architecture.md` §3.1、§6.1、§6.3、§11、§12、§13、§18；ADR-0005（Agent 运行时）、ADR-0006（权限模型）、ADR-0012（配对远端 runtime）、ADR-0011（Agent over SSH）；`packages/contracts/policy.mbt`、`services/host/agents.mbt`、`packages/providers/agent/agent.mbt`、`services/runtime/spec.mbt`、`services/runtime-transport/`
 - 关系：本 ADR 把 A5 的「host 托管账户/模型凭据」细化到可实现；复用现有 readiness/Decision/审计/redaction/配对通道，不改变 A1 的权威与回退边界，不引入第二控制面。A1.3b 正在并行修正，本文只引用「策略快照、审批授予、配对通道」的概念，不固化其摘要载荷或 ack 记账细节。
+
+> **实施修订（2026-11-26，A5.0–A5.3）**：按 `docs/architecture.md` §11「Host 不复制模型密钥」的最严格解释，V0.2 的远端托管改为**节点本地注册与持有**。远端 Agent 的 secret 由节点登录用户在节点上通过节点本地 CLI（`runtime credential-enroll`）注册，存放在节点自己的平台 store（`0600` 文件或节点 Keychain）；主控只保存 `(machine, agent, profile)` 绑定、fingerprint、version、status、last-seen、lease 等元数据，**永不持有、接收或转发 secret**。配对通道只传状态/租约/撤销信号，不传 secret。§5 的原「主控按需拉取并交付 secret」设计在 V0.2 被本节取代；§6.1、§7、§8、§9、§11、§12、§13、§16 与 §18.11 已同步修订。本地（主控所在机器）Agent 仍使用主控平台 store + 本机回环代理，secret 不进入 Agent 环境。
 
 ## 背景
 
@@ -22,7 +24,7 @@ V0.1 的基线是「Agent 使用所在机器自己的登录/账户」：SSH 会�
 - **远端怎么送**：主控如何把密钥交给节点而不经过 Workspace、事件、日志或用户可见的复制面？节点离线时还能用多久？
 - **怎么吊销**：轮换/撤销如何对新请求立即生效？飞行中的请求、节点失联、会话 token 泄漏如何界定？
 
-本 ADR 的结论：**平台存储（macOS Keychain 优先，Linux `0600`；显式降级需审计）+ 按 `(machine, agent, profile)` 的绑定 + Agent 进程所在机器上的本地代理 + 每会话短期能力 token + 配对通道按需交付 + 失败关闭的就绪门**。真实密钥从不进入 Agent 环境、子进程、Workspace、事件、日志、Artifact、Decision 或会话记录。
+本 ADR 的结论：**平台存储（macOS Keychain 优先，Linux `0600`；显式降级需审计）+ 按 `(machine, agent, profile)` 的绑定 + Agent 进程所在机器上的本地代理 + 每会话短期能力 token + 远端 secret 节点本地注册（配对通道只传状态/租约/撤销信号）+ 失败关闭的就绪门**。真实密钥从不进入 Agent 环境、子进程、Workspace、事件、日志、Artifact、Decision 或会话记录，也不跨主控传输。
 
 ## 决策
 
@@ -129,15 +131,18 @@ V0.1 的基线是「Agent 使用所在机器自己的登录/账户」：SSH 会�
 - 子进程（Agent 再 spawn）最多继承 session token；token 短 TTL、绑定会话、可吊销；真实密钥永不进入任何子进程。`services/runtime/spec.mbt` 的 `env`/`inherit_env` 校验继续拒绝空秘密值/凭据型继承名。
 - Workspace 内不出现密钥文件；代理坐标/token 可能被 Agent 写入 Workspace（这是能力 token，不是真实密钥），会话结束失效；e2e 仍扫描真实密钥。
 
-### 5. 远端交付：配对通道按需拉取
+### 5. 远端托管：节点本地注册 + 主控元数据镜像（取代原「按需拉取 secret」）
 
-- **拓扑**：远端 Agent 进程在节点上运行，节点 host 运行代理。主控不把 secret 经 Workspace、文件同步、事件或日志传给节点；节点通过既有配对通道（ADR-0012 的 pinned TLS JSON-RPC）**按需拉取**。
-- **认证与绑定**：节点用已有的机器凭据/会话认证；请求携带 `runtime_id`、`binding_id`、`credential_version` 与请求 nonce。主控校验：绑定 `machine_id == runtime_id`、`state=active`、版本匹配、节点身份有效；不匹配 → 固定错误，不回退到其他绑定。
-- **返回**：secret 只在认证通道的响应体中返回一次（或按 A1.3b 的 sealed/lease 机制），不作为事件/outbox 持久化；节点 ack 只带 `binding_id/version/hash` 之类的非秘密确认。主控的 `credential_deliveries` 只记录投递/确认元数据，不写 secret。
-- **节点本地**：节点把 secret 写入自己的平台 store（§2），代理从内存/Store 读取；节点状态快照、事件、日志、outbox 只含 binding/version/lease，不含 secret。节点不把 secret 放入 Workspace、Agent home 或 shell 历史。
-- **幂等/重放**：按 `(binding_id, credential_version, request_id)` 幂等；重复拉取返回同一版本或 `not_modified`，不重复落盘；节点不能把旧版本用于新会话；重放由机器认证 + nonce/A1.3b 机制约束。
-- **离线/租约**：投递带 `lease_expires_at`（默认 15 分钟；可在不改变语义的前提下收紧）。主控可达时每次心跳/续租延长；不可达且租约过期 → 节点代理**失败关闭**（不发起新请求，不新开会话）。主动 `credential.revoke` 在节点可达时立即删除并断开；不可达时最多等到租约到期。**这是「立即吊销」的边界，必须在 UI/文档中明确。**
-- **A1.3b 依赖**：本轮 A1.3b 正在修正策略快照/审批的载荷与 ack 记账；A5 不固化交付帧的具体字段、摘要算法或 ack 账本，只要求：认证、绑定机校验、幂等、不进事件、可撤销、可租约。最终方法名/帧形状在 A5.0 与 A1.3b 收口后确定（§18.3）。
+> **2026-11-26 取代说明**：本节原设计为主控通过配对通道把 secret 交付到节点。按 §11「Host 不复制模型密钥」的最严格解释，V0.2 改为**secret 只在节点本地注册和持有**；主控不持有、不接收、不转发 secret。以下为实施设计。
+
+- **拓扑**：远端 Agent 进程与代理都在节点上。节点登录用户通过节点本地 CLI `runtime credential-enroll --profile <p> --secret-file <f> [--kind ...] [--credential-storage ...]` 把 secret 写入节点自己的平台 store（§2；目录 `0700`、文件 `0600`，或节点 Keychain）。secret 不经过配对通道、Workspace、文件同步、事件或日志；`runtime.credential.enroll` **不由节点 RPC 服务注册**，节点不接受远程注册。
+- **主控元数据镜像**：owner 在主控执行 `credential.enroll` 时对 runtime 机器只提交非秘密元数据（不接收 secret）；`credential.binding.create` 写入 `(machine, agent, profile)` 绑定与节点侧 fingerprint/version/status 镜像。主控 SQLite 的 `credentials`/`credential_bindings` 只有元数据与不可逆 fingerprint，无 secret 列；事件、outbox、状态快照、Workspace 均不含 secret。
+- **启动校验**：节点启动托管 Agent 前，按 `credential` 标记中的 `(binding_id, credential_id, machine_id, agent_id, profile, version, fingerprint)` 查本地 vault：profile 必须 active、version/fingerprint 必须与主控镜像一致、租约未过期；任一不匹配 → 固定错误，失败关闭，不回退到机器基线或其他绑定。
+- **租约与状态同步**：节点通过配对通道的 `runtime.credential.lease` 从主控续租（只带绑定元数据与 TTL）；主控可达时延长 `lease_expires_at`；主控不可达超过租约（默认 15 分钟，`credential.lease_ttl_ms`）→ 节点代理**失败关闭**，拒绝新请求/新会话，并记录 `credential.lease.expired`。租约续期不改变 secret，也不产生新授权。
+- **撤销/轮换**：主控 `credential.revoke` 校验绑定后经 `runtime.credential.revoke` 发送元数据信号（无 secret）。节点收到后**先删除本地 secret**，再标记 revoked、关闭该 binding 的代理与 `mxs_` session token；节点可达时立即生效，不可达时最多等到租约到期。重连后节点先同步撤销，再接受任何新会话；`rotate` 是节点本地操作（节点重新 enroll 新 secret，version+1），主控只镜像新的 version/fingerprint。旧版本在节点删除新 secret 成功前保持不可用（失败关闭）。
+- **Workspace 边界**：节点 vault 位于节点自己的 `state_dir/credentials`，不属于 Workspace；Workspace/Agent home/会话记录看不到、复制不到 secret；Agent 只得到节点本地回环代理坐标与短期 `mxs_` session token。
+- **幂等/重放**：`credential.*` 与 `runtime.credential.status/lease/revoke` 按 `client_request_id` 幂等；重复信号返回同一结果，不重复副作用；撤销不可被旧请求重放复活；节点状态快照只含 binding/version/state/last-seen/lease。
+- **认证**：配对通道沿用 ADR-0012 的机器认证/pinned TLS；主控校验绑定 `machine_id` 与信号来源一致；跨机器绑定在校验阶段即拒绝（`credential_machine_mismatch`），SSH 机器不支持托管凭据（`credential_proxy_unsupported`），不回退。
 
 ### 6. 启动前 readiness、可读 Decision 与不重试风暴
 
@@ -148,7 +153,7 @@ V0.1 的基线是「Agent 使用所在机器自己的登录/账户」：SSH 会�
 1. 绑定存在且 `active`，`(machine, agent, profile)` 精确匹配；
 2. store 可用（Keychain 可访问或 `0600` 文件权限正确），secret 可读且版本匹配；
 3. 代理能绑定 `127.0.0.1`，profile upstream/host 配置有效，session token 可生成；
-4. 远端：节点可达、交付/租约有效、节点代理已启动；
+4. 远端：节点可达、节点本地已注册且 version/fingerprint 与主控镜像一致、租约有效、节点代理已启动；
 5. Agent profile 兼容代理注入（base URL/env 映射）。
 
 失败 → `agent.readiness.failed`（既有事件）+ `DECISION_KIND_READINESS` Decision；`AgentReadiness.auth` 使用固定 reason 码：
@@ -170,15 +175,15 @@ V0.1 的基线是「Agent 使用所在机器自己的登录/账户」：SSH 会�
 - Decision 标题/详情只含 `agent_id`、`machine_id`、`binding_id`、固定 reason 与**修复动作**（注册/轮换/检查 Keychain/重试节点），绝不含 secret、fingerprint 或 token。
 - **一个打开中的 readiness Decision 覆盖同一 `(agent, machine, binding, version)`**：后续失败复用该 Decision（追加 `credential.readiness.suppressed` 计数审计），不重复创建收件箱项。现有 `record_readiness` 每次失败都建 Decision，A5.0 必须加去重查询/映射。
 - **不自动重试**：自动 Run 重试遇到 credential readiness 失败时停在 `waiting_input`/`unverifiable`，不进入指数退避风暴；owner 通过 Decision 的 `retry`（修复后单次重查）或修改绑定/凭据后清除门禁。冷却窗口默认 10 分钟，可在配置中收紧；被抑制次数写审计。
-- 远端节点离线时，主控不反复下发交付；按退避与租约状态只保留一个待处理项；节点恢复后重新检查一次，仍失败则复用 Decision。
+- 远端节点离线时，主控不反复发送租约/状态信号；按退避与租约状态只保留一个待处理项；节点恢复后重新检查一次，仍失败则复用 Decision。
 - readiness 失败不得被当作成功、不得回退到机器基线（除非 owner 显式把该 Agent 配置为「非托管」）；强制托管模式必须 fail closed。
 
 ### 7. 吊销、轮换与飞行中请求
 
 - **本地撤销**：`credential.revoke` 在提交后立即 (a) 标记 `revoked`，(b) 关闭该 binding 的所有代理监听器与 session token，(c) 删除 store 项（失败则保持 `revocation_pending` 但拒绝使用），(d) 对新请求返回 401/固定错误。新会话 readiness 失败。
-- **远端撤销**：主控在同一认证通道发送 revoke（或更新租约状态）；节点收到后立即关代理/删 store/清 token；节点不可达时最多到 `lease_expires_at`。节点重连后先同步撤销，再接受新会话。
+- **远端撤销**：主控在同一认证通道发送**元数据 revoke 信号**（binding/version/fingerprint，无 secret）；节点收到后先删除本地 store 项，再关代理/清 `mxs_` token；节点不可达时最多到 `lease_expires_at`。节点重连后先同步撤销，再接受新会话。
 - **飞行中请求**：撤销提交后，已经转发到上游的一个请求可能完成（无法撤回已发出的网络请求）；代理在新请求前检查状态，会话 token 立即失效。文档/测试必须明确「立即对新请求生效；最多一个已开始的飞行中请求可能完成」。
-- **轮换**：新 secret 写入 → `version+1` → 旧代理/token 立即失效 → 节点按需拉取新版本（或主控主动通知）→ 成功后删除旧 secret（失败则标记待删但拒绝旧版本）。轮换不改变 binding 身份，不产生新授权。
+- **轮换**：新 secret 在节点本地写入（`runtime credential-enroll`，`version+1`）→ 旧代理/token 立即失效 → 节点删除旧 secret（失败则标记待删但拒绝旧版本）→ 主控只镜像新 version/fingerprint，不接收 secret。轮换不改变 binding 身份，不产生新授权。
 - **会话**：撤销/轮换默认**不自动杀死**正在进行的 Agent 会话，但后续模型调用失败关闭，UI 显示可读原因；owner 可显式停止会话。V1 不做「已建立连接无限期继续」。
 - **审计**：`credential.revoked` 记录 `binding_id`、旧版本、受影响会话数、节点是否在线、是否进入租约等待；不记录 secret。
 
@@ -188,12 +193,12 @@ V0.1 的基线是「Agent 使用所在机器自己的登录/账户」：SSH 会�
 
 | 面 | 规则 |
 |---|---|
-| 事件/`events` | 只写 credential/binding/version/lease/reason；不写 secret/token；`credential.delivered` 只写元数据 |
+| 事件/`events` | 只写 credential/binding/version/fingerprint/lease/reason；不写 secret/token；状态/租约信号只写元数据 |
 | 日志（host/节点/代理） | 代理不记录 header/body；host 只记录方法/路径类别/状态码/耗时；错误固定文本，不回显输入 |
 | Artifact | 既有 Artifact 写入调用 `redact_secrets`；A5 扩展 `mxp_`/`mxs_` 等 token 模式，捕获真实 secret 形值 |
 | Decision | 标题/详情/选项不含 secret；reason 固定；修复动作只引用 binding id |
 | 会话记录/transcript | stderr 已经 redaction；stdout/transcript 在落盘或返回前应用扩展 redaction；真实密钥不可能进入 Agent，session token 视为秘密 |
-| SQLite | `credentials.fingerprint` 只是不可逆摘要；无 secret 列；`credential_deliveries` 无 secret |
+| SQLite | `credentials.fingerprint` 只是不可逆摘要；无 secret 列；`credential_deliveries` 只有状态/租约元数据；secret 只在节点/主控各自的平台 store |
 | 节点状态/outbox | 无 secret；凭据 store 是单独 `0600`/Keychain 项；状态快照不包含它 |
 | Workspace | 不写 secret 文件；e2e 扫描 Workspace/Worktree 与 Agent home；session token 若被 Agent 写入，会话结束吊销，仍不当作真实密钥 |
 | 崩溃/诊断 | 不启用 core dump 采集 secret；不把 env/header 打进错误；doctor 只显示权限/状态/version，不显示值 |
@@ -210,8 +215,8 @@ V0.1 的基线是「Agent 使用所在机器自己的登录/账户」：SSH 会�
 | `credential.bound` / `credential.unbound` | 绑定/解绑 | binding_id、credential_id、machine_id、agent_id、profile |
 | `credential.rotated` | 轮换 | binding_id、old_version、new_version、actor |
 | `credential.revoked` | 吊销 | binding_id、credential_id、reason、sessions_closed、node_online |
-| `credential.delivered` | 节点获得/续租 | binding_id、version、runtime_id、lease_expires_at、request_id |
-| `credential.delivery_failed` | 投递失败 | binding_id、version、runtime_id、固定 reason |
+| `credential.delivered` | 节点本地注册/租约续期（元数据镜像） | binding_id、version、fingerprint、runtime_id、lease_expires_at、request_id（无 secret） |
+| `credential.delivery_failed` | 状态/租约信号失败（节点不可达/未本地注册） | binding_id、version、runtime_id、固定 reason |
 | `credential.proxy.opened` / `.closed` | 会话代理 | binding_id、session_id、port（不写 token） |
 | `credential.proxy.denied` | 代理拒绝 | session_id、固定 reason、计数（限流合并） |
 | `credential.readiness.failed` | 启动前失败 | agent/machine/binding/reason、decision_id |
@@ -229,7 +234,7 @@ V0.1 的基线是「Agent 使用所在机器自己的登录/账户」：SSH 会�
 | 本地同用户访问 | Keychain/`0600`；目录/文件 owner/mode 校验；代理不在 argv/env 暴露真实密钥；不写 Workspace | 同用户恶意进程仍可能读 `0600` 文件、Keychain 项或调试 host；A5 不声称 OS 隔离，建议高威胁场景用独立用户/VM（§18.7） |
 | 被攻陷的 Agent 子进程 | 真实密钥不在 env/子进程；只有短期 session token；token 绑定会话、可吊销、限流；代理固定 upstream；真实密钥不进入 Agent 日志/Workspace | 被攻陷的 Agent 可用 token 发起模型调用（这是其用途），可耗尽配额；同用户仍可能读 store；需配额/隔离（后续） |
 | 日志/Artifact/Decision 泄漏 | 代理不记录 body/header；redaction 扩展；固定错误；测试扫描 | 第三方库/上游错误可能回显请求头；代理/客户端需避免把上游错误原文写入持久面 |
-| 凭据重放 | session token 短 TTL + 绑定 session/version；交付认证+幂等+nonce；旧版本拒绝 | 会话存活期内 token 可被 Agent/同用户复用；按 TTL/撤销/限流缓解 |
+| 凭据重放 | session token 短 TTL + 绑定 session/version；控制信号认证+幂等；旧版本拒绝 | 会话存活期内 token 可被 Agent/同用户复用；按 TTL/撤销/限流缓解 |
 | 跨机器凭据复用 | 一个 credential 只允许一个 binding；`(machine,agent,profile)` 唯一；节点只接受本机 binding | owner 显式共享/供应商只发一把密钥时需另定策略（§18.5） |
 | 飞行中请求/撤销竞态 | 新请求先查状态；token 失效；节点租约 | 一个已开始的请求可能完成（无法撤回已发出的网络调用） |
 | 代理 SSRF/重定向 | 固定 upstream host/path；禁止跨 host 重定向；TLS 校验；方法/大小限制 | profile 配置错误仍可能指向错误 upstream；owner 评审 profile |
@@ -243,7 +248,7 @@ V0.1 的基线是「Agent 使用所在机器自己的登录/账户」：SSH 会�
 - **三轴**：Machine / Workspace / Agent Runtime 不变；A5 的代理在 AgentRuntime/host 本地执行面，不是 `MachineProvider` 的 read/exec/pty 之外的第四种能力；`WorkspaceProvider` 仍 Local/SSH。
 - **ACP**：仅在 `AgentRuntime` 内；代理是模型访问通道，不是 ACP 工具，不影响 ACP permission→Decision。
 - **远端**：节点使用自己的环境/登录作为基线；托管凭据只在节点本地 store + 本地代理；主控不把密钥复制到 Workspace；节点只验证主控授权/策略快照，不自行授予。
-- **「Host 不复制模型密钥」与 A5 的边界**：默认远端 Agent 仍使用节点自身环境/登录，A5 不改变这一点；只有 owner 显式绑定并开启托管时，主控才按需把**该绑定的节点专用副本**交付到节点自己的 store，由节点本地代理使用。主控不把密钥写入 Workspace/工作树/事件/日志/Artifact/Decision/会话记录或节点状态快照，也不让主控成为 Agent 的运行时数据面。若架构 owner 把「Host 不复制模型密钥」解释为「主控完全不得持有/转发模型密钥」，A5 远端必须改为节点本地注册（交付通道只传授权/绑定，不传 secret）；这是实施前必须确认的架构解释（§18.11）。
+- **「Host 不复制模型密钥」与 A5 的边界**：默认远端 Agent 仍使用节点自身环境/登录，A5 不改变这一点。V0.2 按最严格解释实施：远端 secret **只在节点本地注册和持有**，主控只保存 binding/version/fingerprint/status/lease 元数据，配对通道只传状态/租约/撤销信号；主控不持有、不接收、不转发模型密钥，也不把密钥写入 Workspace/工作树/事件/日志/Artifact/Decision/会话记录或节点状态快照，不让主控成为 Agent 的运行时数据面。该解释已在 2026-11-26 由 owner 确认（§18.11），本地 Agent 仍使用主控 store + 本机回环代理。
 - **审批权威**：主控是唯一 Decision 权威；节点只执行策略快照/授予。A5 不新增审批通道。
 - **回退**：未绑定/开关关闭/代理不可用时，按机器自身账户或明确失败关闭；不回退到不安全的明文注入。
 
@@ -251,12 +256,12 @@ V0.1 的基线是「Agent 使用所在机器自己的登录/账户」：SSH 会�
 
 | 类别 | 增量 |
 |---|---|
-| RPC | `credential.enroll`、`credential.binding.create`、`credential.binding.list`、`credential.rotate`、`credential.revoke`、`credential.delete`、`credential.status`、`credential.doctor`（owner 授权；请求/响应不回显 secret） |
-| Agent | `agent.start` 增加 profile/credential 解析与 readiness `auth` reason；`AgentSessionRecord` 增加 `credential_binding_id`、`credential_version`（无 secret/token）；session token 只在 host/节点内存 |
+| RPC | `credential.enroll`、`credential.binding.create`、`credential.binding.list`、`credential.binding.unbind`、`credential.rotate`、`credential.revoke`、`credential.delete`、`credential.status`、`credential.doctor`（owner 授权；请求/响应不回显 secret）。runtime 机器的 enroll/rotate 只提交/镜像元数据，secret 由节点本地 CLI 注册 |
+| Agent | `agent.start` 增加 profile/credential 解析与 readiness `auth` reason；`AgentSessionRecord` 增加 `credential_binding_id`、`credential_version`（无 secret/token）；`AgentSpec.credential`/`RemoteStartSpec.credential` 只携带 binding/version/fingerprint 标记；session token 只在 host/节点内存 |
 | 契约 | `CredentialKind`、`CredentialBinding`、`CredentialStatus`、`CredentialProfile`、`CredentialError` 固定 reason、`EVENT_CREDENTIAL_*`；`AgentSpec.env` 的基础 allowlist 契约（`inherit_env` 收紧）；代理坐标/token 的 env 键名（profile 映射） |
-| 表 | `credentials`（元数据/fingerprint/state/version）、`credential_bindings`（唯一键）、`credential_deliveries`（投递/lease/ack，元数据）、`credential_profiles`（upstream/auth/env 映射，无 secret）；事件仍只写 `events` |
-| 节点（A5.2） | `runtime.credential.pull` / `runtime.credential.ack` / `runtime.credential.revoke` 的概念接口；secret 只在认证响应体/内存，节点 store 独立；具体帧/ack 随 A1.3b 定 |
-| 配置 | `credential.enabled=false`；`credential.storage=keychain / file`；`credential.lease_ttl=15m`；代理限流/超时；基础 env allowlist；readiness 冷却 |
+| 表 | `credentials`（元数据/fingerprint/state/version）、`credential_bindings`（唯一键）、`credential_deliveries`（状态/租约元数据；V0.2 不做 secret 交付）、`credential_requests`（`client_request_id` 幂等）、`credential_profiles`（upstream/auth/env 映射，无 secret）；事件仍只写 `events` |
+| 节点（A5.2） | `runtime.credential.status` / `runtime.credential.lease` / `runtime.credential.revoke`：只传 binding/version/fingerprint/lease/固定 reason，**不传 secret**；节点本地 CLI `runtime credential-enroll` 写节点平台 store；节点 RPC 服务不注册 `runtime.credential.enroll` |
+| 配置 | `credential.enabled=false`；`credential.storage=keychain / file`（host 与节点各自解析，节点 CLI 支持 `--credential-storage`）；`credential.lease_ttl_ms=900000`；代理限流/超时；基础 env allowlist；readiness 冷却 |
 | 运行态 | 代理坐标/token 随 AgentSpec/运行态 env 传递；`agent_env` 的 redaction 只作用于持久化投影，不能改写实际 spawn env；A5.1 必须加测试，避免 token 在持久化前被替换导致代理不可用 |
 | 现有代码调整 | `services/host/agents.mbt` 的 readiness 去重；`packages/providers/agent/agent.mbt` 本地 `inherit_env` 收紧；`services/runtime/spec.mbt` 的 env 校验复用；`redact_secrets`/`is_secret_key_name` 扩展；`services/host/state.mbt` 增加代理/凭据运行态（不持久化 secret） |
 
@@ -268,14 +273,14 @@ V0.1 的基线是「Agent 使用所在机器自己的登录/账户」：SSH 会�
 |---|---|---|
 | A5.0 | 契约/存储抽象/平台探测/`0600`/Keychain 语义；binding 唯一性；readiness 去重/cooldown；redaction 扩展；关闭开关 | 第 1、2、4 条的基础 |
 | A5.1 | 本地代理 + session token + env 基础 allowlist/`inherit_env` 收紧；本地真实模型 e2e；本地撤销/轮换 | 第 1、2、3（本地）、5 条 |
-| A5.2 | 远端按需交付 + 节点 store/代理 + 租约/撤销；Workspace 不可见；跨机拒绝；两台机器 e2e | 第 2、3（远端）、5 条 |
+| A5.2 | 节点本地注册/持有 + 主控元数据镜像 + 节点 store/代理 + 租约/撤销信号（无 secret）；Workspace 不可见；跨机拒绝；两台机器 e2e 断言 secret 不跨主控 | 第 2、3（远端）、5 条 |
 | A5.3 | 审计/doctor/文档/CI/回归；macOS Keychain 非交互验证 | 全部回归与运维 |
 
 | A5 验收（§2.5） | 本 ADR 决策 | 验证 |
 |---|---|---|
 | 只在 keychain/0600；事件/日志/Artifact/Decision/会话记录无明文；redaction 扩展 | §2、§8、§9 | 权限/格式测试；全持久面扫描；redaction 用例 |
 | 按机器/Agent 绑定；未授权拿不到；吊销/轮换立即失效 | §3、§4、§7 | 绑定解析/拒绝、跨机复用拒绝、撤销后 401、轮换旧版本拒绝 |
-| 远端托管通道；Workspace 不可见不可复制；子进程受控 | §4、§5 | 节点交付/租约；Workspace/Agent home 扫描；env/子进程检查 |
+| 远端托管通道；Workspace 不可见不可复制；子进程受控 | §4、§5 | 节点本地注册/租约、secret 不跨主控；Workspace/Agent home 扫描；env/子进程检查 |
 | 启动前 readiness；可读 Decision；不反复重试 | §6 | 缺失/撤销/锁定/离线场景；Decision 去重；自动重试抑制 |
 | 真实模型调用 e2e；无 token 持久化；撤销后失败关闭 | §4、§8、§16 | 显式 key 的真实调用；扫描；撤销后同一调用 401/失败 |
 
@@ -285,7 +290,8 @@ V0.1 的基线是「Agent 使用所在机器自己的登录/账户」：SSH 会�
 |---|---|
 | 把真实密钥放进 `env`（供应商前缀变量等） | 子进程/`/proc`/崩溃/日志泄漏；吊销需重启；无法绑定单会话 |
 | 只做 `0600` 文件，所有平台 | macOS 失去 Keychain 的静态保护；Keychain 可用时明显更好；显式 file 降级已保留 |
-| 主控集中代理，远端 Agent 回连主控 | 远端到主控的额外暴露/延迟/NAT 依赖；节点本地代理更符合「远端使用本机环境」；主控只交付凭据 |
+| 主控集中代理，远端 Agent 回连主控 | 远端到主控的额外暴露/延迟/NAT 依赖；节点本地代理更符合「远端使用本机环境」；主控只下发元数据/授权 |
+| 主控按需把 secret 交付到节点（原 §5） | 与 `docs/architecture.md` §11「Host 不复制模型密钥」的最严格解释冲突，扩大主控持有/转发面；2026-11-26 改为节点本地注册，主控只镜像元数据 |
 | 把密钥复制到 Workspace/挂载 | 直接违反 A5 不可见/不可复制；会进 Artifact/git/日志 |
 | 明文密钥写 SQLite/事件 | 违反验收；备份/审计泄漏面大 |
 | OAuth refresh/device flow + 账户池 | 需要 token 刷新、账户池、并发租约、第二调度；A5 非目标 |
@@ -308,11 +314,11 @@ V0.1 的基线是「Agent 使用所在机器自己的登录/账户」：SSH 会�
 3. **本地注入/子进程**：真实密钥不在 Agent env；session token 存在；Agent 子进程（`sh -c env`）无真实密钥；`/proc/<pid>/environ`（Linux）无真实密钥；Workspace/Agent home 扫描无真实密钥。
 4. **代理**：只接受 session token；替换认证头；拒绝其他 host/path/重定向；超限/超时/限流；代理日志无 header/body；401 不带 secret。
 5. **撤销/轮换**：撤销后新请求 401、readiness 失败；轮换后旧版本 401、新版本工作；飞行中请求的边界与审计符合 §7；重启后状态仍失败关闭。
-6. **远端**：两台机器；节点按需拉取；secret 不出现在事件/日志/outbox/Workspace/节点状态快照；Workspace 内不可见；跨机绑定拒绝；节点离线租约到期失败关闭；重连先同步撤销。
+6. **远端（节点本地托管）**：两台机器；节点本地 CLI 注册 secret（`0600`/Keychain）后主控只见 binding/version/fingerprint；节点启动走本地代理；secret 不出现在主控/节点事件、日志、outbox、状态快照、Workspace 或配对帧中；Workspace 内不可见；跨机绑定与 SSH 机器拒绝；节点离线租约到期失败关闭；重连先同步撤销；e2e 显式断言 secret 从未跨主控。
 7. **readiness/Decision**：缺失/锁定/代理不可用/交付失败各自产生固定 reason；同一问题只保留一个打开 Decision；自动重试不产生风暴；修复后 owner retry 成功。
 8. **真实模型调用 e2e**：使用显式真实 key（CI 缺失则 skip 并标记），通过代理完成一次真实调用；扫描全部持久面（除 credential store）无真实 secret/session token；撤销后同一调用失败关闭。
 9. **redaction**：`mxp_`/`mxs_`、`Bearer`、`sk-`、`KEY=value`、私钥块、profile 头均在 Audit/Decision/Artifact/会话记录中脱敏；`redact_secrets` 单测覆盖。
-10. **交付安全**：未认证节点/错误 machine/旧版本/重放被拒；重复拉取幂等；`credential.delivered` 无 secret；节点状态快照不含 secret。
+10. **节点本地注册/信号安全**：节点 RPC 服务不暴露 enroll；未注册 profile/错误 machine/版本或 fingerprint 不匹配/租约过期/重放均被拒；`runtime.credential.lease`/`revoke` 幂等且帧内无 secret；`credential.delivered` 无 secret；节点状态快照不含 secret；撤销/轮换后节点本地 secret 被删除或拒绝使用。
 11. **回归**：`credential.enabled=false` 时既有 Agent/Run/SSH/runtime 行为、事件 schema、readiness、`agent_env` redaction 不变；`moon test --target native` 全绿。
 
 ### 17. 回退与停用
@@ -326,12 +332,12 @@ V0.1 的基线是「Agent 使用所在机器自己的登录/账户」：SSH 会�
 
 1. **macOS Keychain 非交互路径**：`security` CLI 是否会把 secret 放 argv？是否有可用的原生 helper/API？若没有，headless macOS 是否接受显式 `storage=file` 降级（需审计）？
 2. **Agent CLI 兼容性**：哪些真实 Agent CLI 接受本地 HTTP base URL + bearer/token 头？如果不兼容，A5 的真实模型 e2e 用哪种客户端？是否需要 ACP adapter 侧的代理支持？
-3. **A1.3b 交付接口**：远端交付是 pull 还是 push？方法名、ack/nonce、租约刷新与撤销的最终形状？A5 只依赖认证/幂等/不进事件，需与 A1.3b 收口。
-4. **离线租约窗口**：默认 15 分钟是否可接受？「吊销立即失效」是否要求节点离线时也必须立即（那就需要主控始终可达或额外机制）？
+3. **A1.3b 交付接口（V0.2 已收口）**：V0.2 **不交付 secret**；节点通过配对通道发送 `runtime.credential.status` / `runtime.credential.lease` / `runtime.credential.revoke` 元数据信号（§5、§12）。A1.3b 的策略快照/审批路径保持独立。
+4. **离线租约窗口（V0.2 取默认）**：默认 15 分钟（`credential.lease_ttl_ms=900000`），owner 可收紧；吊销对可达节点立即生效，节点离线时最多到租约到期。要求离线也立即生效需要额外机制，V1 不做。
 5. **一凭据一绑定**：V1 拒绝同一 secret 跨机器/跨 Agent 复用。owner 是否接受为每个绑定单独注册？若供应商只发一把 key，是否走例外流程并承担复用风险？
 6. **多凭据选择**：同一 Agent/profile 是否允许多个 active 候选？当前方案冲突即失败；owner 是否需要显式优先级？
 7. **同用户隔离**：A5 不解决同用户读 `0600`/Keychain/进程内存。是否要在 A5 之外要求独立 OS 用户/容器/VM 作为默认？这会影响 D9 与 A1 的部署模型。
 8. **CI 真实密钥**：真实模型 e2e 在 CI 中如何提供 key（受保护的 secret store/环境），并保证不落日志/缓存？缺失时 skip 是否满足「e2e 通过」的验收口径？
-9. **节点持久化**：节点是否允许把 secret 持久化到本地 store（默认是，支持重启/重连），还是要求仅内存 + 每次交付？后者更安全但更依赖主控可达。
+9. **节点持久化（已决定）**：节点允许把 secret 持久化到本地 store（默认），以支持重启/重连与离线租约；不采用仅内存 + 每次交付的方案。
 10. **代理范围**：是否需要对模型请求体做 DLP/字段白名单，还是透明转发 + 固定 upstream 足够？是否允许流式响应透传？
-11. **固定架构解释**：`docs/architecture.md` §11 的「Host 不复制模型密钥」与 A5 的远端托管交付如何统一？若按最严格解释（主控完全不持有/转发密钥），是否接受「远端只在节点本地注册、主控只存绑定元数据」的替代方案？
+11. **固定架构解释（已解决，2026-11-26）**：按 `docs/architecture.md` §11 的最严格解释实施——主控完全不持有、不接收、不转发模型密钥；远端 secret 只在节点本地注册与持有，主控只存 binding、fingerprint、version、status、last-seen 与 lease 元数据；配对通道只传状态/租约/撤销信号。原 §5「主控按需交付 secret」被取代。
