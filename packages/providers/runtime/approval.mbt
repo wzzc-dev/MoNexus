@@ -47,6 +47,10 @@ pub(all) struct ApprovalRequest {
   /// The command/path being approved, for the Decision detail. The host
   /// redacts it before display; it never enters audit.
   command : Array[String]
+  /// Execution payload values the digest binds (stdin, env values, fs content,
+  /// git worktree flags, cwd), formatted for the Decision detail and redacted
+  /// there. This is what the owner reviews; it never enters audit.
+  payload : Array[String]
   digest : String
   policy_version : String
   policy_hash : String
@@ -145,9 +149,84 @@ pub(all) struct PendingApproval {
 }
 
 ///|
+fn payload_detail_lines(items : Array[String]) -> String {
+  let mut out = ""
+  for item in items {
+    out = out + "\n  " + @contracts.redact_secrets(item)
+  }
+  out
+}
+
+///|
+fn bounded_payload_value(value : String) -> String {
+  let trimmed = if value.length() > 256 {
+    value[:256].to_owned() + "…[truncated]"
+  } else {
+    value
+  }
+  // Redact before the value is carried into the Decision request; the detail
+  // redacts again, so double redaction is harmless and keeps the raw secret
+  // out of the request object itself.
+  @contracts.redact_secrets(trimmed)
+}
+
+///|
+/// The execution-affecting values the node's digest binds, rendered for the
+/// owner's Decision detail. Nothing here is audited.
+fn approval_payload(params : Map[String, @json.Json]) -> Array[String] {
+  let items : Array[String] = []
+  let cwd = @contracts.string_field_or(params, "cwd", "")
+  if cwd != "" {
+    items.push("cwd=" + bounded_payload_value(cwd))
+  }
+  match params.get("env") {
+    Some(@json.Json::Object(env)) =>
+      for name, value in env {
+        match value {
+          @json.Json::String(text) =>
+            items.push("env " + name + "=" + bounded_payload_value(text))
+          _ => ()
+        }
+      }
+    _ => ()
+  }
+  match params.get("stdin") {
+    Some(@json.Json::String(value)) =>
+      items.push("stdin=" + bounded_payload_value(value))
+    _ => ()
+  }
+  match params.get("content") {
+    Some(@json.Json::String(value)) =>
+      items.push("content=" + bounded_payload_value(value))
+    _ => ()
+  }
+  if @contracts.bool_field_or(params, "force", false) {
+    items.push("force=true")
+  }
+  let expected_head = @contracts.string_field_or(params, "expected_head", "")
+  if expected_head != "" {
+    items.push("expected_head=" + bounded_payload_value(expected_head))
+  }
+  let expected_branch = @contracts.string_field_or(
+    params,
+    "expected_branch",
+    "",
+  )
+  if expected_branch != "" {
+    items.push("expected_branch=" + bounded_payload_value(expected_branch))
+  }
+  items
+}
+
+///|
 /// The safe, redacted text a host can put into a Decision detail.
 pub fn ApprovalRequest::detail(self : ApprovalRequest) -> String {
   let command = @contracts.redact_secrets(self.command.join(" "))
+  let payload = if self.payload.is_empty() {
+    ""
+  } else {
+    "\nPayload:" + payload_detail_lines(self.payload)
+  }
   "Remote runtime: " +
   self.rpc_method +
   " on " +
@@ -165,7 +244,8 @@ pub fn ApprovalRequest::detail(self : ApprovalRequest) -> String {
   "\nReason: " +
   self.reason +
   "\nCommand:\n" +
-  command
+  command +
+  payload
 }
 
 ///|
@@ -234,6 +314,121 @@ fn grant_label_from_error(error : @contracts.RpcError) -> String {
     "grant_rejected"
   } else {
     label
+  }
+}
+
+///|
+/// The current publication a mutating call must be bound to. The primary
+/// refuses to send a mutation until the runtime has acknowledged installing
+/// exactly this version and hash: a node that rejected the update, never
+/// received it, or runs in operator-override mode must not be trusted to
+/// execute under the primary's current rules.
+fn delivered_policy(
+  machine : RuntimeMachine,
+  rpc_method : String,
+) -> Result[@transport.PolicyAnnouncement, String] {
+  let announcement = match machine.state.policy_announcement() {
+    Some(value) => value
+    None => {
+      machine.policy_audit(
+        "policy.delivery",
+        "rejected",
+        "method=" + rpc_method + " reason=no_policy_published",
+      )
+      return Err("no policy snapshot is published to this runtime")
+    }
+  }
+  if !machine.state.policy_installed(
+    machine.runtime_id,
+    announcement.version,
+    announcement.hash,
+  ) {
+    machine.policy_audit(
+      "policy.delivery",
+      "rejected",
+      "method=" +
+      rpc_method +
+      " policy_version=" +
+      announcement.version +
+      " reason=policy_not_installed",
+    )
+    return Err(
+      "the runtime has not acknowledged the current policy snapshot",
+    )
+  }
+  Ok(announcement)
+}
+
+///|
+fn mutation_result_matches(
+  result : @json.Json,
+  publication : @transport.PolicyAnnouncement,
+) -> Bool {
+  let object = match @contracts.as_object(result) {
+    Some(value) => value
+    None => return false
+  }
+  let policy = match object.get("policy") {
+    Some(@json.Json::Object(value)) => value
+    _ => return false
+  }
+  @contracts.string_field_or(policy, "policy_version", "") ==
+  publication.version &&
+  @contracts.string_field_or(policy, "policy_hash", "") == publication.hash
+}
+
+///|
+/// Reject a mutating success that does not carry the current policy metadata.
+/// This closes the operator-override gap: a node running `--allow-workspace`
+/// stamps no policy metadata, so its success is never recorded as verified on
+/// the primary.
+fn verified_mutation_result(
+  machine : RuntimeMachine,
+  rpc_method : String,
+  result : @json.Json,
+  publication : @transport.PolicyAnnouncement,
+) -> Result[Unit, String] {
+  if mutation_result_matches(result, publication) {
+    return Ok(())
+  }
+  machine.policy_audit(
+    "policy.delivery",
+    "rejected",
+    "method=" +
+    rpc_method +
+    " policy_version=" +
+    publication.version +
+    " reason=result_not_verified",
+  )
+  Err("the runtime's mutation result cannot be verified under the current policy")
+}
+
+///|
+fn RuntimeMachine::invalidate_stale_pending(
+  self : RuntimeMachine,
+  publication : @transport.PolicyAnnouncement,
+  rpc_method : String,
+) -> Unit {
+  let stale : Array[(String, PendingApproval)] = []
+  for key, pending in self.pending_approvals {
+    if pending.policy_version != publication.version ||
+      pending.policy_hash != publication.hash {
+      stale.push((key, pending))
+    }
+  }
+  for pair in stale {
+    let (key, pending) = pair
+    self.forget_pending(key)
+    self.policy_audit(
+      "policy.approval_invalidated",
+      "invalidated",
+      "method=" +
+      rpc_method +
+      " old_policy_version=" +
+      pending.policy_version +
+      " new_policy_version=" +
+      publication.version,
+    )
   }
 }
 
@@ -394,6 +589,25 @@ pub async fn RuntimeMachine::mutate_with_approval(
       return Err(failure)
     }
   }
+  // Delivery enforcement runs before the first send: the node must have
+  // acknowledged installing the primary's current publication, and pending
+  // approvals from an older publication are invalidated here.
+  let publication = match delivered_policy(self, rpc_method) {
+    Ok(value) => value
+    Err(reason) => {
+      self.policy_audit(
+        "policy.approval_unavailable",
+        "unavailable",
+        "method=" +
+        rpc_method +
+        " run_id=" +
+        binding_run_id +
+        " reason=policy_not_delivered",
+      )
+      return Err(Unavailable(reason))
+    }
+  }
+  self.invalidate_stale_pending(publication, rpc_method)
   let request_params : Map[String, @json.Json] = Map([])
   for key, value in params {
     request_params.set(key, value)
@@ -404,9 +618,12 @@ pub async fn RuntimeMachine::mutate_with_approval(
       @contracts.json_string(client_request_id),
     )
   }
-  let first = channel.request(rpc_method, request_params)
-  let first_error = match first {
-    Ok(value) => return Ok(value)
+  let first_error = match channel.request(rpc_method, request_params) {
+    Ok(value) =>
+      match verified_mutation_result(self, rpc_method, value, publication) {
+        Ok(_) => return Ok(value)
+        Err(reason) => return Err(Unavailable(reason))
+      }
     Err(error) =>
       if error.code == @transport.ERR_APPROVAL_REQUIRED {
         error
@@ -444,6 +661,27 @@ pub async fn RuntimeMachine::mutate_with_approval(
       " reason=run_binding_mismatch",
     )
     return Err(Rejected(@transport.ERR_APPROVAL_INVALID, "run_mismatch"))
+  }
+  if binding.policy_version != publication.version ||
+    binding.policy_hash != publication.hash {
+    self.policy_audit(
+      "policy.approval_invalidated",
+      "invalidated",
+      "method=" +
+      rpc_method +
+      " run_id=" +
+      binding_run_id +
+      " binding_policy_version=" +
+      binding.policy_version +
+      " current_policy_version=" +
+      publication.version +
+      " reason=policy_changed_in_flight",
+    )
+    return Err(
+      Unavailable(
+        "the policy changed while the operation was in flight; it was not executed",
+      ),
+    )
   }
   let key = rpc_method + "|" + binding_run_id
   let now_ms = @async.now()
@@ -507,6 +745,7 @@ pub async fn RuntimeMachine::mutate_with_approval(
     run_id: binding_run_id,
     client_request_id,
     command,
+    payload: approval_payload(params),
     digest: binding.digest,
     policy_version: binding.policy_version,
     policy_hash: binding.policy_hash,
@@ -547,11 +786,53 @@ pub async fn RuntimeMachine::mutate_with_approval(
         )
         return Err(Expired(approved_id))
       }
+      // The publication must still match the binding at mint time: a rotation
+      // between the owner's answer and the grant would otherwise mint a grant
+      // for rules the node no longer runs.
+      let mint_publication = match delivered_policy(self, rpc_method) {
+        Ok(value) => value
+        Err(reason) => {
+          self.forget_pending(key)
+          self.policy_audit(
+            "policy.approval_invalidated",
+            "invalidated",
+            "method=" +
+            rpc_method +
+            " run_id=" +
+            binding_run_id +
+            " reason=policy_not_delivered_at_mint",
+          )
+          return Err(Unavailable(reason))
+        }
+      }
+      if mint_publication.version != binding.policy_version ||
+        mint_publication.hash != binding.policy_hash {
+        self.forget_pending(key)
+        self.policy_audit(
+          "policy.approval_invalidated",
+          "invalidated",
+          "method=" +
+          rpc_method +
+          " run_id=" +
+          binding_run_id +
+          " old_policy_version=" +
+          binding.policy_version +
+          " new_policy_version=" +
+          mint_publication.version +
+          " reason=policy_changed_at_mint",
+        )
+        return Err(
+          Unavailable(
+            "the policy changed before the approval could be used; nothing was executed",
+          ),
+        )
+      }
       let grant = match
         @policy.ApprovalGrant::new(
           run_id=binding_run_id,
           command_digest=binding.digest,
           policy_version=binding.policy_version,
+          policy_hash=binding.policy_hash,
           nonce=pending.nonce,
           issued_at_ms~,
           expires_at_ms=pending.expires_at_ms,
@@ -571,20 +852,39 @@ pub async fn RuntimeMachine::mutate_with_approval(
         @contracts.json_string(grant.encode()),
       )
       match grant_channel.request(rpc_method, request_params) {
-        Ok(value) => {
-          self.forget_pending(key)
-          self.policy_audit(
-            "policy.approval_used",
-            "used",
-            "method=" +
-            rpc_method +
-            " run_id=" +
-            binding_run_id +
-            " decision_id=" +
-            approved_id,
-          )
-          Ok(value)
-        }
+        Ok(value) =>
+          match
+            verified_mutation_result(self, rpc_method, value, mint_publication) {
+            Ok(_) => {
+              self.forget_pending(key)
+              self.policy_audit(
+                "policy.approval_used",
+                "used",
+                "method=" +
+                rpc_method +
+                " run_id=" +
+                binding_run_id +
+                " decision_id=" +
+                approved_id,
+              )
+              Ok(value)
+            }
+            Err(reason) => {
+              self.forget_pending(key)
+              self.policy_audit(
+                "policy.approval_unavailable",
+                "unavailable",
+                "method=" +
+                rpc_method +
+                " run_id=" +
+                binding_run_id +
+                " decision_id=" +
+                approved_id +
+                " reason=result_not_verified",
+              )
+              Err(Unavailable(reason))
+            }
+          }
         Err(error) => {
           let code = error.code
           if code == @transport.ERR_APPROVAL_INVALID {
@@ -796,9 +1096,11 @@ pub async fn RuntimeMachine::exec_start_approved(
 }
 
 ///|
-/// fs.write with Decision-bound approval. The grant is bound to the path and
-/// content digest via the same `ExecutionRequest` the node classifies, so it
-/// cannot authorize a different file or content.
+/// fs.write with Decision-bound approval. The node's digest covers the path
+/// *and* the full content (plus the resolved cwd and workspace root), so a
+/// grant cannot authorize a different file or different bytes. The Decision
+/// detail shows the path and a redacted, length-bounded preview of the
+/// content; the digest binds the full value.
 pub async fn RuntimeMachine::fs_write_approved(
   self : RuntimeMachine,
   path~ : String,

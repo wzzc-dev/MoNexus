@@ -16,16 +16,22 @@ fn vector_request() -> @policy.ExecutionRequest {
 ///|
 test "digest: known vector" {
   let request = vector_request()
-  let expected_canonical = "monexus.exec.v1\n" +
+  let expected_canonical = "monexus.exec.v2\n" +
     "{\"argv\":[\"git\",\"status\",\"--porcelain\"]," +
+    "\"content\":\"\"," +
     "\"cwd\":\"/home/user/ws\"," +
     "\"env\":[\"LANG\",\"PATH\"]," +
+    "\"env_values\":[]," +
+    "\"git_expected_branch\":\"\"," +
+    "\"git_expected_head\":\"\"," +
+    "\"git_force\":false," +
     "\"operation\":\"exec\"," +
+    "\"stdin\":\"\"," +
     "\"workspace_root\":\"/home/user/ws\"}"
   assert_eq(request.canonical(), expected_canonical)
   assert_eq(
     request.digest(),
-    "sha256:296305004bbb2b00ac43a41ad139de7a89f86d78a4552f3167f56cc43da0cd25",
+    "sha256:76ed7d1bb9e5ef3c6054c6ef5a66dbea15b6e8af529ee82247cbb2057f63f08c",
   )
 }
 
@@ -86,18 +92,24 @@ test "digest: argv order and semantic fields are significant" {
 }
 
 ///|
-test "digest: env values are excluded and no secret reaches diagnostics" {
+test "digest: env values are bound but no secret reaches diagnostics" {
   let secret = "supersecret-token-value"
-  // The request model has no env value field at all: only names are digested.
+  // v2 binds explicit environment values in the canonical text. The text is
+  // hashed and never sent or logged; only names reach a Decision or audit.
   let request = @policy.ExecutionRequest::new(
     operation=@policy.PolicyOperation::Exec,
-    argv=["echo", secret],
+    argv=["echo", "hello"],
     cwd="/w",
     workspace_root="/w",
     env_names=["API_KEY"],
+    env_values=[("API_KEY", secret)],
+  )
+  assert_true(
+    request.canonical().contains(
+      "\"env_values\":[[\"API_KEY\",\"" + secret + "\"]]",
+    ),
   )
   assert_true(request.canonical().contains("\"env\":[\"API_KEY\"]"))
-  assert_false(request.canonical().contains("=" + secret))
   let decision = @policy.evaluate(
     @policy.PolicyContext::with_snapshot(
       test_snapshot(),
@@ -109,6 +121,82 @@ test "digest: env values are excluded and no secret reaches diagnostics" {
   assert_false(decision.reason.contains(secret))
   assert_false(decision.encode().contains(secret))
   assert_true(decision.reason.contains("API_KEY"))
+}
+
+///|
+test "digest: env values, stdin, fs content and git flags are individually bound" {
+  let exec_base = @policy.ExecutionRequest::new(
+    operation=@policy.PolicyOperation::Exec,
+    argv=["echo", "hello"],
+    cwd="/w",
+    workspace_root="/w",
+    env_names=["PATH"],
+  )
+  let exec_env_value = @policy.ExecutionRequest::new(
+    operation=@policy.PolicyOperation::Exec,
+    argv=["echo", "hello"],
+    cwd="/w",
+    workspace_root="/w",
+    env_names=["PATH"],
+    env_values=[("PATH", "/usr/local/bin")],
+  )
+  assert_false(exec_base.digest() == exec_env_value.digest())
+  let exec_stdin = @policy.ExecutionRequest::new(
+    operation=@policy.PolicyOperation::Exec,
+    argv=["echo", "hello"],
+    cwd="/w",
+    workspace_root="/w",
+    env_names=["PATH"],
+    stdin="piped input",
+  )
+  assert_false(exec_base.digest() == exec_stdin.digest())
+  assert_false(exec_env_value.digest() == exec_stdin.digest())
+  let write_one = @policy.ExecutionRequest::new(
+    operation=@policy.PolicyOperation::FsWrite,
+    argv=["notes.txt"],
+    cwd="/w",
+    workspace_root="/w",
+    content="one",
+  )
+  let write_two = @policy.ExecutionRequest::new(
+    operation=@policy.PolicyOperation::FsWrite,
+    argv=["notes.txt"],
+    cwd="/w",
+    workspace_root="/w",
+    content="two",
+  )
+  assert_false(write_one.digest() == write_two.digest())
+  let git_plain = @policy.ExecutionRequest::new(
+    operation=@policy.PolicyOperation::GitWrite,
+    argv=["worktree.remove", "wt"],
+    cwd="/w",
+    workspace_root="/w",
+  )
+  let git_forced = @policy.ExecutionRequest::new(
+    operation=@policy.PolicyOperation::GitWrite,
+    argv=["worktree.remove", "wt"],
+    cwd="/w",
+    workspace_root="/w",
+    git_force=true,
+  )
+  assert_false(git_plain.digest() == git_forced.digest())
+  let git_head = @policy.ExecutionRequest::new(
+    operation=@policy.PolicyOperation::GitWrite,
+    argv=["worktree.remove", "wt"],
+    cwd="/w",
+    workspace_root="/w",
+    git_expected_head="0123456789abcdef",
+  )
+  assert_false(git_plain.digest() == git_head.digest())
+  let git_branch = @policy.ExecutionRequest::new(
+    operation=@policy.PolicyOperation::GitWrite,
+    argv=["worktree.remove", "wt"],
+    cwd="/w",
+    workspace_root="/w",
+    git_expected_branch="feature",
+  )
+  assert_false(git_plain.digest() == git_branch.digest())
+  assert_false(git_head.digest() == git_branch.digest())
 }
 
 ///|

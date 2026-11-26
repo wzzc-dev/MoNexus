@@ -49,6 +49,27 @@ fn pa_fresh_snapshot(version : String) -> @policy.PolicySnapshot {
 }
 
 ///|
+/// A snapshot that permits read-only work and nothing else: fs.write and
+/// arbitrary exec are classified as approval-required rather than allowed.
+fn pa_gated_snapshot(version : String) -> @policy.PolicySnapshot {
+  let now = @async.now()
+  let rules = @policy.PolicyRules::new(
+    allow_read_only=true,
+    env_allowlist=["PATH"],
+  )
+  match
+    @policy.PolicySnapshot::new(
+      version~,
+      issued_at_ms=now - 1_000L,
+      expires_at_ms=now + 3_600_000L,
+      rules~,
+    ) {
+    Ok(value) => value
+    Err(message) => abort("cannot build the gated snapshot: " + message)
+  }
+}
+
+///|
 fn pa_announcement(
   snapshot : @policy.PolicySnapshot,
 ) -> @transport.PolicyAnnouncement {
@@ -68,21 +89,20 @@ async fn pa_with_override_node(
 ) -> Unit {
   let base = @fs.tmpdir(prefix=prefix)
   defer @fs.rmdir(base, recursive=true)
-  let workspace = base + "/workspace"
-  @fs.mkdir(workspace, permission=0o700, recursive=true, allow_exist=false) catch {
-    _ => abort("cannot create the test workspace")
-  }
+  // The node and its executor share one real work root; the override gate is
+  // scoped to it rather than to a separate directory exec never uses.
+  let work_root = base + "/rt-policy-test/work"
   let host = match
     NodeHost::open(
       "rt-policy-test",
       state_base=base,
-      workspace_root=workspace,
-      policy=Some(PolicyGate::allow_workspace(workspace)),
+      workspace_root="",
+      policy=Some(PolicyGate::allow_workspace(work_root)),
     ) {
     Ok(value) => value
     Err(message) => abort("cannot open the node host: " + message)
   }
-  body(host, base, workspace)
+  body(host, base, host.workspace_root())
 }
 
 ///|
@@ -141,6 +161,62 @@ fn pa_fs_read_params(path : String) -> Map[String, @json.Json] {
   let params : Map[String, @json.Json] = Map([])
   params.set("path", @contracts.json_string(path))
   params
+}
+
+///|
+fn pa_run_params(run_id : String) -> Map[String, @json.Json] {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("run_id", @contracts.json_string(run_id))
+  params
+}
+
+///|
+fn pa_pty_params(session_id : String) -> Map[String, @json.Json] {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("session_id", @contracts.json_string(session_id))
+  params
+}
+
+///|
+fn pa_pty_input_params(
+  session_id : String,
+  data : String,
+) -> Map[String, @json.Json] {
+  let params = pa_pty_params(session_id)
+  params.set("data", @contracts.json_string(data))
+  params
+}
+
+///|
+fn pa_pty_resize_params(
+  session_id : String,
+  rows : Int,
+  cols : Int,
+) -> Map[String, @json.Json] {
+  let params = pa_pty_params(session_id)
+  params.set("rows", @contracts.json_int(rows))
+  params.set("cols", @contracts.json_int(cols))
+  params
+}
+
+///|
+fn pa_add_env(
+  params : Map[String, @json.Json],
+  name : String,
+  value : String,
+) -> Unit {
+  params.set(
+    "env",
+    @contracts.json_object([(name, @contracts.json_string(value))]),
+  )
+}
+
+///|
+fn pa_add_approval(
+  params : Map[String, @json.Json],
+  grant : @policy.ApprovalGrant,
+) -> Unit {
+  params.set("approval", @contracts.json_string(grant.encode()))
 }
 
 ///|
@@ -243,10 +319,17 @@ fn pa_mode(path : String) -> Int {
 }
 
 ///|
+async fn pa_read_text(path : String) -> String {
+  let data = @fs.read_file(path) catch { _ => abort("cannot read " + path) }
+  data.text() catch { _ => abort("cannot decode " + path) }
+}
+
+///|
 fn pa_grant(
   run_id : String,
   digest : String,
   policy_version : String,
+  policy_hash : String,
   nonce : String,
   issued_at_ms : Int64,
   expires_at_ms : Int64,
@@ -256,6 +339,7 @@ fn pa_grant(
       run_id~,
       command_digest=digest,
       policy_version~,
+      policy_hash~,
       nonce~,
       issued_at_ms~,
       expires_at_ms~,
@@ -334,15 +418,16 @@ test "approval grants are one-time and bound to run, digest and policy" {
     ["sh", "-c", "echo hi"],
   )
   let digest = request.digest()
+  let snapshot = pa_fresh_snapshot("pol-v1")
   let grant = pa_grant(
     "run-1",
     digest,
     "pol-v1",
+    snapshot.content_hash,
     "nonce-0000000001",
     now - 1_000L,
     now + 30_000L,
   )
-  let snapshot = pa_fresh_snapshot("pol-v1")
   match
     @policy.verify_and_consume_for_request(
       grant,
@@ -442,20 +527,17 @@ async test "rejected snapshot install keeps the previous gate" {
 async test "hash-mismatched snapshot leaves a cold node fail-closed" {
   let base = @fs.tmpdir(prefix="mn-pa-cold-reject")
   defer @fs.rmdir(base, recursive=true)
-  let workspace = base + "/workspace"
-  @fs.mkdir(workspace, permission=0o700, recursive=true, allow_exist=false) catch {
-    _ => abort("cannot create the test workspace")
-  }
   let host = match
     NodeHost::open(
       "rt-cold",
       state_base=base,
-      workspace_root=workspace,
+      workspace_root="",
       policy=None,
     ) {
     Ok(value) => value
     Err(message) => abort("cannot open the node host: " + message)
   }
+  let workspace = host.workspace_root()
   assert_eq(host.policy().mode(), "fail_closed")
   let snapshot = pa_fresh_snapshot("pol-v1")
   let other = pa_snapshot(
@@ -495,18 +577,14 @@ async test "persisted snapshot is restored on reopen and tampering fails closed"
   // explicit policy: the persisted announcement must be re-verified and used.
   let base = @fs.tmpdir(prefix="mn-pa-restore")
   defer @fs.rmdir(base, recursive=true)
-  let workspace = base + "/workspace"
-  @fs.mkdir(workspace, permission=0o700, recursive=true, allow_exist=false) catch {
-    _ => abort("cannot create the test workspace")
-  }
   let snapshot = pa_fresh_snapshot("pol-restore")
   let announcement = pa_announcement(snapshot)
   let seeded = match
     NodeHost::open(
       "rt-restore",
       state_base=base,
-      workspace_root=workspace,
-      policy=Some(PolicyGate::allow_workspace(workspace)),
+      workspace_root="",
+      policy=None,
     ) {
     Ok(value) => value
     Err(message) => abort("cannot open the seed host: " + message)
@@ -520,7 +598,7 @@ async test "persisted snapshot is restored on reopen and tampering fails closed"
     NodeHost::open(
       "rt-restore",
       state_base=base,
-      workspace_root=workspace,
+      workspace_root="",
       policy=None,
     ) {
     Ok(value) => value
@@ -561,7 +639,7 @@ async test "persisted snapshot is restored on reopen and tampering fails closed"
     NodeHost::open(
       "rt-restore",
       state_base=base,
-      workspace_root=workspace,
+      workspace_root="",
       policy=None,
     ) {
     Ok(value) => value
@@ -669,6 +747,7 @@ async test "node risk check matches local evaluate for a command vector" {
         argv=["parity.txt"],
         cwd=workspace,
         workspace_root=workspace,
+        content="content",
       ),
     )
     let remote_write = pa_dispatch(
@@ -748,6 +827,7 @@ async test "high-risk command runs once under a Decision-bound grant" {
       binding.run_id,
       binding.digest,
       binding.policy_version,
+      binding.policy_hash,
       "nonce-grant-000001",
       now - 1_000L,
       now + 30_000L,
@@ -831,6 +911,7 @@ async test "a grant cannot authorize another command, run, or policy version" {
       "run-bound",
       other_digest,
       binding.policy_version,
+      binding.policy_hash,
       "nonce-wrong-digest",
       now - 1_000L,
       now + 30_000L,
@@ -850,6 +931,7 @@ async test "a grant cannot authorize another command, run, or policy version" {
       "run-other",
       binding.digest,
       binding.policy_version,
+      binding.policy_hash,
       "nonce-wrong-run-01",
       now - 1_000L,
       now + 30_000L,
@@ -869,6 +951,7 @@ async test "a grant cannot authorize another command, run, or policy version" {
       "run-bound",
       binding.digest,
       binding.policy_version,
+      binding.policy_hash,
       "nonce-expired-0001",
       now - 120_000L,
       now - 60_000L,
@@ -887,6 +970,7 @@ async test "a grant cannot authorize another command, run, or policy version" {
       "run-bound",
       binding.digest,
       binding.policy_version,
+      binding.policy_hash,
       "nonce-future-0001",
       now + 120_000L,
       now + 180_000L,
@@ -922,6 +1006,7 @@ async test "a grant cannot authorize another command, run, or policy version" {
       "run-bound",
       binding.digest,
       binding.policy_version,
+      binding.policy_hash,
       "nonce-v1-outstanding",
       now - 1_000L,
       now + 30_000L,
@@ -950,4 +1035,535 @@ async test "a grant cannot authorize another command, run, or policy version" {
     assert_eq(fresh_binding.policy_version, "pol-v2")
     assert_eq(fresh_binding.policy_hash, v2.content_hash)
   })
+}
+
+///|
+async test "node rejects downgraded and same-version republished snapshots" {
+  pa_with_override_node("mn-pa-monotonic", async fn(host, _base, _workspace) {
+    let now = @async.now()
+    let v2 = pa_snapshot("pol-v2", now - 1_000L, now + 3_600_000L)
+    match host.install_policy_announcement(pa_announcement(v2)) {
+      Ok(_) => ()
+      Err(message) => abort("v2 install failed: " + message)
+    }
+    // An older version with an older generation is refused, never applied.
+    let v1 = pa_snapshot("pol-v1", now - 10_000L, now + 3_600_000L)
+    assert_true(host.install_policy_announcement(pa_announcement(v1)) is Err(_))
+    // The same version text with different rules is a republish in disguise.
+    let republished = pa_snapshot("pol-v2", now - 500L, now + 3_600_000L)
+    assert_true(
+      host.install_policy_announcement(pa_announcement(republished)) is Err(_),
+    )
+    // A newer version whose issued_at does not advance the generation is
+    // likewise older than what is installed.
+    let v3_not_newer = pa_snapshot(
+      "pol-v3",
+      v2.issued_at_ms,
+      now + 3_600_000L,
+    )
+    assert_true(
+      host.install_policy_announcement(pa_announcement(v3_not_newer)) is Err(_),
+    )
+    let probe = host.probe_profile()
+    assert_eq(pa_json_string(probe, "policy_version"), "pol-v2")
+    assert_eq(pa_json_string(probe, "policy_hash"), v2.content_hash)
+    assert_true(host.audit_text().contains("policy.snapshot_rejected"))
+    assert_true(
+      host.audit_text().contains(
+        "same policy version with a different snapshot hash",
+      ),
+    )
+    assert_true(
+      host.audit_text().contains(
+        "policy announcement is older than the installed generation",
+      ),
+    )
+  })
+}
+
+///|
+async test "control calls are classified under policy and blocked when fail-closed" {
+  let base = @fs.tmpdir(prefix="mn-pa-control")
+  defer @fs.rmdir(base, recursive=true)
+  let host = match
+    NodeHost::open("rt-control", state_base=base, workspace_root="", policy=None) {
+    Ok(value) => value
+    Err(message) => abort("cannot open the node host: " + message)
+  }
+  // A fail-closed node has no snapshot, so every control continuation that
+  // mutates a run or session is refused before it can touch the executor.
+  let fail_closed_cases : Array[(String, Map[String, @json.Json], String)] = [
+    (
+      @contracts.METHOD_RUNTIME_EXEC_CANCEL,
+      pa_run_params("run-missing"),
+      "fc-cancel",
+    ),
+    (
+      @contracts.METHOD_RUNTIME_PTY_INPUT,
+      pa_pty_input_params("pty-missing", "hi"),
+      "fc-input",
+    ),
+    (
+      @contracts.METHOD_RUNTIME_PTY_RESIZE,
+      pa_pty_resize_params("pty-missing", 24, 80),
+      "fc-resize",
+    ),
+    (
+      @contracts.METHOD_RUNTIME_PTY_CLOSE,
+      pa_pty_params("pty-missing"),
+      "fc-close",
+    ),
+  ]
+  for control_case in fail_closed_cases {
+    let error = pa_error(
+      pa_dispatch(host, control_case.0, control_case.1, control_case.2),
+    )
+    assert_eq(error.code, @transport.ERR_POLICY_STALE)
+  }
+  // Under an installed snapshot the same calls pass the classifier as
+  // low-risk `control` operations; they may then fail at the executor because
+  // the run/session does not exist, but never as a policy refusal.
+  let snapshot = pa_fresh_snapshot("pol-control")
+  match host.install_policy_announcement(pa_announcement(snapshot)) {
+    Ok(_) => ()
+    Err(message) => abort("control snapshot install failed: " + message)
+  }
+  let installed_cases : Array[(String, Map[String, @json.Json], String)] = [
+    (
+      @contracts.METHOD_RUNTIME_EXEC_CANCEL,
+      pa_run_params("run-missing"),
+      "ok-cancel",
+    ),
+    (
+      @contracts.METHOD_RUNTIME_PTY_INPUT,
+      pa_pty_input_params("pty-missing", "hi"),
+      "ok-input",
+    ),
+    (
+      @contracts.METHOD_RUNTIME_PTY_RESIZE,
+      pa_pty_resize_params("pty-missing", 24, 80),
+      "ok-resize",
+    ),
+    (
+      @contracts.METHOD_RUNTIME_PTY_CLOSE,
+      pa_pty_params("pty-missing"),
+      "ok-close",
+    ),
+  ]
+  for control_case in installed_cases {
+    let error = pa_error(
+      pa_dispatch(host, control_case.0, control_case.1, control_case.2),
+    )
+    assert_true(
+      error.code != @transport.ERR_POLICY_STALE &&
+      error.code != @transport.ERR_POLICY_DENIED &&
+      error.code != @transport.ERR_APPROVAL_REQUIRED &&
+      error.code != @transport.ERR_APPROVAL_INVALID,
+    )
+  }
+  assert_true(host.audit_text().contains("operation=control"))
+  assert_true(host.audit_text().contains("method=runtime.exec.cancel"))
+  assert_true(host.audit_text().contains("method=runtime.pty.input"))
+}
+
+///|
+async test "cwd resolves once against the work root and the digest binds it" {
+  pa_with_override_node("mn-pa-cwd", async fn(host, _base, workspace) {
+    let snapshot = pa_fresh_snapshot("pol-cwd")
+    match host.install_policy_announcement(pa_announcement(snapshot)) {
+      Ok(_) => ()
+      Err(message) => abort("cwd snapshot install failed: " + message)
+    }
+    @fs.mkdir(
+      workspace + "/sub",
+      permission=0o700,
+      recursive=true,
+      allow_exist=true,
+    ) catch {
+      _ => abort("cannot create the sub directory")
+    }
+    let sub = @fs.realpath(workspace + "/sub") catch {
+      _ => abort("cannot resolve the sub directory")
+    }
+    let local = @policy.ExecutionRequest::new(
+      operation=@policy.PolicyOperation::Exec,
+      argv=["pwd"],
+      cwd=sub,
+      workspace_root=workspace,
+    )
+    // A relative cwd is resolved against the executor's real work root before
+    // classification, so the digest names the same absolute path as a local
+    // evaluation of the resolved request.
+    let relative = pa_dispatch(
+      host,
+      @contracts.METHOD_RUNTIME_EXEC_START,
+      pa_exec_params("run-cwd-rel", ["pwd"], "", cwd="sub"),
+      "cwd-rel",
+    )
+    assert_eq(pa_decision_field(relative, "kind"), "allow")
+    assert_eq(pa_decision_field(relative, "digest"), local.digest())
+    // The absolute form of the same directory produces the same digest.
+    let absolute = pa_dispatch(
+      host,
+      @contracts.METHOD_RUNTIME_EXEC_START,
+      pa_exec_params("run-cwd-abs", ["pwd"], "", cwd=sub),
+      "cwd-abs",
+    )
+    assert_eq(pa_decision_field(absolute, "digest"), local.digest())
+    // Absolute and relative escapes are invalid input, never clamped.
+    let escape = pa_error(
+      pa_dispatch(
+        host,
+        @contracts.METHOD_RUNTIME_EXEC_START,
+        pa_exec_params("run-cwd-escape", ["pwd"], "", cwd="/"),
+        "cwd-escape",
+      ),
+    )
+    assert_eq(escape.code, @contracts.ERR_INVALID_PARAMS)
+    let relative_escape = pa_error(
+      pa_dispatch(
+        host,
+        @contracts.METHOD_RUNTIME_EXEC_START,
+        pa_exec_params("run-cwd-up", ["pwd"], "", cwd="../"),
+        "cwd-up",
+      ),
+    )
+    assert_eq(relative_escape.code, @contracts.ERR_INVALID_PARAMS)
+  })
+}
+
+///|
+async test "explicit workspace must resolve to the runtime execution root" {
+  let base = @fs.tmpdir(prefix="mn-pa-workspace")
+  defer @fs.rmdir(base, recursive=true)
+  let first = match
+    NodeHost::open("rt-ws", state_base=base, workspace_root="", policy=None) {
+    Ok(value) => value
+    Err(message) => abort("cannot open the node host: " + message)
+  }
+  let root = first.workspace_root()
+  first.close()
+  // The execution root itself is accepted explicitly.
+  let reopened = match
+    NodeHost::open("rt-ws", state_base=base, workspace_root=root, policy=None) {
+    Ok(value) => value
+    Err(message) => abort("the execution root was not accepted: " + message)
+  }
+  assert_eq(reopened.workspace_root(), root)
+  reopened.close()
+  // Any other directory is refused: exec, fs, PTY and git all run in the
+  // executor's work root, so a different `--workspace` would misbind them.
+  @fs.mkdir(
+    base + "/elsewhere",
+    permission=0o700,
+    recursive=true,
+    allow_exist=true,
+  ) catch {
+    _ => abort("cannot create the unrelated directory")
+  }
+  match
+    NodeHost::open(
+      "rt-ws",
+      state_base=base,
+      workspace_root=base + "/elsewhere",
+      policy=None,
+    ) {
+    Ok(value) => {
+      value.close()
+      abort("an unrelated workspace root was accepted")
+    }
+    Err(message) =>
+      assert_true(message.contains("must resolve to the runtime execution root"))
+  }
+}
+
+///|
+async test "fs.write approval binds the content that is written" {
+  pa_with_override_node("mn-pa-fswrite", async fn(host, _base, workspace) {
+    let snapshot = pa_gated_snapshot("pol-fswrite")
+    match host.install_policy_announcement(pa_announcement(snapshot)) {
+      Ok(_) => ()
+      Err(message) => abort("fs.write snapshot install failed: " + message)
+    }
+    let binding = pa_binding(
+      pa_error(
+        pa_dispatch(
+          host,
+          @contracts.METHOD_RUNTIME_FS_WRITE,
+          pa_fs_write_params("bound.txt", "one"),
+          "fs-bound-1",
+        ),
+      ),
+    )
+    assert_eq(binding.run_id, "fs-bound-1")
+    assert_eq(binding.policy_hash, snapshot.content_hash)
+    assert_eq(binding.risk, @contracts.RISK_MEDIUM)
+    let now = @async.now()
+    let grant = pa_grant(
+      binding.run_id,
+      binding.digest,
+      binding.policy_version,
+      binding.policy_hash,
+      "nonce-fs-content-1",
+      now - 1_000L,
+      now + 30_000L,
+    )
+    // The grant is bound to the content "one"; substituting "two" changes the
+    // digest and is refused before the file is touched.
+    let substituted_params = pa_fs_write_params("bound.txt", "two")
+    pa_add_approval(substituted_params, grant)
+    let substituted = pa_error(
+      pa_dispatch(
+        host,
+        @contracts.METHOD_RUNTIME_FS_WRITE,
+        substituted_params,
+        "fs-bound-1",
+      ),
+    )
+    assert_eq(substituted.code, @transport.ERR_APPROVAL_INVALID)
+    assert_eq(pa_error_string(substituted, "reason"), "digest_mismatch")
+    assert_true(!@fs.exists(workspace + "/bound.txt") catch { _ => true })
+    // The exact path and content execute once under the grant.
+    let approved_params = pa_fs_write_params("bound.txt", "one")
+    pa_add_approval(approved_params, grant)
+    let approved = pa_dispatch(
+      host,
+      @contracts.METHOD_RUNTIME_FS_WRITE,
+      approved_params,
+      "fs-bound-1",
+    )
+    assert_true(pa_json_bool(pa_value(approved), "approval_verified"))
+    assert_eq(pa_read_text(workspace + "/bound.txt"), "one")
+    // The same grant cannot be used twice, even for the same request id.
+    let replay = pa_error(
+      pa_dispatch(
+        host,
+        @contracts.METHOD_RUNTIME_FS_WRITE,
+        approved_params,
+        "fs-bound-1",
+      ),
+    )
+    assert_eq(replay.code, @transport.ERR_APPROVAL_INVALID)
+    assert_eq(pa_error_string(replay, "reason"), "replayed_nonce")
+    // A different content under a fresh request id still needs its own grant.
+    let other = pa_error(
+      pa_dispatch(
+        host,
+        @contracts.METHOD_RUNTIME_FS_WRITE,
+        pa_fs_write_params("bound.txt", "two"),
+        "fs-bound-2",
+      ),
+    )
+    assert_eq(other.code, @transport.ERR_APPROVAL_REQUIRED)
+    assert_eq(pa_read_text(workspace + "/bound.txt"), "one")
+  })
+}
+
+///|
+async test "exec approval binds environment values and stdin" {
+  pa_with_override_node("mn-pa-payload", async fn(host, _base, workspace) {
+    let snapshot = pa_fresh_snapshot("pol-payload")
+    match host.install_policy_announcement(pa_announcement(snapshot)) {
+      Ok(_) => ()
+      Err(message) => abort("payload snapshot install failed: " + message)
+    }
+    let argv = ["sh", "-c", "read value; echo $value"]
+    let first_params = pa_exec_params("run-payload-a", argv, "")
+    pa_add_env(first_params, "PATH", "/bin")
+    first_params.set("stdin", @contracts.json_string("one"))
+    let first = pa_binding(
+      pa_error(
+        pa_dispatch(
+          host,
+          @contracts.METHOD_RUNTIME_EXEC_START,
+          first_params,
+          "payload-a",
+        ),
+      ),
+    )
+    // Same argv, cwd and stdin; only the environment value differs.
+    let env_changed = pa_exec_params("run-payload-b", argv, "")
+    pa_add_env(env_changed, "PATH", "/usr/bin")
+    env_changed.set("stdin", @contracts.json_string("one"))
+    let env_binding = pa_binding(
+      pa_error(
+        pa_dispatch(
+          host,
+          @contracts.METHOD_RUNTIME_EXEC_START,
+          env_changed,
+          "payload-b",
+        ),
+      ),
+    )
+    // Same environment value; only stdin differs.
+    let stdin_changed = pa_exec_params("run-payload-c", argv, "")
+    pa_add_env(stdin_changed, "PATH", "/bin")
+    stdin_changed.set("stdin", @contracts.json_string("two"))
+    let stdin_binding = pa_binding(
+      pa_error(
+        pa_dispatch(
+          host,
+          @contracts.METHOD_RUNTIME_EXEC_START,
+          stdin_changed,
+          "payload-c",
+        ),
+      ),
+    )
+    assert_true(first.digest != env_binding.digest)
+    assert_true(first.digest != stdin_binding.digest)
+    assert_true(env_binding.digest != stdin_binding.digest)
+    // The node's digest is exactly the local request the primary signs.
+    let local = @policy.ExecutionRequest::new(
+      operation=@policy.PolicyOperation::Exec,
+      argv~,
+      cwd=workspace,
+      workspace_root=workspace,
+      env_names=["PATH"],
+      env_values=[("PATH", "/bin")],
+      stdin="one",
+    )
+    assert_eq(first.digest, local.digest())
+    assert_eq(first.policy_hash, snapshot.content_hash)
+  })
+}
+
+///|
+async test "consumed approval nonces survive a node restart" {
+  let base = @fs.tmpdir(prefix="mn-pa-nonce-restart")
+  defer @fs.rmdir(base, recursive=true)
+  let snapshot = pa_gated_snapshot("pol-nonce-restart")
+  let host = match
+    NodeHost::open(
+      "rt-nonce-restart",
+      state_base=base,
+      workspace_root="",
+      policy=None,
+    ) {
+    Ok(value) => value
+    Err(message) => abort("cannot open the node host: " + message)
+  }
+  match host.install_policy_announcement(pa_announcement(snapshot)) {
+    Ok(_) => ()
+    Err(message) => abort("nonce snapshot install failed: " + message)
+  }
+  let workspace = host.workspace_root()
+  let binding = pa_binding(
+    pa_error(
+      pa_dispatch(
+        host,
+        @contracts.METHOD_RUNTIME_FS_WRITE,
+        pa_fs_write_params("nonce.txt", "one"),
+        "nonce-restart-1",
+      ),
+    ),
+  )
+  let now = @async.now()
+  let grant = pa_grant(
+    binding.run_id,
+    binding.digest,
+    binding.policy_version,
+    binding.policy_hash,
+    "nonce-restart-0001",
+    now - 1_000L,
+    now + 60_000L,
+  )
+  let approved_params = pa_fs_write_params("nonce.txt", "one")
+  pa_add_approval(approved_params, grant)
+  let approved = pa_dispatch(
+    host,
+    @contracts.METHOD_RUNTIME_FS_WRITE,
+    approved_params,
+    "nonce-restart-1",
+  )
+  assert_true(pa_json_bool(pa_value(approved), "approval_verified"))
+  assert_eq(pa_read_text(workspace + "/nonce.txt"), "one")
+  assert_eq(pa_mode(base + "/rt-nonce-restart/consumed_nonces.json"), 0o600)
+  host.close()
+  let reopened = match
+    NodeHost::open(
+      "rt-nonce-restart",
+      state_base=base,
+      workspace_root="",
+      policy=None,
+    ) {
+    Ok(value) => value
+    Err(message) => abort("cannot reopen the node host: " + message)
+  }
+  assert_eq(reopened.policy().mode(), "snapshot")
+  // The restart kept the consumed nonce, so the same grant is refused even
+  // though the in-memory approval state is gone.
+  let replay = pa_error(
+    pa_dispatch(
+      reopened,
+      @contracts.METHOD_RUNTIME_FS_WRITE,
+      approved_params,
+      "nonce-restart-1",
+    ),
+  )
+  assert_eq(replay.code, @transport.ERR_APPROVAL_INVALID)
+  assert_eq(pa_error_string(replay, "reason"), "replayed_nonce")
+  assert_eq(pa_read_text(workspace + "/nonce.txt"), "one")
+  reopened.close()
+}
+
+///|
+async test "durable idempotency refuses to rerun an accepted fs.write after restart" {
+  let base = @fs.tmpdir(prefix="mn-pa-durable-restart")
+  defer @fs.rmdir(base, recursive=true)
+  let now = @async.now()
+  let snapshot = pa_snapshot(
+    "pol-durable-restart",
+    now - 1_000L,
+    now + 3_600_000L,
+  )
+  let host = match
+    NodeHost::open(
+      "rt-durable-restart",
+      state_base=base,
+      workspace_root="",
+      policy=None,
+    ) {
+    Ok(value) => value
+    Err(message) => abort("cannot open the node host: " + message)
+  }
+  match host.install_policy_announcement(pa_announcement(snapshot)) {
+    Ok(_) => ()
+    Err(message) => abort("durable snapshot install failed: " + message)
+  }
+  let workspace = host.workspace_root()
+  let first = pa_dispatch(
+    host,
+    @contracts.METHOD_RUNTIME_FS_WRITE,
+    pa_fs_write_params("durable.txt", "one"),
+    "durable-restart-1",
+  )
+  let first_digest = pa_decision_field(first, "digest")
+  assert_true(first_digest.has_prefix("sha256:"))
+  assert_eq(pa_read_text(workspace + "/durable.txt"), "one")
+  assert_eq(pa_mode(base + "/rt-durable-restart/idempotency.json"), 0o600)
+  host.close()
+  let reopened = match
+    NodeHost::open(
+      "rt-durable-restart",
+      state_base=base,
+      workspace_root="",
+      policy=None,
+    ) {
+    Ok(value) => value
+    Err(message) => abort("cannot reopen the node host: " + message)
+  }
+  assert_eq(reopened.policy().mode(), "snapshot")
+  // The accepted request id is replayed with different content. The durable
+  // tombstone returns the recorded result; the mutation must not run again,
+  // and the recorded digest still names the request that actually executed.
+  let replay = pa_dispatch(
+    reopened,
+    @contracts.METHOD_RUNTIME_FS_WRITE,
+    pa_fs_write_params("durable.txt", "two"),
+    "durable-restart-1",
+  )
+  assert_true(replay is Ok(_))
+  assert_eq(pa_read_text(workspace + "/durable.txt"), "one")
+  assert_eq(pa_decision_field(replay, "digest"), first_digest)
+  reopened.close()
 }

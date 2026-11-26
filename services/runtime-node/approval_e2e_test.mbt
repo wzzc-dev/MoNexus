@@ -48,22 +48,35 @@ async fn ae_read_text(path : String) -> String {
 }
 
 ///|
+/// Publish a snapshot and wait until the node has installed it. The primary
+/// pushes `runtime.policy.update` to the live channel; the node verifies the
+/// pin before replacing its gate.
+async fn ae_publish_snapshot(
+  h : NodeHarness,
+  snapshot : @policy.PolicySnapshot,
+) -> Unit {
+  match h.state.publish_policy(snapshot) {
+    Ok(_) => ()
+    Err(message) => abort("cannot publish the test policy: " + message)
+  }
+  host_wait_for("policy install " + snapshot.version, 10_000L, () => {
+    match h.host.policy().verified_snapshot() {
+      Some(value) => value.version == snapshot.version
+      None => false
+    }
+  })
+  // Mutating calls are refused until the primary records the node's ack.
+  host_wait_policy_ack(h.state, h.runtime_id, 10_000L)
+}
+
+///|
 /// Publish a policy and wait until the node has installed it. The primary
 /// pushes `runtime.policy.update` to the live channel; the node verifies the
 /// pin before replacing its gate.
 async fn ae_publish(h : NodeHarness, version : String) -> @policy.PolicySnapshot {
   let now = @async.now()
   let snapshot = pa_snapshot(version, now - 1_000L, now + 3_600_000L)
-  match h.state.publish_policy(snapshot) {
-    Ok(_) => ()
-    Err(message) => abort("cannot publish the test policy: " + message)
-  }
-  host_wait_for("policy install " + version, 10_000L, () => {
-    match h.host.policy().verified_snapshot() {
-      Some(value) => value.version == version
-      None => false
-    }
-  })
+  ae_publish_snapshot(h, snapshot)
   snapshot
 }
 
@@ -329,6 +342,60 @@ async test "policy rotation invalidates an outstanding approval" {
       assert_eq(ae_count(ae_read_text(marker), "rotated"), 1)
       assert_true(host_audit_count(h.state, "policy.approval_invalidated") >= 1)
       assert_true(host_audit_count(h.state, "policy.version_published") >= 2)
+    },
+  )
+}
+
+///|
+async test "fs.write is approved only for the bound path and content" {
+  host_run_scenario(
+    "mn-fs-approval-e2e",
+    "rt-fs-approval-e2e",
+    5_000L,
+    3,
+    5_000L,
+    100L,
+    8,
+    None,
+    async fn(h) {
+      // This snapshot permits read-only work only, so fs.write needs the
+      // owner's Decision instead of being allowed outright.
+      let snapshot = pa_gated_snapshot("pol-fs-e2e")
+      ae_publish_snapshot(h, snapshot)
+      let seen : Ref[Array[@provider_runtime.ApprovalRequest]] = Ref([])
+      let port : @provider_runtime.ApprovalPort = async fn(request) {
+        seen.val.push(request)
+        @provider_runtime.ApprovalOutcome::Approved("dec-fs-e2e")
+      }
+      let approval = @provider_runtime.ApprovalContext::new(
+        port~,
+        ttl_ms=30_000L,
+        wait_ms=2_000L,
+      )
+      let result = h.machine.fs_write_approved(
+        path="approved-fs.txt",
+        content="alpha",
+        client_request_id="e2e-fs-1",
+        approval~,
+      )
+      match result {
+        Ok(_) => ()
+        Err(failure) => abort("approved fs.write failed: " + failure.error_text())
+      }
+      assert_eq(seen.val.length(), 1)
+      let request = seen.val[0]
+      assert_eq(request.runtime_id, "rt-fs-approval-e2e")
+      assert_eq(request.run_id, "e2e-fs-1")
+      assert_eq(request.policy_version, "pol-fs-e2e")
+      assert_eq(request.policy_hash, snapshot.content_hash)
+      assert_eq(request.risk, @contracts.RISK_MEDIUM)
+      // The owner reviews the path and a redacted preview of the content; the
+      // grant's digest binds the full content the node will write.
+      assert_true(request.detail().contains("approved-fs.txt"))
+      assert_true(request.detail().contains("alpha"))
+      assert_eq(ae_read_text(h.workspace + "/approved-fs.txt"), "alpha")
+      assert_eq(host_audit_count(h.state, "policy.approval_requested"), 1)
+      assert_eq(host_audit_count(h.state, "policy.approval_used"), 1)
     },
   )
 }

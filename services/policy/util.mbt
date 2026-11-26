@@ -121,3 +121,35 @@ pub fn is_env_name(name : String) -> Bool {
   }
   true
 }
+
+///|
+/// Sort name/value pairs by name and keep the first occurrence. Environment
+/// values are semantically unordered, so the digest must not depend on the
+/// caller's map iteration order.
+pub fn sorted_pairs_unique(
+  pairs : Array[(String, String)],
+) -> Array[(String, String)] {
+  let sorted = pairs.copy()
+  sorted.sort_by(fn(left, right) {
+    let by_name = left.0.compare(right.0).to_int()
+    if by_name != 0 {
+      by_name
+    } else {
+      left.1.compare(right.1).to_int()
+    }
+  })
+  let out : Array[(String, String)] = []
+  for pair in sorted {
+    let mut duplicate = false
+    for existing in out {
+      if existing.0 == pair.0 {
+        duplicate = true
+        break
+      }
+    }
+    if !duplicate {
+      out.push(pair)
+    }
+  }
+  out
+}

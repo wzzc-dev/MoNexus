@@ -10,6 +10,10 @@ pub(all) enum PolicyOperation {
   FsDelete
   GitRead
   GitWrite
+  /// Continuation of an already-running exec/PTY session (cancel, input,
+  /// resize, close). It mutates nothing new but is still evaluated and
+  /// audited as a mutation; it never silently bypasses the classifier.
+  Control
   Unknown(String)
 }
 
@@ -23,6 +27,7 @@ pub fn PolicyOperation::from_label(label : String) -> PolicyOperation {
     "fs.delete" => FsDelete
     "git.read" => GitRead
     "git.write" => GitWrite
+    "control" => Control
     other => Unknown(other)
   }
 }
@@ -37,6 +42,7 @@ pub fn PolicyOperation::label(self : PolicyOperation) -> String {
     FsDelete => "fs.delete"
     GitRead => "git.read"
     GitWrite => "git.write"
+    Control => "control"
     Unknown(raw) => raw
   }
 }
@@ -65,14 +71,24 @@ pub const MAX_ENV_NAMES : Int = 64
 pub const MAX_PATH_LENGTH : Int = 4_096
 
 ///|
-/// One execution request as the runtime sees it. It deliberately has no env
-/// *values* and no secret material: only names are classified and digested.
+/// One execution request as the runtime sees it. The digest covers every
+/// execution-affecting value: argv, the resolved absolute cwd, environment
+/// names *and values*, stdin, fs.write content and git worktree flags. The
+/// canonical text is hashed and never sent or logged; `PolicyDecision` and the
+/// audit rings carry only the digest, and the host Decision detail redacts the
+/// values before display.
 pub(all) struct ExecutionRequest {
   operation : PolicyOperation
   argv : Array[String]
   cwd : String
   workspace_root : String
   env_names : Array[String]
+  env_values : Array[(String, String)]
+  stdin : String
+  content : String
+  git_force : Bool
+  git_expected_head : String
+  git_expected_branch : String
 }
 
 ///|
@@ -82,6 +98,12 @@ pub fn ExecutionRequest::new(
   cwd~ : String,
   workspace_root~ : String,
   env_names~ : Array[String] = [],
+  env_values~ : Array[(String, String)] = [],
+  stdin~ : String = "",
+  content~ : String = "",
+  git_force~ : Bool = false,
+  git_expected_head~ : String = "",
+  git_expected_branch~ : String = "",
 ) -> ExecutionRequest {
   {
     operation,
@@ -89,6 +111,12 @@ pub fn ExecutionRequest::new(
     cwd,
     workspace_root,
     env_names: sorted_unique(env_names),
+    env_values: sorted_pairs_unique(env_values),
+    stdin,
+    content,
+    git_force,
+    git_expected_head,
+    git_expected_branch,
   }
 }
 
@@ -199,6 +227,18 @@ pub fn ExecutionRequest::validate(self : ExecutionRequest) -> String? {
       return Some("request has an invalid environment variable name")
     }
   }
+  if self.env_values.length() > MAX_ENV_NAMES {
+    return Some("request carries too many environment values")
+  }
+  for pair in self.env_values {
+    let name = pair.0
+    if name.length() > 64 || !is_env_name(name) {
+      return Some("request has an invalid environment variable name")
+    }
+    if pair.1.length() > MAX_ARG_LENGTH {
+      return Some("environment value is too long")
+    }
+  }
   if self.workspace_root.length() > MAX_PATH_LENGTH ||
     self.cwd.length() > MAX_PATH_LENGTH {
     return Some("workspace path is too long")
@@ -245,26 +285,35 @@ pub fn ExecutionRequest::validate(self : ExecutionRequest) -> String? {
 pub const COMMAND_DIGEST_PREFIX : String = "sha256:"
 
 ///|
-pub const COMMAND_DIGEST_DOMAIN : String = "monexus.exec.v1"
+pub const COMMAND_DIGEST_DOMAIN : String = "monexus.exec.v2"
 
 ///|
 /// Canonical serialization used by the digest:
 ///
 /// ```text
-/// monexus.exec.v1\n
-/// {"argv":[...],"cwd":"...","env":[...],"operation":"...","workspace_root":"..."}
+/// monexus.exec.v2\n
+/// {"argv":[...],"content":"...","cwd":"...","env":[...],"env_values":[...],
+///  "git_expected_branch":"...","git_expected_head":"...","git_force":false,
+///  "operation":"...","stdin":"...","workspace_root":"..."}
 /// ```
 ///
 /// `argv` keeps order (it is semantically significant). `env` is the sorted,
-/// de-duplicated list of environment *names*; values never enter this string.
-/// `operation` is the lower-case operation label. Paths and strings are JSON
-/// escaped as defined in `canonical.mbt`.
+/// de-duplicated list of environment names; `env_values` is the sorted list of
+/// explicit name/value pairs. `stdin` and `content` bind script and file
+/// payloads. The git fields bind worktree force/expected-head parameters.
+/// Paths and strings are JSON escaped as defined in `canonical.mbt`.
 pub fn ExecutionRequest::canonical(self : ExecutionRequest) -> String {
   COMMAND_DIGEST_DOMAIN + "\n" + "{" +
   "\"argv\":" + canonical_string_array(self.argv) + "," +
+  "\"content\":" + canonical_quote(self.content) + "," +
   "\"cwd\":" + canonical_quote(self.cwd) + "," +
   "\"env\":" + canonical_string_array(sorted_unique(self.env_names)) + "," +
+  "\"env_values\":" + canonical_pairs(sorted_pairs_unique(self.env_values)) + "," +
+  "\"git_expected_branch\":" + canonical_quote(self.git_expected_branch) + "," +
+  "\"git_expected_head\":" + canonical_quote(self.git_expected_head) + "," +
+  "\"git_force\":" + canonical_bool(self.git_force) + "," +
   "\"operation\":" + canonical_quote(self.operation.label()) + "," +
+  "\"stdin\":" + canonical_quote(self.stdin) + "," +
   "\"workspace_root\":" + canonical_quote(self.workspace_root) +
   "}"
 }

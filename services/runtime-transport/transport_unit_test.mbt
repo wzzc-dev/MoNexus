@@ -646,3 +646,72 @@ test "redaction and constant-time helpers behave" {
   assert_true(bytes_of_hex("00ff") is Some(_))
   assert_true(bytes_of_hex("nope") is None)
 }
+
+///|
+async test "policy acks track only the current publication" {
+  let state = test_primary_with_clock(() => 1_000L) catch {
+    _ => fail("cannot open primary state")
+  }
+  let rules = @policy.PolicyRules::new()
+  let v1 = match
+    @policy.PolicySnapshot::new(
+      version="pol-ack-v1",
+      issued_at_ms=0L,
+      expires_at_ms=3_601_000L,
+      rules~,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("cannot build the v1 snapshot: " + message)
+  }
+  let v2 = match
+    @policy.PolicySnapshot::new(
+      version="pol-ack-v2",
+      issued_at_ms=2_000L,
+      expires_at_ms=3_601_000L,
+      rules~,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("cannot build the v2 snapshot: " + message)
+  }
+  match state.publish_policy(v1) {
+    Ok(_) => ()
+    Err(message) => fail("cannot publish v1: " + message)
+  }
+  // A publication alone is not an installation: no ack, no readiness.
+  assert_false(state.policy_installed("rt-ack", "pol-ack-v1", v1.content_hash))
+  assert_eq(state.installed_policy_count(), 0)
+  // A rejected ack (the node refused the publication) is not readiness.
+  state.record_policy_ack("rt-ack", "pol-ack-v1", v1.content_hash, false)
+  assert_false(state.policy_installed("rt-ack", "pol-ack-v1", v1.content_hash))
+  // An ack for an announcement the primary never published says nothing
+  // about the current one and is ignored.
+  state.record_policy_ack(
+    "rt-ack",
+    "pol-ack-v1",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    true,
+  )
+  assert_eq(state.installed_policy_count(), 0)
+  // An installed ack naming exactly the current publication marks readiness.
+  state.record_policy_ack("rt-ack", "pol-ack-v1", v1.content_hash, true)
+  assert_true(state.policy_installed("rt-ack", "pol-ack-v1", v1.content_hash))
+  assert_eq(state.installed_policy_count(), 1)
+  // Rotation without an install: publishing v2 clears readiness, and a late
+  // ack for the previous publication cannot restore it.
+  match state.publish_policy(v2) {
+    Ok(_) => ()
+    Err(message) => fail("cannot publish v2: " + message)
+  }
+  assert_eq(state.installed_policy_count(), 0)
+  assert_false(state.policy_installed("rt-ack", "pol-ack-v1", v1.content_hash))
+  assert_false(state.policy_installed("rt-ack", "pol-ack-v2", v2.content_hash))
+  state.record_policy_ack("rt-ack", "pol-ack-v1", v1.content_hash, true)
+  assert_eq(state.installed_policy_count(), 0)
+  // The new publication is ready only after its own ack, and a rejected ack
+  // for it clears readiness again.
+  state.record_policy_ack("rt-ack", "pol-ack-v2", v2.content_hash, true)
+  assert_true(state.policy_installed("rt-ack", "pol-ack-v2", v2.content_hash))
+  state.record_policy_ack("rt-ack", "pol-ack-v2", v2.content_hash, false)
+  assert_false(state.policy_installed("rt-ack", "pol-ack-v2", v2.content_hash))
+  assert_eq(state.installed_policy_count(), 0)
+}

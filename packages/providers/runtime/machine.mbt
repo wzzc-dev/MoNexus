@@ -106,6 +106,22 @@ async fn RuntimeMachine::request(
     Some(value) => value
     None => return Err(not_connected_error(self.runtime_id))
   }
+  // Every mutating method (including PTY control continuations, exec.cancel
+  // and git writes) needs the current publication installed and acked. The
+  // result must also carry that publication's metadata; an operator-override
+  // node therefore cannot report a verified success.
+  let mutating = @contracts.runtime_method_mutates(rpc_method)
+  let publication : @transport.PolicyAnnouncement? = if mutating {
+    match delivered_policy(self, rpc_method) {
+      Ok(value) => Some(value)
+      Err(reason) =>
+        return Err(
+          @contracts.RpcError::new(@transport.ERR_POLICY_STALE, reason),
+        )
+    }
+  } else {
+    None
+  }
   // `client_request_id` is optional at the transport layer; application
   // methods that need it validate it themselves.
   let result = channel.request(rpc_method, params)
@@ -127,6 +143,22 @@ async fn RuntimeMachine::request(
         " code=" +
         error.code.to_string(),
       )
+  }
+  match result {
+    Ok(value) =>
+      match publication {
+        Some(announcement) =>
+          match
+            verified_mutation_result(self, rpc_method, value, announcement) {
+            Ok(_) => ()
+            Err(reason) =>
+              return Err(
+                @contracts.RpcError::new(@transport.ERR_POLICY_STALE, reason),
+              )
+          }
+        None => ()
+      }
+    Err(_) => ()
   }
   result
 }

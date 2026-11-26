@@ -1114,6 +1114,17 @@ async fn PrimaryServer::handle_notification(
     )
     let accepted = outcome == POLICY_ACK_INSTALLED &&
       self.state.policy_ack_matches(version, hash)
+    // Only an ack naming the current publication changes installed-state.
+    // The provider refuses mutating dispatch and grant minting until the
+    // runtime has acked exactly this version and hash.
+    if self.state.policy_ack_matches(version, hash) {
+      self.state.record_policy_ack(
+        session.runtime_id,
+        version,
+        hash,
+        accepted,
+      )
+    }
     self.state.audit.record(
       if accepted {
         "policy.version_acked"

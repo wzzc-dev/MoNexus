@@ -208,19 +208,24 @@ pub async fn save_policy_announcement(
 pub async fn load_policy_announcement(
   path : String,
 ) -> Result[PolicyAnnouncement, String] {
-  match stat_path(path) {
+  // lstat: a symlink in the 0700 state dir must not masquerade as a 0600
+  // regular file, and the size is bounded before any read.
+  let stat = match lstat_path(path) {
     None => return Err("policy file is missing")
-    Some(info) =>
-      match info.kind {
-        Regular =>
-          if (info.mode & 0o777) != 0o600 {
-            return Err(
-              "policy file must be 0600 (found mode " +
-              mode_text(info.mode) + ")",
-            )
-          }
-        _ => return Err("policy file is not a regular file")
+    Some(value) => value
+  }
+  match stat.kind {
+    Regular =>
+      if (stat.mode & 0o777) != 0o600 {
+        return Err(
+          "policy file must be 0600 (found mode " + mode_text(stat.mode) + ")",
+        )
       }
+    SymLink => return Err("policy file must not be a symlink")
+    _ => return Err("policy file is not a regular file")
+  }
+  if stat.size > MAX_POLICY_ANNOUNCEMENT_BYTES.to_int64() {
+    return Err("policy file exceeds the transport bound")
   }
   let data = @fs.read_file(path) catch {
     error => return Err("cannot read policy file: " + safe_error(error))
