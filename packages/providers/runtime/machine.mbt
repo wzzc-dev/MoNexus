@@ -197,6 +197,12 @@ pub(all) struct RuntimeProbe {
   protocol_version : Int
   capabilities : Array[String]
   workspace_roots : Array[String]
+  /// The node user's home. A2.2 derives `~/.monexus/environments/<id>/` from
+  /// it; an empty home means the node cannot host environments.
+  home : String
+  /// The node-owned environment root the primary addresses with
+  /// `runtime.fs.*` `root=environments` requests.
+  environment_root : String
   os : String
   arch : String
   hostname : String
@@ -214,6 +220,8 @@ pub fn RuntimeProbe::to_json(self : RuntimeProbe) -> @json.Json {
     ("protocol_version", @contracts.json_int(self.protocol_version)),
     ("capabilities", @contracts.json_string_array(self.capabilities)),
     ("workspace_roots", @contracts.json_string_array(self.workspace_roots)),
+    ("home", @contracts.json_string(self.home)),
+    ("environment_root", @contracts.json_string(self.environment_root)),
     (
       "platform",
       @contracts.json_object([
@@ -253,13 +261,19 @@ pub fn RuntimeProbe::machine_profile(
     " capabilities=" +
     self.capabilities.join(",") +
     roots
+  let mut has_docker = false
+  for capability in self.capabilities {
+    if capability == "docker" {
+      has_docker = true
+    }
+  }
   @contracts.MachineProfile::new(
     arch=self.arch,
     os=self.os,
     hostname=self.hostname,
     shell="",
     toolchains=Map([]),
-    has_docker=false,
+    has_docker~,
     has_gui=false,
     max_parallel=1,
     notes=notes,
@@ -324,6 +338,8 @@ pub fn RuntimeProbe::from_json(json : @json.Json) -> RuntimeProbe? {
     protocol_version: @contracts.int_field_or(object, "protocol_version", 0),
     capabilities: bounded_string_array(object, "capabilities", 32, 64),
     workspace_roots: bounded_string_array(object, "workspace_roots", 16, 4096),
+    home: @contracts.string_field_or(object, "home", ""),
+    environment_root: @contracts.string_field_or(object, "environment_root", ""),
     os: @contracts.string_field_or(platform_object, "os", ""),
     arch: @contracts.string_field_or(platform_object, "arch", ""),
     hostname: @contracts.string_field_or(platform_object, "hostname", ""),
@@ -520,6 +536,66 @@ pub async fn RuntimeMachine::exec_cancel(
   match RunSnapshot::from_json(run) {
     Some(value) => Ok(value)
     None => Err(invalid_machine_result("exec.cancel returned an invalid run"))
+  }
+}
+
+///|
+pub(all) struct ExecOutputSlice {
+  run_id : String
+  stream : String
+  offset : Int64
+  data : String
+  bytes : Int64
+  eof : Bool
+  log_bytes : Int64
+}
+
+///|
+pub fn ExecOutputSlice::from_json(json : @json.Json) -> ExecOutputSlice? {
+  let object = match @contracts.as_object(json) {
+    Some(value) => value
+    None => return None
+  }
+  let run_id = match @contracts.string_field(object, "run_id") {
+    Some(value) => value
+    None => return None
+  }
+  Some({
+    run_id,
+    stream: @contracts.string_field_or(object, "stream", "stdout"),
+    offset: @contracts.int64_field_or(object, "offset", 0L),
+    data: @contracts.string_field_or(object, "data", ""),
+    bytes: @contracts.int64_field_or(object, "bytes", 0L),
+    eof: @contracts.bool_field_or(object, "eof", true),
+    log_bytes: @contracts.int64_field_or(object, "log_bytes", 0L),
+  })
+}
+
+///|
+/// `runtime.exec.read` — a bounded slice of a run's stdout/stderr log. The
+/// primary reads output only after the run reaches a terminal status, so the
+/// slice is stable.
+pub async fn RuntimeMachine::exec_read(
+  self : RuntimeMachine,
+  run_id~ : String,
+  stream~ : String = "stdout",
+  offset~ : Int64 = 0L,
+  max_bytes~ : Int = 0,
+) -> Result[ExecOutputSlice, @contracts.RpcError] {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("run_id", @contracts.json_string(run_id))
+  params.set("stream", @contracts.json_string(stream))
+  params.set("offset", @contracts.json_int64(offset))
+  if max_bytes > 0 {
+    params.set("max_bytes", @contracts.json_int(max_bytes))
+  }
+  let json = match self.request(@contracts.METHOD_RUNTIME_EXEC_READ, params) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  match ExecOutputSlice::from_json(json) {
+    Some(value) => Ok(value)
+    None => Err(invalid_machine_result("exec.read returned an invalid slice"))
   }
 }
 
@@ -894,12 +970,62 @@ pub async fn RuntimeMachine::fs_write(
   path~ : String,
   content~ : String,
   client_request_id~ : String,
+  root~ : String = @contracts.RUNTIME_FS_ROOT_WORKSPACE,
 ) -> Result[@json.Json, @contracts.RpcError] {
   let params : Map[String, @json.Json] = Map([])
   params.set("path", @contracts.json_string(path))
   params.set("content", @contracts.json_string(content))
+  if root != @contracts.RUNTIME_FS_ROOT_WORKSPACE {
+    params.set("root", @contracts.json_string(root))
+  }
   self.request_with_id(
     @contracts.METHOD_RUNTIME_FS_WRITE,
+    params,
+    client_request_id,
+  )
+}
+
+///|
+/// `runtime.fs.mkdir` under a selected root. The node enforces containment;
+/// the caller names a rooted-relative path only.
+pub async fn RuntimeMachine::fs_mkdir(
+  self : RuntimeMachine,
+  path~ : String,
+  client_request_id~ : String,
+  recursive~ : Bool = true,
+  root~ : String = @contracts.RUNTIME_FS_ROOT_WORKSPACE,
+) -> Result[@json.Json, @contracts.RpcError] {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("path", @contracts.json_string(path))
+  params.set("recursive", @contracts.json_bool(recursive))
+  if root != @contracts.RUNTIME_FS_ROOT_WORKSPACE {
+    params.set("root", @contracts.json_string(root))
+  }
+  self.request_with_id(
+    @contracts.METHOD_RUNTIME_FS_MKDIR,
+    params,
+    client_request_id,
+  )
+}
+
+///|
+/// `runtime.fs.remove` under a selected root. Missing entries are a success
+/// so cleanup is idempotent across a reconnect.
+pub async fn RuntimeMachine::fs_remove(
+  self : RuntimeMachine,
+  path~ : String,
+  client_request_id~ : String,
+  recursive~ : Bool = false,
+  root~ : String = @contracts.RUNTIME_FS_ROOT_WORKSPACE,
+) -> Result[@json.Json, @contracts.RpcError] {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("path", @contracts.json_string(path))
+  params.set("recursive", @contracts.json_bool(recursive))
+  if root != @contracts.RUNTIME_FS_ROOT_WORKSPACE {
+    params.set("root", @contracts.json_string(root))
+  }
+  self.request_with_id(
+    @contracts.METHOD_RUNTIME_FS_REMOVE,
     params,
     client_request_id,
   )
@@ -909,9 +1035,13 @@ pub async fn RuntimeMachine::fs_write(
 pub async fn RuntimeMachine::fs_stat(
   self : RuntimeMachine,
   path~ : String,
+  root~ : String = @contracts.RUNTIME_FS_ROOT_WORKSPACE,
 ) -> Result[@json.Json, @contracts.RpcError] {
   let params : Map[String, @json.Json] = Map([])
   params.set("path", @contracts.json_string(path))
+  if root != @contracts.RUNTIME_FS_ROOT_WORKSPACE {
+    params.set("root", @contracts.json_string(root))
+  }
   self.request(@contracts.METHOD_RUNTIME_FS_STAT, params)
 }
 

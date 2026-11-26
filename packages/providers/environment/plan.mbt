@@ -358,8 +358,15 @@ pub fn compute_environment_plan(
       )
   }
   ignore(workspace_mount)
-  let scratch_dir = inputs.workspace_root + DEFAULT_SCRATCH_SUFFIX +
-    inputs.environment_id
+  // The caller supplies the scratch root. Local/SSH keep the A2.1 derivation
+  // (`<workspace_root>-monexus-scratch-<id>`); a paired runtime node places it
+  // inside the node-owned environment directory so it never falls outside the
+  // rooted environment tree. The value participates in the plan digest.
+  let scratch_dir = if inputs.scratch_root != "" {
+    inputs.scratch_root
+  } else {
+    inputs.workspace_root + DEFAULT_SCRATCH_SUFFIX + inputs.environment_id
+  }
   if !@recipes.is_valid_host_path(scratch_dir) {
     return Err(
       plan_failure(
@@ -369,15 +376,20 @@ pub fn compute_environment_plan(
       ),
     )
   }
-  let scratch_root = if recipe.scratch_mount() is Some(_) {
-    scratch_dir
-  } else {
-    scratch_dir
-  }
+  let scratch_root = scratch_dir
+  // A paired runtime node keeps the per-environment scratch inside the node's
+  // `~/.monexus/environments/<id>/` tree, which `runtime.fs.*` is rooted at.
+  // That exact primary-derived layout is the only state path the docker root
+  // guard permits; every other `.monexus`, system or secret path stays
+  // rejected.
+  let node_env_scratch = home + "/.monexus/environments/" +
+    inputs.environment_id + "/scratch"
+  let allow_state_scratch = scratch_root == node_env_scratch
   let roots = match
     @docker.ResolvedRoots::new(
       workspace_root=inputs.workspace_root,
       scratch_root=scratch_root,
+      allow_state_scratch~,
     ) {
     Ok(value) => value
     Err(error) => return Err(env_failure_from_docker(error))

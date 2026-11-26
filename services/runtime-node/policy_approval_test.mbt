@@ -106,6 +106,36 @@ async fn pa_with_override_node(
 }
 
 ///|
+/// Like `pa_with_override_node`, but with a sandboxed node home so the
+/// environment root (`<home>/.monexus/environments`) is also under the test's
+/// temporary directory. This is the root the `environments` fs selector
+/// resolves to, and nothing outside it may be created or removed.
+async fn pa_with_env_root_node(
+  prefix : String,
+  body : async (NodeHost, String, String, String) -> Unit,
+) -> Unit {
+  let base = @fs.tmpdir(prefix=prefix)
+  defer @fs.rmdir(base, recursive=true)
+  let node_home = base + "/home"
+  @fs.mkdir(node_home, permission=0o700, recursive=true, allow_exist=true) catch {
+    _ => abort("cannot create the sandbox node home")
+  }
+  let work_root = base + "/rt-policy-test/work"
+  let host = match
+    NodeHost::open(
+      "rt-policy-test",
+      state_base=base,
+      workspace_root="",
+      home=node_home,
+      policy=Some(PolicyGate::allow_workspace(work_root)),
+    ) {
+    Ok(value) => value
+    Err(message) => abort("cannot open the sandboxed node host: " + message)
+  }
+  body(host, base, host.workspace_root(), node_home)
+}
+
+///|
 async fn pa_dispatch(
   host : NodeHost,
   rpc_method : String,
@@ -160,6 +190,32 @@ fn pa_fs_write_params(path : String, content : String) -> Map[String, @json.Json
 fn pa_fs_read_params(path : String) -> Map[String, @json.Json] {
   let params : Map[String, @json.Json] = Map([])
   params.set("path", @contracts.json_string(path))
+  params
+}
+
+///|
+/// An fs.mkdir request with an explicit root selector (A2.2). The default
+/// `recursive=false` keeps the policy argv exactly `["mkdir", target]`.
+fn pa_fs_mkdir_params(
+  path : String,
+  root : String,
+) -> Map[String, @json.Json] {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("path", @contracts.json_string(path))
+  params.set("root", @contracts.json_string(root))
+  params
+}
+
+///|
+/// An fs.remove request with an explicit root selector (A2.2). The default
+/// `recursive=false` keeps the policy argv exactly `["remove", target]`.
+fn pa_fs_remove_params(
+  path : String,
+  root : String,
+) -> Map[String, @json.Json] {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("path", @contracts.json_string(path))
+  params.set("root", @contracts.json_string(root))
   params
 }
 
@@ -1566,4 +1622,237 @@ async test "durable idempotency refuses to rerun an accepted fs.write after rest
   assert_eq(pa_read_text(workspace + "/durable.txt"), "one")
   assert_eq(pa_decision_field(replay, "digest"), first_digest)
   reopened.close()
+}
+
+///|
+/// A2.2 regression: the `environments` root selector is a real rooted
+/// directory. Traversal and absolute paths are refused before anything is
+/// touched, and a valid request lands under `<home>/.monexus/environments`.
+async test "environments-root fs.mkdir and fs.remove reject traversal" {
+  pa_with_env_root_node(
+    "mn-pa-envroot-traversal",
+    async fn(host, base, _workspace, node_home) {
+      let env_root = node_home + "/.monexus/environments"
+      assert_eq(pa_mode(env_root), 0o700)
+      let env_selector = @contracts.RUNTIME_FS_ROOT_ENVIRONMENTS
+      // mkdir ../escape must not create a sibling of the environment root.
+      let up_mkdir = pa_error(
+        pa_dispatch(
+          host,
+          @contracts.METHOD_RUNTIME_FS_MKDIR,
+          pa_fs_mkdir_params("../escape", env_selector),
+          "envroot-mkdir-up",
+        ),
+      )
+      assert_eq(up_mkdir.code, @transport.ERR_PATH_DENIED)
+      assert_true(up_mkdir.message.contains("escape"))
+      assert_true(
+        !(@fs.exists(node_home + "/.monexus/escape") catch { _ => true }),
+      )
+      // If `..` were simply dropped, the directory would land in the root;
+      // it must not.
+      assert_true(!(@fs.exists(env_root + "/escape") catch { _ => true }))
+      // An absolute path is refused, not rebased under the root.
+      let absolute_target = base + "/absolute-mkdir"
+      let abs_mkdir = pa_error(
+        pa_dispatch(
+          host,
+          @contracts.METHOD_RUNTIME_FS_MKDIR,
+          pa_fs_mkdir_params(absolute_target, env_selector),
+          "envroot-mkdir-abs",
+        ),
+      )
+      assert_eq(abs_mkdir.code, @transport.ERR_PATH_DENIED)
+      assert_true(abs_mkdir.message.contains("absolute"))
+      assert_true(!(@fs.exists(absolute_target) catch { _ => true }))
+      // remove ../marker must leave the marker outside the root intact.
+      let outside_marker = node_home + "/.monexus/remove-me"
+      @fs.mkdir(
+        outside_marker,
+        permission=0o700,
+        recursive=true,
+        allow_exist=true,
+      ) catch {
+        _ => abort("cannot create the outside marker")
+      }
+      let up_remove = pa_error(
+        pa_dispatch(
+          host,
+          @contracts.METHOD_RUNTIME_FS_REMOVE,
+          pa_fs_remove_params("../remove-me", env_selector),
+          "envroot-remove-up",
+        ),
+      )
+      assert_eq(up_remove.code, @transport.ERR_PATH_DENIED)
+      assert_true(up_remove.message.contains("escape"))
+      assert_true(@fs.exists(outside_marker) catch { _ => false })
+      // remove with an absolute path must not remove the target either.
+      let absolute_marker = base + "/absolute-remove"
+      @fs.mkdir(
+        absolute_marker,
+        permission=0o700,
+        recursive=true,
+        allow_exist=true,
+      ) catch {
+        _ => abort("cannot create the absolute marker")
+      }
+      let abs_remove = pa_error(
+        pa_dispatch(
+          host,
+          @contracts.METHOD_RUNTIME_FS_REMOVE,
+          pa_fs_remove_params(absolute_marker, env_selector),
+          "envroot-remove-abs",
+        ),
+      )
+      assert_eq(abs_remove.code, @transport.ERR_PATH_DENIED)
+      assert_true(abs_remove.message.contains("absolute"))
+      assert_true(@fs.exists(absolute_marker) catch { _ => false })
+      // The same rooted operations work for a legitimate relative path and
+      // stay under the environment root.
+      let created = pa_value(
+        pa_dispatch(
+          host,
+          @contracts.METHOD_RUNTIME_FS_MKDIR,
+          pa_fs_mkdir_params("env_1", env_selector),
+          "envroot-mkdir-ok",
+        ),
+      )
+      assert_eq(pa_json_string(created, "root"), "environments")
+      assert_eq(pa_mode(env_root + "/env_1"), 0o700)
+      let removed = pa_value(
+        pa_dispatch(
+          host,
+          @contracts.METHOD_RUNTIME_FS_REMOVE,
+          pa_fs_remove_params("env_1", env_selector),
+          "envroot-remove-ok",
+        ),
+      )
+      assert_eq(pa_json_string(removed, "root"), "environments")
+      assert_true(!(@fs.exists(env_root + "/env_1") catch { _ => true }))
+      assert_true(@fs.exists(env_root) catch { _ => false })
+      host.close()
+    },
+  )
+}
+
+///|
+/// A2.2 regression: the root selector is part of the policy digest. The same
+/// relative path under `workspace` and `environments` yields different
+/// digests, the node's digest matches the request the primary signs, and an
+/// approval minted for one selector cannot authorize the other.
+async test "environments root selector participates in the fs digest" {
+  pa_with_env_root_node(
+    "mn-pa-envroot-digest",
+    async fn(host, _base, workspace, node_home) {
+      let snapshot = pa_gated_snapshot("pol-envroot-digest")
+      match host.install_policy_announcement(pa_announcement(snapshot)) {
+        Ok(_) => ()
+        Err(message) => abort("envroot snapshot install failed: " + message)
+      }
+      let env_selector = @contracts.RUNTIME_FS_ROOT_ENVIRONMENTS
+      let ws_selector = @contracts.RUNTIME_FS_ROOT_WORKSPACE
+      assert_eq(host.policy().mode(), "snapshot")
+      let ws_mkdir = pa_binding(
+        pa_error(
+          pa_dispatch(
+            host,
+            @contracts.METHOD_RUNTIME_FS_MKDIR,
+            pa_fs_mkdir_params("shared", ws_selector),
+            "selector-ws-mkdir",
+          ),
+        ),
+      )
+      let env_mkdir = pa_binding(
+        pa_error(
+          pa_dispatch(
+            host,
+            @contracts.METHOD_RUNTIME_FS_MKDIR,
+            pa_fs_mkdir_params("shared", env_selector),
+            "selector-env-mkdir",
+          ),
+        ),
+      )
+      let ws_expected = @policy.ExecutionRequest::new(
+        operation=@policy.PolicyOperation::FsWrite,
+        argv=["mkdir", "shared"],
+        cwd=workspace,
+        workspace_root=workspace,
+      )
+      let env_expected = @policy.ExecutionRequest::new(
+        operation=@policy.PolicyOperation::FsWrite,
+        argv=["mkdir", "environments:shared"],
+        cwd=workspace,
+        workspace_root=workspace,
+      )
+      assert_eq(ws_mkdir.digest, ws_expected.digest())
+      assert_eq(env_mkdir.digest, env_expected.digest())
+      assert_true(ws_mkdir.digest != env_mkdir.digest)
+      // The same holds for fs.delete.
+      let ws_remove = pa_binding(
+        pa_error(
+          pa_dispatch(
+            host,
+            @contracts.METHOD_RUNTIME_FS_REMOVE,
+            pa_fs_remove_params("shared", ws_selector),
+            "selector-ws-remove",
+          ),
+        ),
+      )
+      let env_remove = pa_binding(
+        pa_error(
+          pa_dispatch(
+            host,
+            @contracts.METHOD_RUNTIME_FS_REMOVE,
+            pa_fs_remove_params("shared", env_selector),
+            "selector-env-remove",
+          ),
+        ),
+      )
+      let ws_remove_expected = @policy.ExecutionRequest::new(
+        operation=@policy.PolicyOperation::FsDelete,
+        argv=["remove", "shared"],
+        cwd=workspace,
+        workspace_root=workspace,
+      )
+      let env_remove_expected = @policy.ExecutionRequest::new(
+        operation=@policy.PolicyOperation::FsDelete,
+        argv=["remove", "environments:shared"],
+        cwd=workspace,
+        workspace_root=workspace,
+      )
+      assert_eq(ws_remove.digest, ws_remove_expected.digest())
+      assert_eq(env_remove.digest, env_remove_expected.digest())
+      assert_true(ws_remove.digest != env_remove.digest)
+      // A grant for `workspace:shared` cannot be replayed for
+      // `environments:shared`: the digest mismatch is caught before the
+      // directory is created.
+      let now = @async.now()
+      let grant = pa_grant(
+        ws_mkdir.run_id,
+        ws_mkdir.digest,
+        ws_mkdir.policy_version,
+        ws_mkdir.policy_hash,
+        "nonce-envroot-selector-1",
+        now - 1_000L,
+        now + 30_000L,
+      )
+      let substituted = pa_fs_mkdir_params("shared", env_selector)
+      pa_add_approval(substituted, grant)
+      let denied = pa_error(
+        pa_dispatch(
+          host,
+          @contracts.METHOD_RUNTIME_FS_MKDIR,
+          substituted,
+          ws_mkdir.run_id,
+        ),
+      )
+      assert_eq(denied.code, @transport.ERR_APPROVAL_INVALID)
+      assert_eq(pa_error_string(denied, "reason"), "digest_mismatch")
+      assert_true(!(@fs.exists(node_home + "/.monexus/environments/shared") catch {
+        _ => true
+      }))
+      assert_true(!(@fs.exists(workspace + "/shared") catch { _ => true }))
+      host.close()
+    },
+  )
 }

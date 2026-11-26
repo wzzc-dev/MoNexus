@@ -19,6 +19,56 @@ test "plan digest is deterministic and binds the environment id" {
 }
 
 ///|
+test "plan admits only the exact runtime environment scratch under the state root" {
+  let home = "/home/dev"
+  let workspace = "/home/dev/work"
+  let environment_id = "env_01ARYZ6S41"
+  let inputs : PlanInputs = {
+    environment_id,
+    workspace_id: "wsp_01ARYZ6S41",
+    worktree_id: "",
+    machine_id: "",
+    primary_id: @contracts.ORG_LOCAL,
+    workspace_root: workspace,
+    scratch_root: home + "/.monexus/environments/" + environment_id + "/scratch",
+    env_values: [],
+    extra_mounts: [],
+  }
+  let plan = match
+    compute_environment_plan(test_recipe(), test_recipe_hash, inputs, home) {
+    Ok(value) => value
+    Err(error) => fail("the runtime scratch plan was refused: " + error.to_string())
+  }
+  assert_eq(plan.scratch_dir, inputs.scratch_root)
+  // Any other state path is still a forbidden host root.
+  let refused : Array[PlanInputs] = [
+    {
+      ..inputs,
+      scratch_root: home + "/.monexus/environments/env_OTHER/scratch",
+    },
+    {
+      ..inputs,
+      scratch_root: "/home/other/.monexus/environments/" +
+      environment_id + "/scratch",
+    },
+    {
+      ..inputs,
+      scratch_root: home + "/.monexus/state/" + environment_id + "/scratch",
+    },
+    {
+      ..inputs,
+      scratch_root: home + "/.monexus/environments/" + environment_id,
+    },
+  ]
+  for value in refused {
+    match compute_environment_plan(test_recipe(), test_recipe_hash, value, home) {
+      Ok(_) => fail("the state scratch must be refused: " + value.scratch_root)
+      Err(error) => assert_eq(error.code, @contracts.ENVIRONMENT_ERR_INVALID)
+    }
+  }
+}
+
+///|
 test "plan rejects an untrusted hash and a missing workspace mount" {
   let inputs : PlanInputs = {
     environment_id: "env_01ARYZ6S41",

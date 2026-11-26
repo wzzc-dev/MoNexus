@@ -4,6 +4,8 @@ import {
   "monexus/contracts" @contracts,
   "monexus/host-client" @client,
   "monexus/machines" @machines,
+  "monexus/policy" @policy,
+  "monexus/providers/runtime" @provider_runtime,
   "monexus/providers/agent" @agent,
   "monexus/providers/docker" @docker,
   "monexus/providers/environment" @environment,

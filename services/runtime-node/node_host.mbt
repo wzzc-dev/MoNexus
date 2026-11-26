@@ -57,6 +57,50 @@ pub const NODE_IDEMPOTENCY_FILE_NAME : String = "idempotency.json"
 pub const MAX_NONCE_FILE_BYTES : Int64 = 262_144L
 
 ///|
+/// Directory (under the node user's home) that holds environment temp
+/// directories and env-file hand-offs for A2.2. The primary computes
+/// `~/.monexus/environments/<environment_id>/` from the home reported by
+/// `runtime.probe`; the node only ever exposes this one root over
+/// `runtime.fs.*` with the `environments` selector.
+pub const NODE_ENVIRONMENT_DIR_NAME : String = ".monexus/environments"
+
+///|
+/// Whether a bare program name resolves on the node's PATH. Used by the probe
+/// to report whether the environment backend can run docker at all; it does
+/// not start the program.
+async fn program_on_path(name : String) -> Bool {
+  let path_var = match @env.get_env_var("PATH") {
+    Some(value) => value
+    None => "/usr/local/bin:/usr/bin:/bin"
+  }
+  for dir in path_var.split(":") {
+    let candidate = if dir == "" {
+      "/" + name
+    } else {
+      dir.to_owned() + "/" + name
+    }
+    let exists = @fs.exists(candidate) catch { _ => false }
+    if exists {
+      let kind = @fs.kind(candidate, follow_symlink=true) catch {
+        _ => @fs.FileKind::Unknown
+      }
+      if kind is @fs.FileKind::Regular {
+        return true
+      }
+    }
+  }
+  false
+}
+
+///|
+fn node_default_home() -> String {
+  match @env.get_env_var("HOME") {
+    Some(value) if value != "" => value
+    _ => ""
+  }
+}
+
+///|
 pub fn node_capabilities() -> Array[String] {
   ["exec", "fs", "pty", "git", "process"]
 }
@@ -81,6 +125,14 @@ pub struct NodeHost {
   state_dir : String
   identity_path : String
   token_path : String
+  /// The node user's home directory. Reported by `runtime.probe`; the primary
+  /// derives `~/.monexus/environments/<id>/` from it (A2.2).
+  home : String
+  /// Real path of the one additional rooted filesystem A2.2 exposes:
+  /// `<home>/.monexus/environments` (0700). `None` when the node has no home,
+  /// in which case environment filesystem requests fail honestly.
+  environment_root : String
+  environments : @runtime.RootedDir?
   executor : @runtime.RuntimeExecutor
   workspace : @runtime.RootedDir
   workspace_root : String
@@ -118,6 +170,27 @@ pub fn NodeHost::token_path(self : NodeHost) -> String {
 ///|
 pub fn NodeHost::workspace_root(self : NodeHost) -> String {
   self.workspace_root
+}
+
+///|
+pub fn NodeHost::home(self : NodeHost) -> String {
+  self.home
+}
+
+///|
+/// Real path of the node-owned environment root
+/// (`<home>/.monexus/environments`), or `""` when the node has no usable
+/// home. The primary derives env directories from `probe.home`, so both
+/// agree on the same absolute path.
+pub fn NodeHost::environment_root(self : NodeHost) -> String {
+  self.environment_root
+}
+
+///|
+/// The rooted environment filesystem used by `runtime.fs.*` requests with the
+/// `environments` selector.
+pub fn NodeHost::environments(self : NodeHost) -> @runtime.RootedDir? {
+  self.environments
 }
 
 ///|
@@ -414,12 +487,22 @@ pub async fn NodeHost::open(
   runtime_id : String,
   state_base~ : String = "",
   workspace_root~ : String = "",
+  home~ : String = "",
   policy~ : PolicyGate? = None,
   pty_limits~ : @pty_runtime.PtyLimits? = None,
   git_limits~ : @git_runtime.GitLimits? = None,
 ) -> Result[NodeHost, String] {
   if !@transport.is_safe_id(runtime_id) {
     return Err("invalid runtime id")
+  }
+  let effective_home = if home.trim() != "" {
+    home.trim().to_owned()
+  } else {
+    node_default_home()
+  }
+  if effective_home != "" &&
+    (!effective_home.has_prefix("/") || effective_home.contains("/../")) {
+    return Err("node home must be an absolute normalised path")
   }
   let base = if state_base == "" {
     node_default_state_base()
@@ -506,6 +589,38 @@ pub async fn NodeHost::open(
       return Err("cannot open runtime workspace: " + message)
     }
   }
+  // The environment root is the only filesystem outside the workspace the
+  // node exposes (A2.2). It is created 0700 and opened as a rooted directory;
+  // a node without a home cannot host environments and says so.
+  let (environment_root, environments) : (String, @runtime.RootedDir?) = if effective_home == "" {
+    ("", None)
+  } else {
+    let root = effective_home + "/" + NODE_ENVIRONMENT_DIR_NAME
+    @fs.mkdir(root, permission=0o700, recursive=true, allow_exist=true) catch {
+      error => {
+        executor.close()
+        return Err(
+          "cannot create the environment root: " + error.to_string(),
+        )
+      }
+    }
+    @fs.chmod(root, 0o700) catch { _ => () }
+    match @transport.validate_private_dir(root, "environment root") {
+      Ok(_) => ()
+      Err(message) => {
+        executor.close()
+        return Err(message)
+      }
+    }
+    let rooted = match @runtime.RootedDir::open(root) {
+      Ok(value) => value
+      Err(message) => {
+        executor.close()
+        return Err("cannot open the environment root: " + message)
+      }
+    }
+    (rooted.root(), Some(rooted))
+  }
   // Restore the last policy snapshot the primary published. The file is
   // re-verified against its pinned hash; a missing or tampered file leaves the
   // node fail-closed until the next successful install.
@@ -591,6 +706,9 @@ pub async fn NodeHost::open(
     state_dir,
     identity_path,
     token_path: state_dir + "/" + NODE_TOKEN_FILE_NAME,
+    home: effective_home,
+    environment_root,
+    environments,
     executor,
     workspace,
     workspace_root: workspace.root(),
@@ -693,6 +811,13 @@ pub async fn NodeHost::probe_profile(self : NodeHost) -> @json.Json {
     Some(snapshot) => (snapshot.version, snapshot.content_hash)
     None => ("", "")
   }
+  // Report docker only when the CLI resolves on the node PATH: the primary
+  // gates environment creation on this, and the environment backend runs
+  // docker exclusively through `runtime.exec.*`.
+  let capabilities = node_capabilities()
+  if program_on_path("docker") {
+    capabilities.push("docker")
+  }
   @contracts.json_object([
     ("runtime_id", @contracts.json_string(self.runtime_id)),
     (
@@ -700,10 +825,15 @@ pub async fn NodeHost::probe_profile(self : NodeHost) -> @json.Json {
       @contracts.json_string(@transport.PROTOCOL_VERSION_TEXT),
     ),
     ("protocol_version", @contracts.json_int(@transport.PROTOCOL_VERSION)),
-    ("capabilities", @contracts.json_string_array(node_capabilities())),
+    ("capabilities", @contracts.json_string_array(capabilities)),
     (
       "workspace_roots",
       @contracts.json_string_array([self.workspace_root]),
+    ),
+    ("home", @contracts.json_string(self.home)),
+    (
+      "environment_root",
+      @contracts.json_string(self.environment_root),
     ),
     (
       "platform",

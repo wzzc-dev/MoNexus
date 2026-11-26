@@ -61,7 +61,7 @@ fn skip_escape(text : String, start : Int) -> Int {
 }
 
 ///|
-fn sanitize_terminal(text : String) -> String {
+pub fn sanitize_terminal(text : String) -> String {
   let out = StringBuilder()
   let mut index = 0
   while index < text.length() {
@@ -368,6 +368,24 @@ pub async fn run_container_terminal(
       run_ssh_container_terminal(target, remote_argv, input, output)
     }
     None => {
+      if runner.runtime {
+        // A paired runtime node streams the same `docker exec -it` through a
+        // node PTY. The argv excludes the `docker` name; the adapter resolves
+        // it on the node PATH.
+        match runner.terminal {
+          Some(terminal) => {
+            terminal(docker_argv, rows, cols, input, output)
+            return
+          }
+          None => {
+            terminal_reject(
+              output,
+              "runtime terminal transport is not attached",
+            )
+            return
+          }
+        }
+      }
       let local_argv : Array[String] = [resolve_local_program("docker")]
       for item in docker_argv {
         local_argv.push(item)

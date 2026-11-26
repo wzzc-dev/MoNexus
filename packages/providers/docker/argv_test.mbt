@@ -76,6 +76,7 @@ test "roots reject system state, secrets, overlap and malformed paths" {
     ("/etc", "/home/dev/scratch", "forbidden_root"),
     ("/proc/self", "/home/dev/scratch", "forbidden_root"),
     ("/home/dev/.ssh/keys", "/home/dev/scratch", "forbidden_root"),
+    ("/home/dev/work", "/home/dev/.monexus/environments/env_1/scratch", "forbidden_root"),
     ("/home/dev/work/", "/home/dev/scratch", "invalid_root"),
     ("/home/dev/../etc", "/home/dev/scratch", "invalid_root"),
     ("/home/dev/work", "/home/dev/work", "roots_overlap"),
@@ -105,6 +106,42 @@ test "roots reject system state, secrets, overlap and malformed paths" {
       if error.reason() != "forbidden_root" {
         fail("expected forbidden_root but got " + error.to_string())
       }
+  }
+}
+
+///|
+test "only the runtime environment scratch may sit under the node state root" {
+  // A2.2: the per-environment scratch under the node-owned environment root
+  // is the single exempted state path, and only when the caller says so.
+  match
+    @docker.ResolvedRoots::new(
+      workspace_root="/home/dev/work",
+      scratch_root="/home/dev/.monexus/environments/env_1/scratch",
+      allow_state_scratch=true,
+    ) {
+    Ok(_) => ()
+    Err(error) =>
+      fail("the runtime environment scratch was refused: " + error.to_string())
+  }
+  let refused : Array[(String, String)] = [
+    ("/home/dev/.monexus/work", "/home/dev/scratch"),
+    ("/home/dev/work", "/home/dev/.ssh/scratch"),
+    ("/home/dev/work", "/etc/monexus/scratch"),
+    ("/home/dev/work", "/home/dev/.monexus"),
+  ]
+  for entry in refused {
+    match
+      @docker.ResolvedRoots::new(
+        workspace_root=entry.0,
+        scratch_root=entry.1,
+        allow_state_scratch=true,
+      ) {
+      Ok(_) => fail("the exemption must not admit: " + entry.1)
+      Err(error) =>
+        if error.reason() != "forbidden_root" {
+          fail("expected forbidden_root but got " + error.to_string())
+        }
+    }
   }
 }
 

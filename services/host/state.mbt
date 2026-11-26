@@ -94,6 +94,10 @@ pub struct HostState {
   // approval-consumption append fail so the fail-closed path can be tested
   // without corrupting the database.
   test_fail_approval_consumption : Ref[Bool]
+  // A2.2: paired runtime nodes attached to this primary, keyed by machine id.
+  // A runtime-kind machine without a live link reports `unreachable` instead
+  // of falling back to SSH or local execution.
+  runtimes : Map[String, RuntimeLink]
 }
 
 ///|
@@ -217,6 +221,7 @@ fn HostState::new(
     env_exec_tasks: Map([]),
     env_create_started: Map([]),
     test_fail_approval_consumption: Ref(false),
+    runtimes: Map([]),
   }
 }
 

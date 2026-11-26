@@ -24,6 +24,14 @@ pub const METHOD_RUNTIME_EXEC_CANCEL : String = "runtime.exec.cancel"
 pub const METHOD_RUNTIME_EXEC_STATUS : String = "runtime.exec.status"
 
 ///|
+/// Read a bounded slice of one stream log (`stdout`/`stderr`) of an exec run.
+/// The environment backend needs the command's output to parse `docker
+/// inspect` and to report hook output; a run's status alone carries only the
+/// exit code. This is a read method over the node-owned log file, with the
+/// same offset/eof/log_bytes shape as `runtime.git.read_output`.
+pub const METHOD_RUNTIME_EXEC_READ : String = "runtime.exec.read"
+
+///|
 pub const METHOD_RUNTIME_FS_READ : String = "runtime.fs.read"
 
 ///|
@@ -34,6 +42,29 @@ pub const METHOD_RUNTIME_FS_LIST : String = "runtime.fs.list"
 
 ///|
 pub const METHOD_RUNTIME_FS_STAT : String = "runtime.fs.stat"
+
+///|
+/// Create one directory under a selected rooted filesystem (A2.2). The
+/// environment backend creates `~/.monexus/environments/<id>/` on the node;
+/// `runtime.fs.write` cannot create a directory, and the env-file parent must
+/// be 0700 before the secret is written.
+pub const METHOD_RUNTIME_FS_MKDIR : String = "runtime.fs.mkdir"
+
+///|
+/// Remove one file or directory under a selected rooted filesystem (A2.2).
+/// The environment backend removes the env-file hand-off and temp directory
+/// after `destroy`; the node enforces root containment itself.
+pub const METHOD_RUNTIME_FS_REMOVE : String = "runtime.fs.remove"
+
+///|
+/// Selector for the filesystem root of `fs.read/write/list/stat/mkdir/
+/// remove`. `workspace` is the default and preserves the A1.2 behavior; the
+/// node-owned `~/.monexus/environments` root is the only additional root
+/// (A2.2), so environment files never land in a workspace.
+pub const RUNTIME_FS_ROOT_WORKSPACE : String = "workspace"
+
+///|
+pub const RUNTIME_FS_ROOT_ENVIRONMENTS : String = "environments"
 
 ///|
 pub const METHOD_RUNTIME_PTY_OPEN : String = "runtime.pty.open"
@@ -117,10 +148,13 @@ pub fn runtime_application_methods() -> Array[String] {
     METHOD_RUNTIME_EXEC_START,
     METHOD_RUNTIME_EXEC_CANCEL,
     METHOD_RUNTIME_EXEC_STATUS,
+    METHOD_RUNTIME_EXEC_READ,
     METHOD_RUNTIME_FS_READ,
     METHOD_RUNTIME_FS_WRITE,
     METHOD_RUNTIME_FS_LIST,
     METHOD_RUNTIME_FS_STAT,
+    METHOD_RUNTIME_FS_MKDIR,
+    METHOD_RUNTIME_FS_REMOVE,
     METHOD_RUNTIME_PTY_OPEN,
     METHOD_RUNTIME_PTY_INPUT,
     METHOD_RUNTIME_PTY_RESIZE,
@@ -148,13 +182,16 @@ pub fn runtime_application_methods() -> Array[String] {
 
 ///|
 /// Methods that change node state and therefore require a policy snapshot
-/// (A1.3b). Reads (status/list/stat/read/diff/log/show/branches/worktrees/
-/// read_output) are allowed with no snapshot; writes, exec starts, PTY
-/// input/resize/close and git branch/worktree mutations fail closed.
+/// (A1.3b). Reads (status/list/stat/read/exec.read/diff/log/show/branches/
+/// worktrees/read_output) are allowed with no snapshot; writes, exec starts,
+/// directory creation/removal, PTY input/resize/close and git branch/worktree
+/// mutations fail closed.
 pub fn runtime_method_mutates(method : String) -> Bool {
   method == METHOD_RUNTIME_EXEC_START ||
   method == METHOD_RUNTIME_EXEC_CANCEL ||
   method == METHOD_RUNTIME_FS_WRITE ||
+  method == METHOD_RUNTIME_FS_MKDIR ||
+  method == METHOD_RUNTIME_FS_REMOVE ||
   method == METHOD_RUNTIME_PTY_OPEN ||
   method == METHOD_RUNTIME_PTY_INPUT ||
   method == METHOD_RUNTIME_PTY_RESIZE ||
