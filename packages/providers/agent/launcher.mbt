@@ -22,14 +22,44 @@ pub(all) enum ProcessLauncher {
 }
 
 ///|
+/// Non-secret identity of one node-local credential (A5.2). The primary may
+/// name the binding tuple, version and fingerprint; it never sends the secret
+/// or the node's session token. The node compares this with its own local
+/// enrollment before starting the agent.
+pub(all) struct RemoteCredential {
+  binding_id : String
+  credential_id : String
+  machine_id : String
+  agent_id : String
+  profile : String
+  version : Int
+  fingerprint : String
+}
+
+///|
+pub fn RemoteCredential::new(
+  binding_id~ : String,
+  credential_id~ : String,
+  machine_id~ : String,
+  agent_id~ : String,
+  profile~ : String,
+  version~ : Int,
+  fingerprint~ : String,
+) -> RemoteCredential {
+  { binding_id, credential_id, machine_id, agent_id, profile, version, fingerprint, }
+}
+
+///|
 /// What the host asks a runtime node to start: an argv-only agent process in a
 /// node-rooted workspace directory. There is deliberately no `env` field: the
 /// node uses its own environment allowlist and login credentials, and the host
-/// never ships model keys, private keys or `~/.ssh` (Goal 3).
+/// never ships model keys, private keys or `~/.ssh` (Goal 3). `credential` is
+/// metadata only; node-local custody keeps the secret on the node.
 pub(all) struct RemoteStartSpec {
   argv : Array[String]
   cwd : String
   risk : String
+  credential : RemoteCredential?
 }
 
 ///|
@@ -37,8 +67,9 @@ pub fn RemoteStartSpec::new(
   argv~ : Array[String],
   cwd~ : String = "",
   risk~ : String = "",
+  credential~ : RemoteCredential? = None,
 ) -> RemoteStartSpec {
-  { argv, cwd, risk, }
+  { argv, cwd, risk, credential, }
 }
 
 ///|

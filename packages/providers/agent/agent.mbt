@@ -43,6 +43,10 @@ pub(all) struct AgentSpec {
   args : Array[String]
   cwd : String
   env : Map[String, String]
+  /// Non-secret node-local credential identity for a runtime launch. `env`
+  /// carries proxy coordinates only; the real upstream credential stays in the
+  /// platform store (local) or on the node (remote).
+  credential : RemoteCredential?
 }
 
 ///|
@@ -53,8 +57,27 @@ pub fn AgentSpec::new(
   args~ : Array[String] = [],
   cwd~ : String = "",
   env~ : Map[String, String] = Map([]),
+  credential~ : RemoteCredential? = None,
 ) -> AgentSpec {
-  { agent_id, mode, command, args, cwd, env, }
+  { agent_id, mode, command, args, cwd, env, credential, }
+}
+
+///|
+/// The fixed host environment an agent child may inherit. Everything else —
+/// model keys, cloud credentials, SSH agent sockets — is absent by
+/// construction; scoped values (`MONEXUS_CREDENTIAL_PROXY_*`) are passed
+/// explicitly in `AgentSpec::env`. `CLAUDECODE` is intentionally absent.
+pub fn local_agent_base_env() -> Map[String, String] {
+  let env : Map[String, String] = Map([])
+  for name in [
+    "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "USER", "SHELL", "TERM",
+  ] {
+    match @env.get_env_var(name) {
+      Some(value) => env.set(name, value)
+      None => ()
+    }
+  }
+  env
 }
 
 ///|
@@ -941,6 +964,7 @@ pub async fn[G] spawn_agent(
             argv~,
             cwd=spec.cwd.trim().to_owned(),
             risk="",
+            credential=spec.credential,
           ),
         ) {
         Ok(value) => value
@@ -978,7 +1002,16 @@ pub async fn[G] spawn_agent(
     ProcessLauncher::Ssh(_) => true
     ProcessLauncher::Local | ProcessLauncher::Runtime(_) => false
   }
-  let extra_env : Map[String, String] = if is_ssh { Map([]) } else { spec.env }
+  // Never inherit the host's whole environment: a model key or an SSH agent
+  // socket in the host process must not reach the child. Only a fixed base
+  // allowlist is read from the host; `spec.env` adds the scoped proxy
+  // coordinates (local) and is deliberately dropped for an SSH launch.
+  let extra_env = local_agent_base_env()
+  if !is_ssh {
+    for name, value in spec.env {
+      extra_env.set(name, value)
+    }
+  }
   let stdin_pair = @process.write_to_process() catch {
     _ => return Err("cannot create stdin pipe")
   }
@@ -997,7 +1030,7 @@ pub async fn[G] spawn_agent(
       argv0,
       argv,
       extra_env=extra_env,
-      inherit_env=true,
+      inherit_env=false,
       stdin=stdin_input,
       stdout=stdout_output,
       stderr=stderr_output,
@@ -1008,7 +1041,7 @@ pub async fn[G] spawn_agent(
       argv0,
       argv,
       extra_env=extra_env,
-      inherit_env=true,
+      inherit_env=false,
       stdin=stdin_input,
       stdout=stdout_output,
       stderr=stderr_output,

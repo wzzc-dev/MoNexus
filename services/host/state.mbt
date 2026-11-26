@@ -2,8 +2,8 @@
 /// Runtime options for `monexus-host serve`.
 pub(all) struct HostOptions {
   state_dir : String
-  heartbeat_ms : Int
-  port : Int
+  heartbeat_ms : Int32
+  port : Int32
   version : String
   /// Trigger feature flag (ADR-0014 §7). Default off: every `trigger.*`
   /// method answers `unsupported`, `/hooks/*` answers the uniform 401, and no
@@ -35,13 +35,23 @@ pub(all) struct HostOptions {
   /// for local agent sessions. Empty means the gateway is unavailable; the
   /// session then gets declarative injection only and is marked not invocable.
   host_exe : String
+  /// Managed account credentials (ADR-0016). Off by default so V0.1 behavior
+  /// is untouched: no proxy env, no credential RPC, no credential events.
+  credential_enabled : Bool
+  /// `credential.storage`: empty/auto (Keychain on macOS, file elsewhere) or
+  /// an explicit `file`/`keychain` request.
+  credential_storage : String
+  /// Lease bound for a remote binding. Offline beyond it fails closed.
+  credential_lease_ttl_ms : Int64
+  /// Suppression window for repeated credential readiness failures.
+  credential_cooldown_ms : Int64
 }
 
 ///|
 pub fn HostOptions::new(
   state_dir~ : String,
-  heartbeat_ms~ : Int = 1_000,
-  port~ : Int = 0,
+  heartbeat_ms~ : Int32 = 1_000,
+  port~ : Int32 = 0,
   version~ : String = HOST_VERSION,
   trigger_enabled~ : Bool = false,
   runtime_listen~ : String = "",
@@ -54,6 +64,10 @@ pub fn HostOptions::new(
   runtime_approval_ttl_ms~ : Int64 = 60_000L,
   skill_enabled~ : Bool = false,
   host_exe~ : String = "",
+  credential_enabled~ : Bool = false,
+  credential_storage~ : String = "",
+  credential_lease_ttl_ms~ : Int64 = @contracts.CREDENTIAL_DEFAULT_LEASE_TTL_MS,
+  credential_cooldown_ms~ : Int64 = @contracts.CREDENTIAL_DEFAULT_COOLDOWN_MS,
 ) -> HostOptions {
   {
     state_dir,
@@ -71,6 +85,18 @@ pub fn HostOptions::new(
     runtime_approval_ttl_ms: runtime_approval_ttl_ms.max(1_000L),
     skill_enabled,
     host_exe,
+    credential_enabled,
+    credential_storage,
+    credential_lease_ttl_ms: if credential_lease_ttl_ms > 0L {
+      credential_lease_ttl_ms
+    } else {
+      @contracts.CREDENTIAL_DEFAULT_LEASE_TTL_MS
+    },
+    credential_cooldown_ms: if credential_cooldown_ms > 0L {
+      credential_cooldown_ms
+    } else {
+      @contracts.CREDENTIAL_DEFAULT_COOLDOWN_MS
+    },
   }
 }
 
@@ -95,12 +121,13 @@ pub struct EnvironmentExecTask {
 ///|
 /// Host-wide mutable state, guarded by `mutex`. All fields that change at
 /// runtime live here so connection handlers can share them safely.
+
 ///|
 /// Coalescing state for webhook `rate_limited` audit events: at most one per
 /// trigger per minute, with `suppressed_count` for the rest (§4.5).
 struct TriggerWebhookAuditState {
   last_ms : Int64
-  suppressed : Int
+  suppressed : Int32
 }
 
 ///|
@@ -109,8 +136,8 @@ pub struct HostState {
   version : String
   started_at_ms : Int64
   state_dir : String
-  heartbeat_ms : Int
-  port : Int
+  heartbeat_ms : Int32
+  port : Int32
   token : String
   ws_url : String
   mutex : @async.Mutex
@@ -148,7 +175,18 @@ pub struct HostState {
   dispatching : Ref[Bool]
   trigger_enabled : Bool
   trigger_buckets : Map[String, @contracts.TriggerRateBucket]
-  webhook_inflight : Map[String, Int]
+  // A5: credential manager. The platform store owns secrets; SQLite (via
+  // `store`) owns metadata only. Proxies are keyed by agent session id and
+  // stopped on session stop or revoke. `credential_cooldowns` suppresses a
+  // repeated readiness Decision for the same binding+reason.
+  credential_enabled : Bool
+  credential_store : @credentials.CredentialStore
+  credential_lease_ttl_ms : Int64
+  credential_cooldown_ms : Int64
+  credential_proxies : Map[String, @credentials.CredentialProxy]
+  credential_cooldowns : Map[String, Int64]
+  credential_ports : Map[String, @credentials.RemoteCredentialPort]
+  webhook_inflight : Map[String, Int32]
   webhook_audit : Map[String, TriggerWebhookAuditState]
   // A2.1: owner trust store and its verifier probe. Both are loaded once at
   // host start; recipe signatures are re-verified against them before use.
@@ -207,7 +245,7 @@ pub struct AgentSessionRuntime {
   process : @agent.AgentProcess
   transcript : Ref[AgentTranscript]
   pending : Map[String, PendingPermission]
-  active_prompts : Map[String, Int]
+  active_prompts : Map[String, Int32]
   turn_text : Ref[String]
   home : String
   memory_before : String
@@ -279,7 +317,7 @@ fn random_token() -> String {
 ///|
 fn HostState::new(
   options : HostOptions,
-  port : Int,
+  port : Int32,
   store : @machines.MachineStore,
   trust : @recipes.TrustStore,
   verifier : @recipes.VerifierProbe,
@@ -333,6 +371,16 @@ fn HostState::new(
     dispatching: Ref(false),
     trigger_enabled: options.trigger_enabled,
     trigger_buckets: Map([]),
+    credential_enabled: options.credential_enabled,
+    credential_store: @credentials.CredentialStore::open(
+      options.state_dir + "/credentials",
+      requested=options.credential_storage,
+    ),
+    credential_lease_ttl_ms: options.credential_lease_ttl_ms,
+    credential_cooldown_ms: options.credential_cooldown_ms,
+    credential_proxies: Map([]),
+    credential_cooldowns: Map([]),
+    credential_ports: Map([]),
     webhook_inflight: Map([]),
     webhook_audit: Map([]),
     trust,
@@ -421,7 +469,10 @@ fn HostState::next_envelope(
 ///|
 /// Push an event into the ring and fan it out to subscribed connections.
 /// Caller holds `mutex`.
-fn HostState::publish(self : HostState, event : @contracts.EventEnvelope) -> Unit {
+fn HostState::publish(
+  self : HostState,
+  event : @contracts.EventEnvelope,
+) -> Unit {
   self.ring.push(event)
   while self.ring.length() > RING_CAPACITY {
     ignore(self.ring.remove(0))
@@ -448,7 +499,12 @@ fn HostState::append_event(
   match self.store.append_event(event) {
     Ok(_) => ()
     Err(message) =>
-      println("monexus-host: cannot persist event " + event.event_type + ": " + message)
+      println(
+        "monexus-host: cannot persist event " +
+        event.event_type +
+        ": " +
+        message,
+      )
   }
   self.publish(event)
   event
@@ -468,6 +524,29 @@ fn HostState::append_machine_event(
 ) -> Result[@contracts.EventEnvelope, String] {
   let event = self.next_envelope(event_type, subject, payload)
   match self.store.record_machine_event(event, record, removed_id) {
+    Ok(_) => {
+      self.publish(event)
+      Ok(event)
+    }
+    Err(message) => Err(message)
+  }
+}
+
+///|
+/// Append a credential event and its metadata projection in one transaction.
+/// The payload and both records are secret-free by construction: the platform
+/// store owns secrets, SQLite only mirrors ids, versions and fingerprints.
+/// Caller holds `mutex`.
+fn HostState::append_credential_event(
+  self : HostState,
+  event_type : String,
+  subject : String,
+  payload : @json.Json,
+  credential : @contracts.CredentialRecord?,
+  binding : @contracts.CredentialBinding?,
+) -> Result[@contracts.EventEnvelope, String] {
+  let event = self.next_envelope(event_type, subject, payload)
+  match self.store.record_credential_event(event, credential, binding) {
     Ok(_) => {
       self.publish(event)
       Ok(event)
@@ -600,6 +679,7 @@ fn HostState::append_artifact_event(
 }
 
 ///|
+
 ///|
 /// Append an environment event and its projection in one transaction. A
 /// destroyed record is passed with `removed_id = Some(id)` so the projection
@@ -644,21 +724,18 @@ fn HostState::append_recipe_event(
 }
 
 ///|
-const RING_CAPACITY : Int = 256
+const RING_CAPACITY : Int32 = 256
 
 ///|
-const CACHE_CAPACITY : Int = 512
+const CACHE_CAPACITY : Int32 = 512
 
 ///|
 /// Serialize an event as an `events.event` JSON-RPC notification.
 fn event_notification_text(event : @contracts.EventEnvelope) -> String {
-  let params : Map[String, @json.Json] = Map([
-    ("event", event.to_json()),
-  ])
-  @contracts.RpcNotification::new(
-    @contracts.NOTIFICATION_EVENTS_EVENT,
-    params,
-  ).to_json().stringify()
+  let params : Map[String, @json.Json] = Map([("event", event.to_json())])
+  @contracts.RpcNotification::new(@contracts.NOTIFICATION_EVENTS_EVENT, params)
+  .to_json()
+  .stringify()
 }
 
 ///|
@@ -672,12 +749,11 @@ fn Sink::send(self : Sink, text : String) -> Unit {
 }
 
 ///|
-fn HostState::register_sink(self : HostState, queue : @aqueue.Queue[String]) -> Sink {
-  let sink = {
-    queue,
-    subscribed: Ref(false),
-    closed: Ref(false),
-  }
+fn HostState::register_sink(
+  self : HostState,
+  queue : @aqueue.Queue[String],
+) -> Sink {
+  let sink = { queue, subscribed: Ref(false), closed: Ref(false), }
   // Drop sinks whose connections are gone so a long-lived host does not
   // accumulate queues across reconnects.
   let live : Array[Sink] = []
@@ -695,7 +771,10 @@ fn HostState::register_sink(self : HostState, queue : @aqueue.Queue[String]) -> 
 }
 
 ///|
-fn HostState::replay_after(self : HostState, since : Int64) -> Array[@contracts.EventEnvelope] {
+fn HostState::replay_after(
+  self : HostState,
+  since : Int64,
+) -> Array[@contracts.EventEnvelope] {
   let out : Array[@contracts.EventEnvelope] = []
   for event in self.ring {
     if event.seq > since {

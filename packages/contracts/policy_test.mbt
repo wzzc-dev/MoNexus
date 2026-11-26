@@ -187,3 +187,29 @@ test "run: recovery fields round-trip" {
   assert_eq(parsed.retried_from, "run_0")
   assert_eq(parsed.attempt, 2)
 }
+
+///|
+/// A5 redaction units: proxy capability tokens (`mxp_`), node lease tokens
+/// (`mxs_`), Authorization headers and profile API-key headers never survive
+/// a persisted surface.
+test "redaction: mxp/mxs tokens and profile headers are removed" {
+  let text = "MONEXUS_CREDENTIAL_PROXY_TOKEN=mxp_abcdef0123456789\n" +
+    "node token mxs_1234567890abcdef trailing\n" +
+    "authorization: Bearer bearer-value-123\n" +
+    "x-api-key: sk-abcdef0123456789"
+  let clean = redact_secrets(text)
+  assert_false(clean.contains("mxp_abcdef0123456789"))
+  assert_false(clean.contains("mxs_1234567890abcdef"))
+  assert_false(clean.contains("bearer-value-123"))
+  assert_false(clean.contains("sk-abcdef0123456789"))
+  assert_true(clean.contains("[redacted]"))
+  // Redaction also works when the token is embedded in a JSON-ish event
+  // payload with quotes or commas around it.
+  let embedded = "{\"token\":\"mxp_quoted-token\",\"next\":\"mxs_comma-token\",}"
+  let embedded_clean = redact_secrets(embedded)
+  assert_false(embedded_clean.contains("mxp_quoted-token"))
+  assert_false(embedded_clean.contains("mxs_comma-token"))
+  // The proxy env names are treated as secret-shaped names too.
+  assert_true(is_secret_key_name("MONEXUS_CREDENTIAL_PROXY_TOKEN"))
+  assert_true(is_secret_key_name("MONEXUS_CREDENTIAL_NODE_TOKEN"))
+}

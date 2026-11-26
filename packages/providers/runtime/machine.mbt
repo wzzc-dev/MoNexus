@@ -706,6 +706,45 @@ pub fn ProcessChunkSnapshot::from_json(
 }
 
 ///|
+/// Non-secret identity of one node-local credential (A5.2). The node compares
+/// it with its own enrollment; the secret and session token stay on the node.
+pub(all) struct ProcessCredential {
+  binding_id : String
+  credential_id : String
+  machine_id : String
+  agent_id : String
+  profile : String
+  version : Int
+  fingerprint : String
+}
+
+///|
+pub fn ProcessCredential::new(
+  binding_id~ : String,
+  credential_id~ : String,
+  machine_id~ : String,
+  agent_id~ : String,
+  profile~ : String,
+  version~ : Int,
+  fingerprint~ : String,
+) -> ProcessCredential {
+  { binding_id, credential_id, machine_id, agent_id, profile, version, fingerprint, }
+}
+
+///|
+fn process_credential_json(value : ProcessCredential) -> @json.Json {
+  @contracts.json_object([
+    ("binding_id", @contracts.json_string(value.binding_id)),
+    ("credential_id", @contracts.json_string(value.credential_id)),
+    ("machine_id", @contracts.json_string(value.machine_id)),
+    ("agent_id", @contracts.json_string(value.agent_id)),
+    ("profile", @contracts.json_string(value.profile)),
+    ("version", @contracts.json_int(value.version)),
+    ("fingerprint", @contracts.json_string(value.fingerprint)),
+  ])
+}
+
+///|
 fn process_start_params(
   run_id : String,
   argv : Array[String],
@@ -715,6 +754,7 @@ fn process_start_params(
   timeout_ms : Int64,
   risk : String,
   max_output_bytes : Int64,
+  credential : ProcessCredential?,
 ) -> Map[String, @json.Json] {
   let params : Map[String, @json.Json] = Map([])
   params.set("run_id", @contracts.json_string(run_id))
@@ -741,6 +781,10 @@ fn process_start_params(
   if max_output_bytes > 0L {
     params.set("max_output_bytes", @contracts.json_int64(max_output_bytes))
   }
+  match credential {
+    Some(value) => params.set("credential", process_credential_json(value))
+    None => ()
+  }
   params
 }
 
@@ -759,6 +803,7 @@ pub async fn RuntimeMachine::process_start(
   timeout_ms~ : Int64 = 0L,
   risk~ : String = "",
   max_output_bytes~ : Int64 = 0L,
+  credential~ : ProcessCredential? = None,
 ) -> Result[(ProcessSnapshot, Bool), @contracts.RpcError] {
   let params = process_start_params(
     run_id,
@@ -769,6 +814,7 @@ pub async fn RuntimeMachine::process_start(
     timeout_ms,
     risk,
     max_output_bytes,
+    credential,
   )
   let json = match
     self.request_with_id(
@@ -795,6 +841,76 @@ pub async fn RuntimeMachine::process_start(
       return Err(invalid_machine_result("process.start returned an invalid process"))
   }
   Ok((process, existing))
+}
+
+///|
+/// Metadata-only lease renewal for one node-local credential (A5.2). The node
+/// replies with its local version/fingerprint and a fresh lease deadline; no
+/// secret or session token travels in either direction.
+pub async fn RuntimeMachine::credential_lease(
+  self : RuntimeMachine,
+  binding_id~ : String,
+  credential_id~ : String,
+  machine_id~ : String,
+  agent_id~ : String,
+  profile~ : String,
+  version~ : Int,
+  fingerprint~ : String,
+  lease_ttl_ms~ : Int64,
+  client_request_id~ : String,
+) -> Result[@json.Json, @contracts.RpcError] {
+  let params : Map[String, @json.Json] = Map([])
+  // The node verifies a nested non-secret marker (same shape as
+  // `process.start`); it never reads the secret from this frame.
+  params.set(
+    "credential",
+    process_credential_json(
+      ProcessCredential::new(
+        binding_id~,
+        credential_id~,
+        machine_id~,
+        agent_id~,
+        profile~,
+        version~,
+        fingerprint~,
+      ),
+    ),
+  )
+  params.set("lease_ttl_ms", @contracts.json_int64(lease_ttl_ms))
+  self.request_with_id(
+    @contracts.METHOD_RUNTIME_CREDENTIAL_LEASE,
+    params,
+    client_request_id,
+  )
+}
+
+///|
+/// Metadata-only revocation signal. The node destroys its local copy before
+/// replying; the primary never receives the secret.
+pub async fn RuntimeMachine::credential_revoke(
+  self : RuntimeMachine,
+  binding_id~ : String,
+  credential_id~ : String,
+  machine_id~ : String,
+  agent_id~ : String,
+  profile~ : String,
+  version~ : Int,
+  fingerprint~ : String,
+  client_request_id~ : String,
+) -> Result[@json.Json, @contracts.RpcError] {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("binding_id", @contracts.json_string(binding_id))
+  params.set("credential_id", @contracts.json_string(credential_id))
+  params.set("machine_id", @contracts.json_string(machine_id))
+  params.set("agent_id", @contracts.json_string(agent_id))
+  params.set("profile", @contracts.json_string(profile))
+  params.set("version", @contracts.json_int(version))
+  params.set("fingerprint", @contracts.json_string(fingerprint))
+  self.request_with_id(
+    @contracts.METHOD_RUNTIME_CREDENTIAL_REVOKE,
+    params,
+    client_request_id,
+  )
 }
 
 ///|

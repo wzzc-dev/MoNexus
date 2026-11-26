@@ -10,6 +10,7 @@ description = "MoNexus runtime node host: state root, pairing, policy gate and r
 
 import {
   "monexus/contracts@0.1.0",
+  "monexus/credentials@0.1.0",
   "monexus/policy@0.1.0",
   "monexus/git-runtime@0.1.0",
   "monexus/pty-runtime@0.1.0",

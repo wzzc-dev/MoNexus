@@ -276,7 +276,7 @@ fn redact_line(line : String) -> String {
   let keys = [
     "api_key", "apikey", "api-key", "token", "secret", "password", "passwd",
     "authorization", "private_key", "private-key", "access_key",
-    "access-key", "credential", "bearer ",
+    "access-key", "credential", "bearer ", "x-api-key",
   ]
   let mut first_at = -1
   for key in keys {
@@ -324,6 +324,10 @@ pub fn redact_secrets(text : String) -> String {
       continue
     }
     let mut cleaned = redact_line(line)
+    // A5: proxy capability tokens (`mxp_`) and node lease tokens (`mxs_`) are
+    // credential-shaped. Redact them even when no key name precedes them.
+    cleaned = redact_prefixed_tokens(cleaned, "mxp_")
+    cleaned = redact_prefixed_tokens(cleaned, "mxs_")
     // Redact inline `sk-...` API keys that do not sit behind a key name.
     cleaned = redact_sk_tokens(cleaned)
     lines.push(cleaned)
@@ -331,8 +335,43 @@ pub fn redact_secrets(text : String) -> String {
   lines.join("\n")
 }
 
-fn redact_sk_tokens(line : String) -> String {
-  if !line.to_lower().contains("sk-") {
+///|
+/// Redact every `prefix`-headed token (for example `mxp_...` or `mxs_...`) up
+/// to the next whitespace. Over-redaction is intentional: a token that reaches
+/// a persisted surface must never be readable again.
+fn redact_prefixed_tokens(line : String, prefix : String) -> String {
+  let lower = line.to_lower()
+  let wanted = prefix.to_lower()
+  if !lower.contains(wanted) {
+    return line
+  }
+  let mut out = ""
+  let mut index = 0
+  let plen = wanted.length()
+  while index < line.length() {
+    let matches_prefix = index + plen <= line.length() &&
+      lower.substring(start=index, end=index + plen) == wanted
+    if matches_prefix {
+      let mut cursor = index + plen
+      while cursor < line.length() {
+        let ch = line.substring(start=cursor, end=cursor + 1)
+        if ch == " " || ch == "\t" || ch == "\"" || ch == "'" || ch == "," ||
+          ch == ")" || ch == "]" {
+          break
+        }
+        cursor = cursor + 1
+      }
+      out = out + prefix + "[redacted]"
+      index = cursor
+    } else {
+      out = out + line.substring(start=index, end=index + 1)
+      index = index + 1
+    }
+  }
+  out
+}
+
+fn redact_sk_tokens(line : String) -> String {  if !line.to_lower().contains("sk-") {
     return line
   }
   let lower = line.to_lower()

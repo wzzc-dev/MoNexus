@@ -10,6 +10,7 @@ description = "MoNexus host: local WebSocket JSON-RPC host and discovery file (M
 
 import {
   "monexus/contracts@0.1.0",
+  "monexus/credentials@0.1.0",
   "monexus/host-client@0.1.0",
   "monexus/machines@0.1.0",
   "monexus/policy@0.1.0",

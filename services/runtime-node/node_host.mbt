@@ -153,6 +153,12 @@ pub struct NodeHost {
   /// Mirrored skill leases (A4.2). Persisted 0600 so a restarted node keeps
   /// serving only unexpired mirrors; invocation fails closed without a lease.
   skill_leases : Map[String, NodeSkillLease]
+  /// Node-local credential custody (A5.2). The secret is enrolled on this
+  /// node and never crosses the transport; the primary mirrors metadata only.
+  credentials : NodeCredentialVault
+  /// Live per-process credential proxies, keyed by run id. Stopped on process
+  /// exit/cancel and on revoke; a node restart leaves no proxy behind.
+  credential_proxies : Map[String, @credentials.CredentialProxy]
 }
 
 ///|
@@ -201,7 +207,16 @@ pub fn NodeHost::environments(self : NodeHost) -> @runtime.RootedDir? {
 /// idempotency tombstones) stays on disk, so a later `open` for the same
 /// runtime id resumes with the same replay memory.
 pub fn NodeHost::close(self : NodeHost) -> Unit {
+  for _run_id, proxy in self.credential_proxies {
+    proxy.stop()
+  }
+  self.credential_proxies.clear()
   self.executor.close()
+}
+
+///|
+pub fn NodeHost::credentials(self : NodeHost) -> NodeCredentialVault {
+  self.credentials
 }
 
 ///|
@@ -494,6 +509,7 @@ pub async fn NodeHost::open(
   policy~ : PolicyGate? = None,
   pty_limits~ : @pty_runtime.PtyLimits? = None,
   git_limits~ : @git_runtime.GitLimits? = None,
+  credential_storage~ : String = "",
 ) -> Result[NodeHost, String] {
   if !@transport.is_safe_id(runtime_id) {
     return Err("invalid runtime id")
@@ -712,6 +728,10 @@ pub async fn NodeHost::open(
       return Err(message)
     }
   }
+  let credentials = NodeCredentialVault::open(
+    state_dir + "/" + NODE_CREDENTIAL_STORE_DIR,
+    storage=credential_storage,
+  )
   Ok({
     runtime_id,
     state_dir,
@@ -729,6 +749,8 @@ pub async fn NodeHost::open(
     nonces,
     audit,
     skill_leases,
+    credentials,
+    credential_proxies: Map([]),
   })
 }
 
@@ -910,6 +932,14 @@ pub fn NodeHost::service(
 ) -> @transport.NodeService {
   let handlers = @transport.HandlerRegistry::new()
   for rpc_method in @contracts.runtime_application_methods() {
+    let _ = handlers.register(rpc_method, async fn(request) {
+      self.dispatch(request, group)
+    })
+  }
+  // Credential control frames are metadata-only: status/lease/revoke. Enroll
+  // is deliberately absent — the primary can never send a secret, so node
+  // registration happens through the node-local CLI (or NodeCredentialVault).
+  for rpc_method in @contracts.runtime_credential_control_methods() {
     let _ = handlers.register(rpc_method, async fn(request) {
       self.dispatch(request, group)
     })

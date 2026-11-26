@@ -345,6 +345,21 @@ async fn handle_request(
       }
       state.mutex.release()
     }
+    // Credential methods are registered unconditionally so a flag-off host
+    // answers `credential_disabled` rather than `method_not_found`, and the
+    // handler owns its own durable idempotency and locking.
+    @contracts.METHOD_CREDENTIAL_ENROLL
+    | @contracts.METHOD_CREDENTIAL_BINDING_CREATE
+    | @contracts.METHOD_CREDENTIAL_BINDING_LIST
+    | @contracts.METHOD_CREDENTIAL_BINDING_UNBIND
+    | @contracts.METHOD_CREDENTIAL_ROTATE
+    | @contracts.METHOD_CREDENTIAL_REVOKE
+    | @contracts.METHOD_CREDENTIAL_DELETE
+    | @contracts.METHOD_CREDENTIAL_STATUS
+    | @contracts.METHOD_CREDENTIAL_DOCTOR => {
+      state.mutex.release()
+      handle_credential_rpc(state, sink, request, client_request_id)
+    }
     // Registered unconditionally so a flag-off host answers `unsupported`
     // rather than `method_not_found` (ADR-0014 §8 gap note).
     @contracts.METHOD_SKILL_IMPORT => {
@@ -485,10 +500,7 @@ async fn handle_text_frame(
       sink.send(
         error_response_text(
           "",
-          @contracts.RpcError::new(
-            @contracts.ERR_PARSE,
-            "invalid JSON frame",
-          ),
+          @contracts.RpcError::new(@contracts.ERR_PARSE, "invalid JSON frame"),
         ),
       )
       return
@@ -504,10 +516,7 @@ async fn handle_text_frame(
         sink.send(
           error_response_text(
             "",
-            @contracts.RpcError::new(
-              @contracts.ERR_INVALID_REQUEST,
-              message,
-            ),
+            @contracts.RpcError::new(@contracts.ERR_INVALID_REQUEST, message),
           ),
         )
       }
@@ -518,7 +527,9 @@ async fn handle_text_frame(
 async fn writer_loop(sink : Sink, ws : @websocket.Conn) -> Unit {
   for ;; {
     let text = sink.queue.get() catch { _ => return }
-    ws.send_text(text) catch { _ => return }
+    ws.send_text(text) catch {
+      _ => return
+    }
   }
 }
 
@@ -556,11 +567,9 @@ async fn handle_socket(
   let sink = state.register_sink(queue)
   state.mutex.release()
   @async.with_task_group(async fn(group) {
-    group.spawn_bg(
-      no_wait=true,
-      allow_failure=true,
-      async fn() { writer_loop(sink, ws) },
-    )
+    group.spawn_bg(no_wait=true, allow_failure=true, async fn() {
+      writer_loop(sink, ws)
+    })
     reader_loop(state, sink, ws)
   })
   ws.close()
@@ -568,9 +577,7 @@ async fn handle_socket(
 
 ///|
 fn authorized(request : @http.Request, token : String) -> Bool {
-  let header = request.headers.get(
-    @http.CaseInsensitiveString("Authorization"),
-  )
+  let header = request.headers.get(@http.CaseInsensitiveString("Authorization"))
   match header {
     Some(value) => value == "Bearer " + token
     None => false

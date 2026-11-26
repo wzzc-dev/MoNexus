@@ -3,6 +3,7 @@ members = [
   "./spikes/m0",
   "./spikes/a1-pairing",
   "./packages/contracts",
+  "./packages/credentials",
   "./packages/machines",
   "./packages/recipes",
   "./packages/skills",

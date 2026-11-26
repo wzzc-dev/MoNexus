@@ -1430,6 +1430,15 @@ async fn NodeHost::dispatch_inner(
   if method == @contracts.METHOD_RUNTIME_PROCESS_START {
     return self.process_start(request, group, check)
   }
+  if method == @contracts.METHOD_RUNTIME_CREDENTIAL_STATUS {
+    return self.credential_status(request)
+  }
+  if method == @contracts.METHOD_RUNTIME_CREDENTIAL_LEASE {
+    return self.credential_lease(request)
+  }
+  if method == @contracts.METHOD_RUNTIME_CREDENTIAL_REVOKE {
+    return self.credential_revoke(request)
+  }
   if method == @contracts.METHOD_RUNTIME_PROCESS_STDIN {
     return self.process_stdin(request)
   }
@@ -1700,6 +1709,105 @@ async fn NodeHost::process_start(
         Err(error) => return Err(error)
       }
   }
+  // Node-local credential custody: the marker names the binding, version and
+  // fingerprint; the node verifies its own enrollment and starts a loopback
+  // proxy. The secret never enters the request, the response or any event.
+  let credential_binding = match node_credential_binding_from_params(params) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let mut credential_proxy : @credentials.CredentialProxy? = None
+  match credential_binding {
+    Some(binding) => {
+      let entry = match self.credentials.for_binding(binding) {
+        Ok(value) => value
+        Err(message) => return Err(node_credential_failure_rpc(message))
+      }
+      let now = @async.now()
+      if node_lease_expired(entry, now) {
+        return Err(
+          node_credential_rpc_error(
+            @contracts.CREDENTIAL_REASON_LEASE_EXPIRED,
+            "the primary lease for this binding has expired",
+          ),
+        )
+      }
+      let profile = match @contracts.CredentialProfile::builtin(entry.profile) {
+        Some(value) => value
+        None =>
+          return Err(
+            node_credential_rpc_error(
+              @contracts.CREDENTIAL_REASON_PROXY_UNSUPPORTED,
+              "node credential profile is not a builtin profile",
+            ),
+          )
+      }
+      let token = @contracts.CREDENTIAL_NODE_TOKEN_PREFIX + node_random_token()
+      let expires_at_ms = match
+        @contracts.parse_rfc3339_ms(entry.lease_expires_at) {
+        Some(value) => value
+        None => now + @contracts.CREDENTIAL_DEFAULT_LEASE_TTL_MS
+      }
+      let session = @credentials.ProxySession::new(
+        token~,
+        binding_id=binding.binding_id,
+        credential_id=entry.credential_id,
+        version=entry.version,
+        machine_id=binding.machine_id,
+        agent_id=binding.agent_id,
+        profile=entry.profile,
+        expires_at_ms~,
+      )
+      let callbacks = @credentials.ProxyCallbacks::new(
+        authorize=async fn(session) {
+          let current = match self.credentials.for_binding(binding) {
+            Ok(value) => value
+            Err(message) => return Err(node_credential_reason_of(message))
+          }
+          if current.version != session.version {
+            return Err(@contracts.CREDENTIAL_REASON_BAD_STATE)
+          }
+          if node_lease_expired(current, @async.now()) {
+            return Err(@contracts.CREDENTIAL_REASON_LEASE_EXPIRED)
+          }
+          Ok(())
+        },
+        secret=async fn(session) {
+          self.credentials.secret_for(session.credential_id)
+        },
+        audit=fn(event_type, reason) {
+          node_audit(
+            self,
+            event_type,
+            "denied",
+            "binding_id=" + binding.binding_id + " reason=" + reason,
+          )
+        },
+      )
+      let proxy = match
+        @credentials.start_credential_proxy(group, profile, session, callbacks) {
+        Ok(value) => value
+        Err(message) =>
+          return Err(
+            node_credential_rpc_error(
+              @contracts.CREDENTIAL_REASON_PROXY_UNAVAILABLE,
+              @contracts.redact_secrets(message),
+            ),
+          )
+      }
+      env.push(
+        @runtime.EnvPair::new(
+          @contracts.CREDENTIAL_ENV_PROXY_URL,
+          proxy.url(),
+        ),
+      )
+      env.push(
+        @runtime.EnvPair::new(@contracts.CREDENTIAL_ENV_PROXY_TOKEN, token),
+      )
+      credential_proxy = Some(proxy)
+    }
+    None => ()
+  }
   let spec = @runtime.ProcessSpec::new(
     argv~,
     cwd~,
@@ -1717,13 +1825,161 @@ async fn NodeHost::process_start(
       spec~,
     ) {
     Ok(value) => value
-    Err(message) => return Err(start_failure(message))
+    Err(message) => {
+      match credential_proxy {
+        Some(proxy) => proxy.stop()
+        None => ()
+      }
+      return Err(start_failure(message))
+    }
   }
   let (info, existing) = outcome
+  match credential_proxy {
+    Some(proxy) =>
+      if existing {
+        // A replay of the same start must not leave a second listener behind.
+        proxy.stop()
+      } else {
+        self.credential_proxies.set(run_id, proxy)
+        node_audit(
+          self,
+          @contracts.EVENT_CREDENTIAL_PROXY_OPENED,
+          "opened",
+          "run_id=" + run_id + " profile=" + proxy.session.profile,
+        )
+      }
+    None => ()
+  }
   Ok(
     @contracts.json_object([
       ("process", process_info_json(info)),
       ("existing", @contracts.json_bool(existing)),
+    ]),
+  )
+}
+
+///|
+/// Metadata-only credential status. Nothing here is secret.
+async fn NodeHost::credential_status(
+  self : NodeHost,
+  _request : @transport.HandlerRequest,
+) -> Result[@json.Json, @contracts.RpcError] {
+  Ok(self.credentials.status_json())
+}
+
+///|
+fn node_credential_reason_of(message : String) -> String {
+  let head = match message.find(":") {
+    Some(index) => message[:index.to_int()].to_string()
+    None => message
+  }
+  if head.has_prefix("credential_") {
+    head
+  } else {
+    @contracts.CREDENTIAL_REASON_LOCKED
+  }
+}
+
+///|
+fn node_credential_failure_rpc(message : String) -> @contracts.RpcError {
+  node_credential_rpc_error(node_credential_reason_of(message), message)
+}
+
+///|
+fn stop_node_credential_proxies(
+  host : NodeHost,
+  profile : String,
+  reason : String,
+) -> Unit {
+  let run_ids : Array[String] = []
+  for run_id, proxy in host.credential_proxies {
+    if proxy.session.profile == profile {
+      run_ids.push(run_id)
+    }
+  }
+  for run_id in run_ids {
+    match host.credential_proxies.get(run_id) {
+      Some(proxy) => {
+        host.credential_proxies.remove(run_id)
+        proxy.stop()
+        node_audit(
+          host,
+          @contracts.EVENT_CREDENTIAL_PROXY_CLOSED,
+          "closed",
+          "run_id=" + run_id + " reason=" + reason,
+        )
+      }
+      None => ()
+    }
+  }
+}
+
+///|
+/// Lease renewal from the primary. The frame carries binding metadata only;
+/// the node checks it against its own local enrollment and records a fresh
+/// deadline. A rotated/revoked local copy refuses the lease, which makes the
+/// primary's next start fail closed.
+async fn NodeHost::credential_lease(
+  self : NodeHost,
+  request : @transport.HandlerRequest,
+) -> Result[@json.Json, @contracts.RpcError] {
+  let params = request.params
+  let binding = match node_credential_binding_from_params(params) {
+    Ok(Some(value)) => value
+    Ok(None) => return Err(invalid_params("credential marker is required"))
+    Err(error) => return Err(error)
+  }
+  let lease_ttl_ms = int64_param_or(
+    params,
+    "lease_ttl_ms",
+    @contracts.CREDENTIAL_DEFAULT_LEASE_TTL_MS,
+  )
+  let entry = match self.credentials.lease(binding, lease_ttl_ms) {
+    Ok(value) => value
+    Err(message) => return Err(node_credential_failure_rpc(message))
+  }
+  Ok(
+    @contracts.json_object([
+      ("profile", @contracts.json_string(entry.profile)),
+      ("credential_id", @contracts.json_string(entry.credential_id)),
+      ("version", @contracts.json_int(entry.version)),
+      ("fingerprint", @contracts.json_string(entry.fingerprint)),
+      ("state", @contracts.json_string(entry.state)),
+      ("lease_expires_at", @contracts.json_string(entry.lease_expires_at)),
+    ]),
+  )
+}
+
+///|
+/// Revocation signal. The node destroys its local copy first and then stops
+/// any live proxy for the profile. The response carries no secret.
+async fn NodeHost::credential_revoke(
+  self : NodeHost,
+  request : @transport.HandlerRequest,
+) -> Result[@json.Json, @contracts.RpcError] {
+  let params = request.params
+  let profile = @contracts.string_field_or(params, "profile", "")
+  if !valid_node_credential_profile(profile) {
+    return Err(invalid_params("invalid credential profile"))
+  }
+  let entry = match self.credentials.revoke(profile) {
+    Ok(value) => value
+    Err(message) => return Err(node_credential_failure_rpc(message))
+  }
+  stop_node_credential_proxies(self, profile, "revoked")
+  node_audit(
+    self,
+    @contracts.EVENT_CREDENTIAL_REVOKED,
+    "revoked",
+    "profile=" + profile + " version=" + entry.version.to_string(),
+  )
+  Ok(
+    @contracts.json_object([
+      ("profile", @contracts.json_string(profile)),
+      ("credential_id", @contracts.json_string(entry.credential_id)),
+      ("state", @contracts.json_string(entry.state)),
+      ("version", @contracts.json_int(entry.version)),
+      ("fingerprint", @contracts.json_string(entry.fingerprint)),
     ]),
   )
 }
@@ -1791,6 +2047,23 @@ async fn NodeHost::process_read(
 }
 
 ///|
+fn stop_process_credential_proxy(host : NodeHost, run_id : String) -> Unit {
+  match host.credential_proxies.get(run_id) {
+    Some(proxy) => {
+      host.credential_proxies.remove(run_id)
+      proxy.stop()
+      node_audit(
+        host,
+        @contracts.EVENT_CREDENTIAL_PROXY_CLOSED,
+        "closed",
+        "run_id=" + run_id + " reason=process_ended",
+      )
+    }
+    None => ()
+  }
+}
+
+///|
 async fn NodeHost::process_exit(
   self : NodeHost,
   request : @transport.HandlerRequest,
@@ -1802,6 +2075,10 @@ async fn NodeHost::process_exit(
   let info = match self.executor.process().exit(run_id) {
     Ok(value) => value
     Err(message) => return Err(@contracts.RpcError::new(@contracts.ERR_HOST, message))
+  }
+  if @contracts.run_status_is_terminal(info.status) ||
+    info.status == @contracts.RUN_STATUS_LOST {
+    stop_process_credential_proxy(self, run_id)
   }
   Ok(@contracts.json_object([("process", process_info_json(info))]))
 }
@@ -1818,6 +2095,10 @@ async fn NodeHost::process_cancel(
   let info = match self.executor.process().cancel(run_id) {
     Ok(value) => value
     Err(message) => return Err(@contracts.RpcError::new(@contracts.ERR_HOST, message))
+  }
+  if @contracts.run_status_is_terminal(info.status) ||
+    info.status == @contracts.RUN_STATUS_LOST {
+    stop_process_credential_proxy(self, run_id)
   }
   Ok(@contracts.json_object([("process", process_info_json(info))]))
 }

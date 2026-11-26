@@ -1111,6 +1111,7 @@ pub async fn RuntimeMachine::process_start_approved(
   timeout_ms~ : Int64 = 0L,
   risk~ : String = "",
   max_output_bytes~ : Int64 = 0L,
+  credential~ : ProcessCredential? = None,
   approval~ : ApprovalContext,
 ) -> Result[(ProcessSnapshot, Bool), ApprovalFailure] {
   let params : Map[String, @json.Json] = Map([])
@@ -1137,6 +1138,10 @@ pub async fn RuntimeMachine::process_start_approved(
   }
   if max_output_bytes > 0L {
     params.set("max_output_bytes", @contracts.json_int64(max_output_bytes))
+  }
+  match credential {
+    Some(value) => params.set("credential", process_credential_json(value))
+    None => ()
   }
   let result = self.mutate_with_approval(
     rpc_method=@contracts.METHOD_RUNTIME_PROCESS_START,

@@ -821,6 +821,10 @@ async fn ProcessRuntime::supervise(
           cancel_handler~,
         )
         slot.proc.val = Some(proc)
+        // The start response must carry the real pid: operators and the
+        // credential custody checks use it to inspect the child process
+        // environment (`/proc/<pid>/environ`).
+        slot.info.val = { ..slot.info.val, pid: proc.pid, }
         slot.stdin.val = Some(stdin_writer)
         let owner = self
         let _ = inner.spawn(async fn() {

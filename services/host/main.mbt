@@ -25,14 +25,7 @@ async fn run_host_command(args : Array[String]) -> (Int32, String) {
     "runtime" | "--runtime" => runtime_command(args[2:].to_owned())
     "rpc" => rpc_command(args[2:].to_owned())
     "skill-mcp" => skill_mcp_command(args[2:].to_owned())
-    _ =>
-      (
-        2,
-        "monexus-host: unknown command " +
-        command +
-        "\n" +
-        usage_text(),
-      )
+    _ => (2, "monexus-host: unknown command " + command + "\n" + usage_text())
   }
 }
 
@@ -47,15 +40,16 @@ fn host_version_line() -> String {
 ///|
 fn usage_text() -> String {
   [
-    "usage:",
-    "  monexus-host version | --version",
-    "  monexus-host serve [--state-dir DIR] [--heartbeat-ms N] [--port N]",
+    "usage:", "  monexus-host version | --version", "  monexus-host serve [--state-dir DIR] [--heartbeat-ms N] [--port N]",
     "      [--trigger-enabled true|false]  (default: $MONEXUS_TRIGGER_ENABLED, off)",
     "      [--runtime-listen HOST:PORT --runtime-cert FILE --runtime-key FILE]",
     "      [--runtime-state-dir DIR] [--runtime-policy FILE]",
     "      [--runtime-workspace-root DIR ...] [--runtime-wait-ms N]",
     "      [--runtime-approval-ttl-ms N]",
     "      [--skill-enabled true|false]  (default: $MONEXUS_SKILL_ENABLED, off)",
+    "      [--credential-enabled true|false]  (default: $MONEXUS_CREDENTIAL_ENABLED, off)",
+    "      [--credential-storage auto|file|keychain]",
+    "      [--credential-lease-ttl-ms N] [--credential-cooldown-ms N]",
     "  monexus-host status [--state-dir DIR]",
     "  monexus-host subscribe [--state-dir DIR] [--since SEQ]",
     "      [--timeout-ms N] [--max-events N]",
@@ -161,8 +155,8 @@ fn pair_all(pairs : Array[(String, String)], key : String) -> Array[String] {
 fn pair_int(
   pairs : Array[(String, String)],
   key : String,
-  default : Int,
-) -> Int {
+  default : Int32,
+) -> Int32 {
   match pair_last_opt(pairs, key) {
     Some(value) => @string.parse_int(value) catch { _ => default }
     None => default
@@ -170,10 +164,7 @@ fn pair_int(
 }
 
 ///|
-fn pair_int64(
-  pairs : Array[(String, String)],
-  key : String,
-) -> Int64? {
+fn pair_int64(pairs : Array[(String, String)], key : String) -> Int64? {
   match pair_last_opt(pairs, key) {
     Some(value) => Some(@string.parse_int64(value) catch { _ => 0L })
     None => None
@@ -218,6 +209,17 @@ async fn serve_command(args : Array[String]) -> (Int32, String) {
       }
     None => false
   }
+  // Credentials are opt-in (ADR-0016): with the flag off the host keeps the
+  // V0.1 path exactly — no proxy env, no credential RPC, no credential events.
+  let credential_default = match
+    @env.get_env_var("MONEXUS_CREDENTIAL_ENABLED") {
+    Some(value) =>
+      match value.to_lower() {
+        "true" | "1" | "yes" | "on" => true
+        _ => false
+      }
+    None => false
+  }
   let exe = match @env.args() {
     values if values.length() > 0 => values[0]
     _ => "monexus-host"
@@ -241,10 +243,30 @@ async fn serve_command(args : Array[String]) -> (Int32, String) {
     ),
     skill_enabled=pair_bool(pairs, "--skill-enabled", skill_env_default),
     host_exe=exe,
+    credential_enabled=pair_bool(
+      pairs, "--credential-enabled", credential_default,
+    ),
+    credential_storage=pair_last(pairs, "--credential-storage", ""),
+    credential_lease_ttl_ms=@string.parse_int64(
+      pair_last(
+        pairs,
+        "--credential-lease-ttl-ms",
+        @contracts.CREDENTIAL_DEFAULT_LEASE_TTL_MS.to_string(),
+      ),
+    ) catch {
+      _ => @contracts.CREDENTIAL_DEFAULT_LEASE_TTL_MS
+    },
+    credential_cooldown_ms=@string.parse_int64(
+      pair_last(
+        pairs,
+        "--credential-cooldown-ms",
+        @contracts.CREDENTIAL_DEFAULT_COOLDOWN_MS.to_string(),
+      ),
+    ) catch {
+      _ => @contracts.CREDENTIAL_DEFAULT_COOLDOWN_MS
+    },
   )
-  @signal.set_global_cancellation_signals(
-    [@signal.SIGINT, @signal.SIGTERM],
-  )
+  @signal.set_global_cancellation_signals([@signal.SIGINT, @signal.SIGTERM])
   match serve(options) {
     Ok(_) => (0, "")
     Err(message) => (1, "monexus-host: " + message)
@@ -254,11 +276,7 @@ async fn serve_command(args : Array[String]) -> (Int32, String) {
 ///|
 async fn status_command(args : Array[String]) -> (Int32, String) {
   let (pairs, _) = parse_pairs(args)
-  let state_dir = pair_last(
-    pairs,
-    "--state-dir",
-    @client.default_state_dir(),
-  )
+  let state_dir = pair_last(pairs, "--state-dir", @client.default_state_dir())
   let info = match @client.read_host_info(state_dir) {
     Ok(value) => value
     Err(message) => return (1, "monexus-host: offline: " + message)
@@ -291,11 +309,7 @@ async fn status_command(args : Array[String]) -> (Int32, String) {
 ///|
 async fn subscribe_command(args : Array[String]) -> (Int32, String) {
   let (pairs, _) = parse_pairs(args)
-  let state_dir = pair_last(
-    pairs,
-    "--state-dir",
-    @client.default_state_dir(),
-  )
+  let state_dir = pair_last(pairs, "--state-dir", @client.default_state_dir())
   let timeout_ms = pair_int(pairs, "--timeout-ms", 5_000).max(1)
   let max_events = pair_int(pairs, "--max-events", 3).max(1)
   let since = pair_int64(pairs, "--since")
@@ -320,30 +334,30 @@ async fn subscribe_command(args : Array[String]) -> (Int32, String) {
     " next_seq=" +
     subscribed.next_seq.to_string(),
   ]
-  let outcome = @async.with_timeout_opt(
-    timeout_ms,
-    async fn() -> Result[Int, String] {
-      let mut count = 0
-      while count < max_events {
-        let event = match client.wait_event() {
-          Ok(value) => value
-          Err(message) => return Err(message)
-        }
-        lines.push(
-          "event seq=" +
-          event.seq.to_string() +
-          " type=" +
-          event.event_type +
-          " ts=" +
-          event.ts +
-          " subject=" +
-          event.subject,
-        )
-        count = count + 1
+  let outcome = @async.with_timeout_opt(timeout_ms, async fn() -> Result[
+    Int32,
+    String,
+  ] {
+    let mut count = 0
+    while count < max_events {
+      let event = match client.wait_event() {
+        Ok(value) => value
+        Err(message) => return Err(message)
       }
-      Ok(count)
-    },
-  )
+      lines.push(
+        "event seq=" +
+        event.seq.to_string() +
+        " type=" +
+        event.event_type +
+        " ts=" +
+        event.ts +
+        " subject=" +
+        event.subject,
+      )
+      count = count + 1
+    }
+    Ok(count)
+  })
   client.close()
   match outcome {
     Some(Ok(_)) => (0, lines.join("\n"))
@@ -352,9 +366,7 @@ async fn subscribe_command(args : Array[String]) -> (Int32, String) {
       (1, lines.join("\n"))
     }
     None => {
-      lines.push(
-        "subscribe timeout after " + timeout_ms.to_string() + "ms",
-      )
+      lines.push("subscribe timeout after " + timeout_ms.to_string() + "ms")
       (1, lines.join("\n"))
     }
   }
@@ -389,9 +401,7 @@ async fn connect_client(
 }
 
 ///|
-fn sorted_effective_lines(
-  record : @contracts.MachineRecord,
-) -> Array[String] {
+fn sorted_effective_lines(record : @contracts.MachineRecord) -> Array[String] {
   let keys : Array[String] = []
   for key, _ in record.ssh_effective {
     keys.push(key)
@@ -463,19 +473,13 @@ fn profile_lines(profile : @contracts.MachineProfile) -> Array[String] {
 ///|
 fn machine_usage() -> String {
   [
-    "usage:",
-    "  monexus-host machine add [--state-dir DIR] [--kind ssh|local|runtime] --host HOST",
-    "      [--name NAME] [--port N] [--user USER] [--identity FILE]",
-    "      [--use-ssh-config true|false] [--host-key-policy POLICY]",
-    "      [--known-hosts-file FILE]",
-    "  monexus-host machine list [--state-dir DIR]",
+    "usage:", "  monexus-host machine add [--state-dir DIR] [--kind ssh|local|runtime] --host HOST",
+    "      [--name NAME] [--port N] [--user USER] [--identity FILE]", "      [--use-ssh-config true|false] [--host-key-policy POLICY]",
+    "      [--known-hosts-file FILE]", "  monexus-host machine list [--state-dir DIR]",
     "  monexus-host machine probe --id ID [--state-dir DIR] [--timeout-seconds N]",
-    "  monexus-host machine remove --id ID [--state-dir DIR]",
-    "  monexus-host rpc --method METHOD [--state-dir DIR] [--params JSON]",
-    "  monexus-host runtime pair|serve|status [--runtime-id ID] ...",
-    "      (see `monexus-host runtime help`; also `--runtime ...`)",
-    "",
-    "POLICY is accept-new (default), yes, no or config.",
+    "  monexus-host machine remove --id ID [--state-dir DIR]", "  monexus-host rpc --method METHOD [--state-dir DIR] [--params JSON]",
+    "  monexus-host runtime pair|serve|status [--runtime-id ID] ...", "      (see `monexus-host runtime help`; also `--runtime ...`)",
+    "", "POLICY is accept-new (default), yes, no or config.",
   ].join("\n")
 }
 
@@ -488,10 +492,11 @@ async fn machine_command(args : Array[String]) -> (Int32, String) {
     "probe" => machine_probe_command(args[1:].to_owned())
     "remove" => machine_remove_command(args[1:].to_owned())
     "help" | "--help" | "-h" => (0, machine_usage())
-    _ => (
-      2,
-      "monexus-host: unknown machine command " + sub + "\n" + machine_usage(),
-    )
+    _ =>
+      (
+        2,
+        "monexus-host: unknown machine command " + sub + "\n" + machine_usage(),
+      )
   }
 }
 
@@ -521,30 +526,35 @@ async fn machine_add_command(args : Array[String]) -> (Int32, String) {
     Ok(value) => value
     Err(message) => return (1, "monexus-host: " + message)
   }
-  let record = match client.call_machine_add(
-    request_id("req"),
-    name=pair_last(pairs, "--name", if kind == @contracts.MACHINE_KIND_LOCAL {
-      "this machine"
-    } else {
-      host
-    }),
-    host=host,
-    kind~,
-    port=if kind == @contracts.MACHINE_KIND_RUNTIME {
-      0
-    } else {
-      pair_int(pairs, "--port", 22)
-    },
-    user=pair_last(pairs, "--user", ""),
-    identity=pair_last(pairs, "--identity", ""),
-    use_ssh_config=pair_bool(pairs, "--use-ssh-config", true),
-    host_key_policy=pair_last(
-      pairs,
-      "--host-key-policy",
-      @contracts.MACHINE_HOST_KEY_POLICY_ACCEPT_NEW,
-    ),
-    known_hosts_file=pair_last(pairs, "--known-hosts-file", ""),
-  ) {
+  let record = match
+    client.call_machine_add(
+      request_id("req"),
+      name=pair_last(
+        pairs,
+        "--name",
+        if kind == @contracts.MACHINE_KIND_LOCAL {
+          "this machine"
+        } else {
+          host
+        },
+      ),
+      host~,
+      kind~,
+      port=if kind == @contracts.MACHINE_KIND_RUNTIME {
+        0
+      } else {
+        pair_int(pairs, "--port", 22)
+      },
+      user=pair_last(pairs, "--user", ""),
+      identity=pair_last(pairs, "--identity", ""),
+      use_ssh_config=pair_bool(pairs, "--use-ssh-config", true),
+      host_key_policy=pair_last(
+        pairs,
+        "--host-key-policy",
+        @contracts.MACHINE_HOST_KEY_POLICY_ACCEPT_NEW,
+      ),
+      known_hosts_file=pair_last(pairs, "--known-hosts-file", ""),
+    ) {
     Ok(value) => value
     Err(message) => {
       client.close()
@@ -552,7 +562,12 @@ async fn machine_add_command(args : Array[String]) -> (Int32, String) {
     }
   }
   client.close()
-  (0, ["machine added"].join("\n") + "\n" + machine_record_lines(record).join("\n"))
+  (
+    0,
+    ["machine added"].join("\n") +
+    "\n" +
+    machine_record_lines(record).join("\n"),
+  )
 }
 
 ///|
@@ -608,11 +623,8 @@ async fn machine_probe_command(args : Array[String]) -> (Int32, String) {
     Ok(value) => value
     Err(message) => return (1, "monexus-host: " + message)
   }
-  let view = match client.call_machine_probe(
-    request_id("req"),
-    machine_id,
-    timeout_seconds=timeout_seconds,
-  ) {
+  let view = match
+    client.call_machine_probe(request_id("req"), machine_id, timeout_seconds~) {
     Ok(value) => value
     Err(message) => {
       client.close()
@@ -639,7 +651,8 @@ async fn machine_remove_command(args : Array[String]) -> (Int32, String) {
     Ok(value) => value
     Err(message) => return (1, "monexus-host: " + message)
   }
-  let removed = match client.call_machine_remove(request_id("req"), machine_id) {
+  let removed = match
+    client.call_machine_remove(request_id("req"), machine_id) {
     Ok(value) => value
     Err(message) => {
       client.close()
@@ -655,12 +668,15 @@ fn rpc_usage() -> String {
   [
     "usage:",
     "  monexus-host rpc --method METHOD [--state-dir DIR] [--params JSON]",
+    "      [--params-file FILE]  (0600 file; keeps secrets out of argv)",
     "  monexus-host runtime pair|serve|status [--runtime-id ID] ...",
     "      (see `monexus-host runtime help`; also `--runtime ...`)",
     "",
     "Sends one JSON-RPC request over the authenticated WebSocket and prints",
     "the raw result as JSON. client_request_id is added when absent, so M3",
     "workspace/worktree/lease/terminal calls can be driven from shell tests.",
+    "Use --params-file for credential.enroll/rotate so the secret is never a",
+    "command-line argument (the file must be mode 0600).",
   ].join("\n")
 }
 
@@ -672,9 +688,27 @@ async fn rpc_command(args : Array[String]) -> (Int32, String) {
     return (2, "monexus-host: rpc needs --method\n" + rpc_usage())
   }
   let state_dir = pair_last(pairs, "--state-dir", @client.default_state_dir())
-  let params_text = pair_last(pairs, "--params", "{}")
+  let params_file = pair_last(pairs, "--params-file", "")
+  let params_text = if params_file != "" {
+    match @transport.validate_secret_file(params_file, "rpc params file") {
+      Ok(_) => ()
+      Err(message) =>
+        return (
+          2,
+          "monexus-host: rpc: " + @contracts.redact_secrets(message),
+        )
+    }
+    let raw = @fs.read_file(params_file).text() catch {
+      _ =>
+        return (2, "monexus-host: rpc: cannot read the params file")
+    }
+    raw
+  } else {
+    pair_last(pairs, "--params", "{}")
+  }
   let parsed = @json.parse(params_text) catch {
-    error => return (2, "monexus-host: invalid --params JSON: " + error.to_string())
+    error =>
+      return (2, "monexus-host: invalid --params JSON: " + error.to_string())
   }
   let object = match @contracts.as_object(parsed) {
     Some(value) => value

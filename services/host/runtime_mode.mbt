@@ -12,26 +12,22 @@
 ///|
 fn runtime_usage() -> String {
   [
-    "usage:",
-    "  monexus-host runtime pair --runtime-id ID --primary HOST:PORT",
-    "      --ca FILE --pin SHA256 --code CODE [--state-base DIR]",
-    "      [--workspace DIR] [--server-name NAME] [--heartbeat-ms N]",
-    "  monexus-host runtime serve --runtime-id ID --primary HOST:PORT",
-    "      --ca FILE --pin SHA256 [--state-base DIR] [--workspace DIR]",
-    "      [--server-name NAME] [--heartbeat-ms N] [--backoff-ms N]",
-    "      [--max-attempts N] [--allow-workspace true|false]",
+    "usage:", "  monexus-host runtime pair --runtime-id ID --primary HOST:PORT",
+    "      --ca FILE --pin SHA256 --code CODE [--state-base DIR]", "      [--workspace DIR] [--server-name NAME] [--heartbeat-ms N]",
+    "  monexus-host runtime serve --runtime-id ID --primary HOST:PORT", "      --ca FILE --pin SHA256 [--state-base DIR] [--workspace DIR]",
+    "      [--server-name NAME] [--heartbeat-ms N] [--backoff-ms N]", "      [--max-attempts N] [--allow-workspace true|false]",
     "  monexus-host runtime status --runtime-id ID [--state-base DIR]",
+    "  monexus-host runtime credential-enroll --runtime-id ID --profile NAME", "      --secret-file FILE [--kind api_key|bearer_token]", "      [--credential-storage file|keychain] [--state-base DIR]",
+    "  monexus-host runtime credential-status --runtime-id ID [--state-base DIR]",
+    "  monexus-host runtime credential-revoke --runtime-id ID --profile NAME", "      [--state-base DIR]",
     "  monexus-host --runtime ...   (same commands; serve is the default)",
-    "",
-    "The runtime node stores its identity and token under",
-    "<state-base>/<runtime-id>/ (0700 dir, 0600 files). Default state-base:",
-    "$MONEXUS_RUNTIME_DIR, then $HOME/.monexus/runtime. TLS is always pinned:",
-    "--pin is the leaf certificate SHA-256 and there is no plaintext fallback.",
+    "", "The runtime node stores its identity and token under", "<state-base>/<runtime-id>/ (0700 dir, 0600 files). Default state-base:",
+    "$MONEXUS_RUNTIME_DIR, then $HOME/.monexus/runtime. TLS is always pinned:", "--pin is the leaf certificate SHA-256 and there is no plaintext fallback.",
   ].join("\n")
 }
 
 ///|
-fn runtime_address(text : String) -> Result[(String, Int), String] {
+fn runtime_address(text : String) -> Result[(String, Int32), String] {
   match text.rev_split_once(":") {
     Some((host, port_text)) => {
       if host == "" {
@@ -122,14 +118,20 @@ async fn runtime_open_host(
     state_base~,
     workspace_root=workspace,
     policy=None,
+    credential_storage=pair_last(pairs, "--credential-storage", ""),
   )
 }
 
 ///|
-async fn runtime_pair_command(pairs : Array[(String, String)]) -> (Int32, String) {
+async fn runtime_pair_command(
+  pairs : Array[(String, String)],
+) -> (Int32, String) {
   let runtime_id = pair_last(pairs, "--runtime-id", "")
   if runtime_id == "" {
-    return (2, "monexus-host: runtime pair needs --runtime-id\n" + runtime_usage())
+    return (
+      2,
+      "monexus-host: runtime pair needs --runtime-id\n" + runtime_usage(),
+    )
   }
   let code = pair_last(pairs, "--code", "")
   if code == "" {
@@ -149,16 +151,23 @@ async fn runtime_pair_command(pairs : Array[(String, String)]) -> (Int32, String
   }
   (
     0,
-    "runtime " + grant.runtime_id +
-    " paired; token saved to " + host.token_path(),
+    "runtime " +
+    grant.runtime_id +
+    " paired; token saved to " +
+    host.token_path(),
   )
 }
 
 ///|
-async fn runtime_serve_command(pairs : Array[(String, String)]) -> (Int32, String) {
+async fn runtime_serve_command(
+  pairs : Array[(String, String)],
+) -> (Int32, String) {
   let runtime_id = pair_last(pairs, "--runtime-id", "")
   if runtime_id == "" {
-    return (2, "monexus-host: runtime serve needs --runtime-id\n" + runtime_usage())
+    return (
+      2,
+      "monexus-host: runtime serve needs --runtime-id\n" + runtime_usage(),
+    )
   }
   let config = match runtime_node_config(pairs, runtime_id) {
     Ok(value) => value
@@ -169,16 +178,19 @@ async fn runtime_serve_command(pairs : Array[(String, String)]) -> (Int32, Strin
     Err(message) => return (1, "monexus-host: runtime serve: " + message)
   }
   if pair_bool(pairs, "--allow-workspace", false) {
-    host.set_policy(@runtime_node.PolicyGate::allow_workspace(host.workspace_root()))
+    host.set_policy(
+      @runtime_node.PolicyGate::allow_workspace(host.workspace_root()),
+    )
   }
   let outcome = host.serve(config)
   match outcome {
-    @transport.NodeRunOutcome::Drained => (0, "runtime " + runtime_id + " drained")
-    @transport.NodeRunOutcome::Revoked => (1, "runtime " + runtime_id + " revoked")
-    @transport.NodeRunOutcome::Unauthorized => {
+    @transport.NodeRunOutcome::Drained =>
+      (0, "runtime " + runtime_id + " drained")
+    @transport.NodeRunOutcome::Revoked =>
+      (1, "runtime " + runtime_id + " revoked")
+    @transport.NodeRunOutcome::Unauthorized =>
       (1, "runtime " + runtime_id + " unauthorized")
-    }
-    @transport.NodeRunOutcome::AttemptsExhausted(attempts) => {
+    @transport.NodeRunOutcome::AttemptsExhausted(attempts) =>
       (
         1,
         "runtime " +
@@ -187,18 +199,21 @@ async fn runtime_serve_command(pairs : Array[(String, String)]) -> (Int32, Strin
         attempts.to_string() +
         " attempts",
       )
-    }
-    @transport.NodeRunOutcome::Stopped(message) => {
+    @transport.NodeRunOutcome::Stopped(message) =>
       (1, "runtime " + runtime_id + " stopped: " + message)
-    }
   }
 }
 
 ///|
-async fn runtime_status_command(pairs : Array[(String, String)]) -> (Int32, String) {
+async fn runtime_status_command(
+  pairs : Array[(String, String)],
+) -> (Int32, String) {
   let runtime_id = pair_last(pairs, "--runtime-id", "")
   if runtime_id == "" {
-    return (2, "monexus-host: runtime status needs --runtime-id\n" + runtime_usage())
+    return (
+      2,
+      "monexus-host: runtime status needs --runtime-id\n" + runtime_usage(),
+    )
   }
   let host = match runtime_open_host(pairs, runtime_id) {
     Ok(value) => value
@@ -216,14 +231,155 @@ async fn runtime_status_command(pairs : Array[(String, String)]) -> (Int32, Stri
 }
 
 ///|
+async fn runtime_credential_enroll_command(
+  pairs : Array[(String, String)],
+) -> (Int32, String) {
+  let runtime_id = pair_last(pairs, "--runtime-id", "")
+  if runtime_id == "" {
+    return (
+      2,
+      "monexus-host: runtime credential-enroll needs --runtime-id\n" +
+      runtime_usage(),
+    )
+  }
+  let profile = pair_last(pairs, "--profile", "")
+  if profile == "" {
+    return (
+      2,
+      "monexus-host: runtime credential-enroll needs --profile\n" +
+      runtime_usage(),
+    )
+  }
+  let secret_file = pair_last(pairs, "--secret-file", "")
+  if secret_file == "" {
+    return (
+      2,
+      "monexus-host: runtime credential-enroll needs --secret-file\n" +
+      runtime_usage(),
+    )
+  }
+  // The secret is read from a 0600 file, never from argv or the environment.
+  match @transport.validate_secret_file(secret_file, "credential secret file") {
+    Ok(_) => ()
+    Err(message) =>
+      return (
+        1,
+        "monexus-host: runtime credential-enroll: " +
+        @contracts.redact_secrets(message),
+      )
+  }
+  let raw = @fs.read_file(secret_file).text() catch {
+    _ =>
+      return (
+        1,
+        "monexus-host: runtime credential-enroll: cannot read the secret file",
+      )
+  }
+  let secret = raw.trim().to_owned()
+  if secret == "" {
+    return (1, "monexus-host: runtime credential-enroll: the secret file is empty")
+  }
+  let host = match runtime_open_host(pairs, runtime_id) {
+    Ok(value) => value
+    Err(message) =>
+      return (1, "monexus-host: runtime credential-enroll: " + message)
+  }
+  let kind = pair_last(pairs, "--kind", @contracts.CREDENTIAL_KIND_API_KEY)
+  let entry = match host.credentials().enroll(profile, secret, kind~) {
+    Ok(value) => value
+    Err(message) =>
+      return (1, "monexus-host: runtime credential-enroll: " + message)
+  }
+  (
+    0,
+    "credential enrolled\nprofile=" +
+    entry.profile +
+    "\nversion=" +
+    entry.version.to_string() +
+    "\nfingerprint=" +
+    entry.fingerprint +
+    "\nstorage=" +
+    host.credentials().backend() +
+    "\nstate_dir=" +
+    host.credentials().root(),
+  )
+}
+
+///|
+async fn runtime_credential_status_command(
+  pairs : Array[(String, String)],
+) -> (Int32, String) {
+  let runtime_id = pair_last(pairs, "--runtime-id", "")
+  if runtime_id == "" {
+    return (
+      2,
+      "monexus-host: runtime credential-status needs --runtime-id\n" +
+      runtime_usage(),
+    )
+  }
+  let host = match runtime_open_host(pairs, runtime_id) {
+    Ok(value) => value
+    Err(message) =>
+      return (1, "monexus-host: runtime credential-status: " + message)
+  }
+  let status = host.credentials().status_json()
+  (0, status.stringify())
+}
+
+///|
+async fn runtime_credential_revoke_command(
+  pairs : Array[(String, String)],
+) -> (Int32, String) {
+  let runtime_id = pair_last(pairs, "--runtime-id", "")
+  if runtime_id == "" {
+    return (
+      2,
+      "monexus-host: runtime credential-revoke needs --runtime-id\n" +
+      runtime_usage(),
+    )
+  }
+  let profile = pair_last(pairs, "--profile", "")
+  if profile == "" {
+    return (
+      2,
+      "monexus-host: runtime credential-revoke needs --profile\n" +
+      runtime_usage(),
+    )
+  }
+  let host = match runtime_open_host(pairs, runtime_id) {
+    Ok(value) => value
+    Err(message) =>
+      return (1, "monexus-host: runtime credential-revoke: " + message)
+  }
+  let entry = match host.credentials().revoke(profile) {
+    Ok(value) => value
+    Err(message) =>
+      return (1, "monexus-host: runtime credential-revoke: " + message)
+  }
+  (
+    0,
+    "credential revoked\nprofile=" +
+    entry.profile +
+    "\nversion=" +
+    entry.version.to_string() +
+    "\nstate=" +
+    entry.state,
+  )
+}
+
+///|
 async fn runtime_command(args : Array[String]) -> (Int32, String) {
-  let known = ["pair", "serve", "status", "help", "--help", "-h"]
+  let known = [
+    "pair", "serve", "status", "credential-enroll", "credential-status",
+    "credential-revoke", "help", "--help", "-h",
+  ]
   let sub = if args.length() > 0 && known.contains(args[0]) {
     args[0]
   } else {
     "serve"
   }
-  let rest = if sub == "serve" && (args.length() == 0 || !known.contains(args[0])) {
+  let rest = if sub == "serve" &&
+    (args.length() == 0 || !known.contains(args[0])) {
     args
   } else {
     args[1:].to_owned()
@@ -231,6 +387,9 @@ async fn runtime_command(args : Array[String]) -> (Int32, String) {
   match sub {
     "pair" => runtime_pair_command(parse_pairs(rest).0)
     "status" => runtime_status_command(parse_pairs(rest).0)
+    "credential-enroll" => runtime_credential_enroll_command(parse_pairs(rest).0)
+    "credential-status" => runtime_credential_status_command(parse_pairs(rest).0)
+    "credential-revoke" => runtime_credential_revoke_command(parse_pairs(rest).0)
     "help" | "--help" | "-h" => (0, runtime_usage())
     _ => runtime_serve_command(parse_pairs(rest).0)
   }
