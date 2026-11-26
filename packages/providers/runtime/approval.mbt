@@ -1096,6 +1096,121 @@ pub async fn RuntimeMachine::exec_start_approved(
 }
 
 ///|
+/// Streaming process start with Decision-bound approval. The node classifies
+/// `runtime.process.start` exactly like `exec.start` (same argv/cwd/env
+/// payload), and a high-risk start is bound to `run_id` plus the command
+/// digest. A denied, expired or unverifiable Decision never starts anything.
+pub async fn RuntimeMachine::process_start_approved(
+  self : RuntimeMachine,
+  run_id~ : String,
+  client_request_id~ : String,
+  argv~ : Array[String],
+  cwd~ : String = "",
+  env~ : Map[String, String] = Map([]),
+  inherit_env~ : Array[String] = [],
+  timeout_ms~ : Int64 = 0L,
+  risk~ : String = "",
+  max_output_bytes~ : Int64 = 0L,
+  approval~ : ApprovalContext,
+) -> Result[(ProcessSnapshot, Bool), ApprovalFailure] {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("run_id", @contracts.json_string(run_id))
+  params.set("argv", @contracts.json_string_array(argv))
+  if cwd != "" {
+    params.set("cwd", @contracts.json_string(cwd))
+  }
+  if !env.is_empty() {
+    let entries : Array[(String, @json.Json)] = []
+    for name, value in env {
+      entries.push((name, @contracts.json_string(value)))
+    }
+    params.set("env", @contracts.json_object(entries))
+  }
+  if !inherit_env.is_empty() {
+    params.set("inherit_env", @contracts.json_string_array(inherit_env))
+  }
+  if timeout_ms > 0L {
+    params.set("timeout_ms", @contracts.json_int64(timeout_ms))
+  }
+  if risk != "" {
+    params.set("risk", @contracts.json_string(risk))
+  }
+  if max_output_bytes > 0L {
+    params.set("max_output_bytes", @contracts.json_int64(max_output_bytes))
+  }
+  let result = self.mutate_with_approval(
+    rpc_method=@contracts.METHOD_RUNTIME_PROCESS_START,
+    params~,
+    binding_run_id=run_id,
+    client_request_id~,
+    command=argv,
+    approval~,
+  )
+  let json = match result {
+    Ok(value) => value
+    Err(Rejected(_code, label)) =>
+      if label == "replayed_nonce" {
+        // The grant was already consumed. The process may still exist exactly
+        // once under this run id; reconcile by exit status instead of starting
+        // a second one. A running process is reported as the existing run.
+        match self.process_exit(run_id) {
+          Ok(Some(process)) => {
+            self.policy_audit(
+              "policy.approval_replay_reconciled",
+              "existing",
+              "run_id=" + run_id + " outcome=process_reconciled",
+            )
+            return Ok((process, true))
+          }
+          _ => ()
+        }
+        return Err(Rejected(@transport.ERR_APPROVAL_INVALID, label))
+      } else {
+        return Err(Rejected(_code, label))
+      }
+    Err(failure) => return Err(failure)
+  }
+  let object = match @contracts.as_object(json) {
+    Some(value) => value
+    None =>
+      return Err(
+        Rpc(
+          @contracts.RpcError::new(
+            @contracts.ERR_INTERNAL,
+            "process.start returned a non-object",
+          ),
+        ),
+      )
+  }
+  let existing = @contracts.bool_field_or(object, "existing", false)
+  let process_json = match object.get("process") {
+    Some(value) => value
+    None =>
+      return Err(
+        Rpc(
+          @contracts.RpcError::new(
+            @contracts.ERR_INTERNAL,
+            "process.start returned no process",
+          ),
+        ),
+      )
+  }
+  let process = match ProcessSnapshot::from_json(process_json) {
+    Some(value) => value
+    None =>
+      return Err(
+        Rpc(
+          @contracts.RpcError::new(
+            @contracts.ERR_INTERNAL,
+            "process.start returned an invalid process",
+          ),
+        ),
+      )
+  }
+  Ok((process, existing))
+}
+
+///|
 /// fs.write with Decision-bound approval. The node's digest covers the path
 /// *and* the full content (plus the resolved cwd and workspace root), so a
 /// grant cannot authorize a different file or different bytes. The Decision

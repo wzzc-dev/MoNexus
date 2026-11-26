@@ -38,6 +38,16 @@ pub const EVENT_PTY_GAP : String = "runtime.pty.gap"
 pub const EVENT_PTY_EXITED : String = "runtime.pty.exited"
 
 ///|
+/// Streaming-process lifecycle events (A1.4). Stream data is not published as
+/// events at all: the primary polls `runtime.process.stdout|stderr` by byte
+/// offset, and the ring is bounded. Only lifecycle transitions are durable, so
+/// the event stream stays small and a node restart can settle the run.
+pub const EVENT_PROCESS_STARTED : String = "runtime.process.started"
+
+///|
+pub const EVENT_PROCESS_EXITED : String = "runtime.process.exited"
+
+///|
 /// Git operations are published under the fixed outbox `run_id` `git`, so
 /// every operation has a monotonic `run_seq` in one stream.
 pub const EVENT_GIT_RESULT : String = "runtime.git.result"

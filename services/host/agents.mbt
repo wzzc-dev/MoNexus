@@ -755,6 +755,23 @@ async fn agent_session_pump(
             stop_reason = @agent.remote_eof_stop_reason(exit_status)
             last_error = @agent.remote_eof_last_error(stop_reason)
           }
+        } else if runtime.process.is_runtime() {
+          // A1 has no reattach: a gap/dropped/offset error or a missing exit
+          // record is always lost, even with no prompt in flight. A clean,
+          // node-observed exit with a completed turn stays `exited`; an exit
+          // mid-turn is `interrupted` (never success).
+          let stream_error = runtime.process.stream_error()
+          state.mutex.acquire()
+          let turn_in_flight = runtime.active_prompts.size() > 0
+          state.mutex.release()
+          if stream_error != "" {
+            stop_reason = @contracts.AGENT_STOP_LOST
+            last_error = @agent.remote_eof_last_error(stop_reason)
+          } else if turn_in_flight {
+            let exit = runtime.process.remote_exit()
+            stop_reason = @agent.runtime_eof_stop_reason(exit)
+            last_error = @agent.remote_eof_last_error(stop_reason)
+          }
         }
         finalize_agent_session(state, runtime, stop_reason, last_error)
         return
@@ -861,22 +878,64 @@ struct AgentTarget {
 }
 
 ///|
+///|
+/// Register the launcher for one paired runtime machine. Called by the
+/// transport attach layer once a primary session exists; tests register the
+/// adapter directly. It carries a stdio handle only, never ACP.
+pub async fn HostState::register_runtime_agent_launcher(
+  self : HostState,
+  machine_id : String,
+  launcher : @agent.RemoteLauncher,
+) -> Unit {
+  self.mutex.acquire()
+  self.runtime_agent_launchers.set(machine_id, launcher)
+  self.mutex.release()
+}
+
+///|
 async fn agent_launcher_for_machine(
   state : HostState,
   machine_id : String,
 ) -> Result[@agent.ProcessLauncher, @contracts.RpcError] {
   state.mutex.acquire()
   let record_result = state.store.get_machine(machine_id)
+  let runtime_launcher = state.runtime_agent_launchers.get(machine_id)
   state.mutex.release()
   match record_result {
     Ok(Some(record)) =>
       if record.kind == @contracts.MACHINE_KIND_LOCAL {
         Ok(@agent.ProcessLauncher::Local)
+      } else if record.kind == @contracts.MACHINE_KIND_RUNTIME {
+        // No SSH and no ACP here: only a registered paired transport can
+        // carry the agent's stdio. Without one, say so; do not silently fall
+        // back to a local or SSH launch.
+        match runtime_launcher {
+          Some(launcher) => Ok(@agent.ProcessLauncher::Runtime(launcher))
+          None =>
+            Err(
+              agent_unsupported(
+                "runtime machine requires a live paired transport session; no runtime channel is attached to this host",
+              ),
+            )
+        }
       } else {
         Ok(@agent.ProcessLauncher::Ssh(machine_target(record)))
       }
     Ok(None) => Err(agent_not_found("machine not found: " + machine_id))
     Err(message) => Err(agent_internal("cannot read machine: " + message))
+  }
+}
+
+///|
+/// The machine kind, or "" when the record disappeared. Used only to choose
+/// the launcher; runtime machines are not SSH-gated.
+async fn machine_kind_of(state : HostState, machine_id : String) -> String {
+  state.mutex.acquire()
+  let result = state.store.get_machine(machine_id)
+  state.mutex.release()
+  match result {
+    Ok(Some(record)) => record.kind
+    _ => ""
   }
 }
 
@@ -901,7 +960,8 @@ async fn agent_target_dir(
       Err(error) => return Err(error)
     }
     if !machine_is_local(state, record.machine_id) {
-      if !@agent.agent_ssh_enabled() {
+      let kind = machine_kind_of(state, record.machine_id)
+      if kind != @contracts.MACHINE_KIND_RUNTIME && !@agent.agent_ssh_enabled() {
         return Err(
           agent_unsupported(
             "agent sessions currently run only on local worktrees",
@@ -926,7 +986,8 @@ async fn agent_target_dir(
       Err(error) => return Err(error)
     }
     if !machine_is_local(state, record.machine_id) {
-      if !@agent.agent_ssh_enabled() {
+      let kind = machine_kind_of(state, record.machine_id)
+      if kind != @contracts.MACHINE_KIND_RUNTIME && !@agent.agent_ssh_enabled() {
         return Err(
           agent_unsupported(
             "agent sessions currently run only on local workspaces",

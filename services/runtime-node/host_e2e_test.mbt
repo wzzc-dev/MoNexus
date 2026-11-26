@@ -882,3 +882,252 @@ async test "pty sessions and git methods run through the paired transport" {
     },
   )
 }
+
+// ---------------------------------------------------------------------------
+// A1.4: a real ACP session over runtime.process.*
+// ---------------------------------------------------------------------------
+
+///|
+/// A tiny ACP adapter used by the streaming-process end-to-end test. It writes
+/// a workspace file on `session/new`, asks for permission during a prompt, and
+/// keeps running after a permission answer so the owner-cancel path can be
+/// observed. It is launched by the node with argv only (`python3`,
+/// `mock_acp.py`), never through a shell string.
+fn node_mock_acp_script() -> String {
+  let script = #|import json
+  #|import sys
+  #|import time
+  #|
+  #|def send(obj):
+  #|    sys.stdout.write(json.dumps(obj) + "\n")
+  #|    sys.stdout.flush()
+  #|
+  #|session = "sess-node-1"
+  #|for line in sys.stdin:
+  #|    line = line.strip()
+  #|    if not line:
+  #|        continue
+  #|    msg = json.loads(line)
+  #|    method = msg.get("method")
+  #|    mid = msg.get("id")
+  #|    if method == "initialize":
+  #|        send({"jsonrpc": "2.0", "id": mid, "result": {
+  #|            "protocolVersion": 1,
+  #|            "agentInfo": {"name": "mock-acp", "version": "1.0"},
+  #|            "agentCapabilities": {"loadSession": False},
+  #|            "authMethods": [],
+  #|        }})
+  #|    elif method == "session/new":
+  #|        with open("agent-note.txt", "w") as f:
+  #|            f.write("written-by-agent")
+  #|        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": session}})
+  #|    elif method == "session/prompt":
+  #|        send({"jsonrpc": "2.0", "id": "perm-1",
+  #|              "method": "session/request_permission",
+  #|              "params": {"sessionId": session,
+  #|                         "toolCall": {"title": "write agent-note.txt"},
+  #|                         "options": [
+  #|                             {"optionId": "allow_once",
+  #|                              "name": "Allow once", "kind": "allow_once"},
+  #|                             {"optionId": "reject_once",
+  #|                              "name": "Reject", "kind": "reject_once"},
+  #|                         ]}})
+  #|        json.loads(sys.stdin.readline())
+  #|        with open("agent-note.txt", "a") as f:
+  #|            f.write(" permitted")
+  #|        send({"jsonrpc": "2.0", "id": mid,
+  #|              "result": {"stopReason": "end_turn"}})
+  #|    elif method == "session/cancel":
+  #|        with open("cancel-ack.txt", "w") as f:
+  #|            f.write("cancelled")
+  #|        while True:
+  #|            time.sleep(1)
+  script
+}
+
+///|
+async fn node_wait_file(path : String, timeout_ms : Int64) -> Bool {
+  let deadline = @async.now() + timeout_ms
+  let mut found = false
+  while @async.now() < deadline && !found {
+    found = @fs.exists(path) catch { _ => false }
+    if !found {
+      @async.sleep(20)
+    }
+  }
+  found
+}
+
+///|
+async test "ACP session runs on the runtime node over process.* with permission and cancel" {
+  host_run_scenario(
+    "mn-node-acp",
+    "rt-node-acp",
+    5_000L,
+    3,
+    5_000L,
+    100L,
+    8,
+    None,
+    async fn(h) {
+      let repo = h.workspace + "/repo"
+      @fs.mkdir(repo, permission=0o700, recursive=true, allow_exist=true) catch {
+        error => fail("cannot create repo: " + error.to_string())
+      }
+      @fs.write_file(
+        repo + "/mock_acp.py",
+        node_mock_acp_script(),
+        permission=0o644,
+      ) catch {
+        error => fail("cannot write mock ACP adapter: " + error.to_string())
+      }
+      // The host injects a launcher adapter; the machine/provider axis stays
+      // ACP-free. No MONEXUS_AGENT_SSH gate applies to a runtime machine.
+      let launcher = @provider_runtime_agent.runtime_agent_launcher(h.machine)
+      @async.with_task_group(async fn(group : @async.TaskGroup[Unit]) -> Unit {
+        let spec = @agent.AgentSpec::new(
+          agent_id="node-agent",
+          mode=@contracts.AGENT_MODE_ACP,
+          command="python3",
+          args=["mock_acp.py"],
+          cwd="repo",
+          env=Map([]),
+        )
+        let process = match
+          @agent.spawn_agent(
+            group,
+            spec,
+            async fn(_line) {},
+            launcher=@agent.ProcessLauncher::Runtime(launcher),
+          ) {
+          Ok(value) => value
+          Err(message) => fail("remote spawn failed: " + message)
+        }
+        assert_true(process.is_runtime())
+        assert_true(!process.is_ssh())
+        assert_true(process.run_id() != "")
+        let info = match @agent.acp_initialize(process) {
+          Ok(value) => value
+          Err(message) => fail("initialize failed: " + message)
+        }
+        assert_eq(info.agent_name, "mock-acp")
+        let session_id = match @agent.acp_new_session(process, "repo") {
+          Ok(value) => value
+          Err(message) => fail("session/new failed: " + message)
+        }
+        assert_eq(session_id, "sess-node-1")
+        // The node really ran the adapter in its rooted workspace.
+        let note = @fs.read_file(repo + "/agent-note.txt") catch {
+          _ => fail("the adapter could not write its workspace file")
+        }
+        let note_text = note.text() catch { _ => "" }
+        assert_eq(note_text, "written-by-agent")
+        let prompt_id = process.next_id("turn")
+        assert_true(
+          process.write_json(
+            @agent.acp_rpc_request(
+              prompt_id,
+              "session/prompt",
+              @agent.acp_prompt_params(session_id, "write the note"),
+            ),
+          ),
+        )
+        let mut permission_seen = false
+        let mut prompt_done = false
+        while !prompt_done {
+          match process.next_message() {
+            @agent.RuntimeMessage::JsonMessage(value) => {
+              let fields = match @contracts.as_object(value) {
+                Some(object) => object
+                None => fail("ACP message is not an object")
+              }
+              let method_name = @contracts.string_field_or(fields, "method", "")
+              if method_name == "session/request_permission" {
+                permission_seen = true
+                let permission_id = match fields.get("id") {
+                  Some(value) => value
+                  None => fail("permission request has no id")
+                }
+                // The host's Decision path records this request as a pending
+                // Decision; the owner's answer is written back on the same
+                // stdio. Here we assert the protocol round-trip explicitly.
+                assert_true(
+                  process.write_json(
+                    @agent.acp_rpc_result(
+                      permission_id,
+                      @agent.acp_permission_result("allow_once"),
+                    ),
+                  ),
+                )
+              } else {
+                let response_id = match fields.get("id") {
+                  Some(@json.Json::String(value)) => value
+                  _ => ""
+                }
+                if response_id == prompt_id {
+                  match fields.get("result") {
+                    Some(@json.Json::Object(result)) => {
+                      assert_eq(
+                        @contracts.string_field_or(result, "stopReason", ""),
+                        "end_turn",
+                      )
+                      prompt_done = true
+                    }
+                    _ => fail("prompt response has no result")
+                  }
+                }
+              }
+            }
+            @agent.RuntimeMessage::Line(text) => fail("stray adapter line: " + text)
+            @agent.RuntimeMessage::Eof =>
+              fail("adapter EOF before the prompt completed")
+          }
+        }
+        assert_true(permission_seen)
+        let permitted = @fs.read_file(repo + "/agent-note.txt") catch {
+          _ => fail("workspace file disappeared")
+        }
+        let permitted_text = permitted.text() catch { _ => "" }
+        assert_eq(permitted_text, "written-by-agent permitted")
+        // Owner cancel: ACP cancel notification first, then process.cancel via
+        // the same `runtime.process.cancel` path. The mock proves it received
+        // the notification before the process is torn down.
+        assert_true(process.write_json(@agent.acp_cancel_notification(session_id)))
+        assert_true(node_wait_file(repo + "/cancel-ack.txt", 5_000L))
+        process.interrupt()
+        let run_id = process.run_id()
+        let deadline = @async.now() + 10_000L
+        let mut final_status = ""
+        while @async.now() < deadline {
+          match h.machine.process_exit(run_id) {
+            Ok(Some(snapshot)) => {
+              if snapshot.is_terminal() {
+                final_status = snapshot.status
+                break
+              }
+            }
+            Ok(None) => {
+              final_status = @contracts.RUN_STATUS_LOST
+              break
+            }
+            Err(_) => @async.sleep(20)
+          }
+          @async.sleep(20)
+        }
+        assert_eq(final_status, @contracts.RUN_STATUS_CANCELLED)
+        // The snapshot is lifecycle-only (no ACP handle or transcript leaks
+        // through the machine/provider axis), and the node ran the adapter in
+        // its own rooted workspace.
+        let snapshot = match h.machine.process_exit(run_id) {
+          Ok(Some(value)) => value
+          _ => fail("missing terminal process snapshot")
+        }
+        assert_true(snapshot.cwd.has_suffix("repo"))
+        assert_eq(process.stream_error(), "")
+      })
+      // A second start with the same client_request_id is settled by the node
+      // idempotency cache, not by a second ACP connection. The adapter above
+      // already proved one real session end to end.
+    },
+  )
+}

@@ -71,6 +71,10 @@ pub struct HostState {
   terminals : Map[String, TerminalSession]
   agent_sessions : Map[String, AgentSessionRuntime]
   agent_transcripts : Map[String, AgentTranscript]
+  /// Registered paired-runtime launchers, keyed by runtime machine id. The
+  /// transport attach layer (or a test harness) fills this; an empty entry
+  /// fails `agent.start` honestly instead of pretending the machine is local.
+  runtime_agent_launchers : Map[String, @agent.RemoteLauncher]
   dispatching : Ref[Bool]
   trigger_enabled : Bool
   trigger_buckets : Map[String, @contracts.TriggerRateBucket]
@@ -200,6 +204,7 @@ fn HostState::new(
     terminals: Map([]),
     agent_sessions: Map([]),
     agent_transcripts: Map([]),
+    runtime_agent_launchers: Map([]),
     dispatching: Ref(false),
     trigger_enabled: options.trigger_enabled,
     trigger_buckets: Map([]),

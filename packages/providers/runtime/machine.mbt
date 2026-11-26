@@ -124,25 +124,33 @@ async fn RuntimeMachine::request(
   }
   // `client_request_id` is optional at the transport layer; application
   // methods that need it validate it themselves.
+  // Streaming stdout/stderr/exit reads are polled several times per second by
+  // the agent layer; auditing each poll would flood the durable audit trail
+  // without adding safety information. Mutating calls are always audited.
+  let quiet = rpc_method == @contracts.METHOD_RUNTIME_PROCESS_STDOUT ||
+    rpc_method == @contracts.METHOD_RUNTIME_PROCESS_STDERR ||
+    rpc_method == @contracts.METHOD_RUNTIME_PROCESS_EXIT
   let result = channel.request(rpc_method, params)
-  match result {
-    Ok(_) =>
-      self.state.record_audit(
-        "runtime.request",
-        self.runtime_id,
-        "ok",
-        "method=" + rpc_method,
-      )
-    Err(error) =>
-      self.state.record_audit(
-        "runtime.request",
-        self.runtime_id,
-        "error",
-        "method=" +
-        rpc_method +
-        " code=" +
-        error.code.to_string(),
-      )
+  if !quiet {
+    match result {
+      Ok(_) =>
+        self.state.record_audit(
+          "runtime.request",
+          self.runtime_id,
+          "ok",
+          "method=" + rpc_method,
+        )
+      Err(error) =>
+        self.state.record_audit(
+          "runtime.request",
+          self.runtime_id,
+          "error",
+          "method=" +
+          rpc_method +
+          " code=" +
+          error.code.to_string(),
+        )
+    }
   }
   match result {
     Ok(value) =>
@@ -512,6 +520,354 @@ pub async fn RuntimeMachine::exec_cancel(
   match RunSnapshot::from_json(run) {
     Some(value) => Ok(value)
     None => Err(invalid_machine_result("exec.cancel returned an invalid run"))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming process (A1.4)
+
+///|
+/// A streaming process as reported by `runtime.process.*`. It is not an ACP
+/// type: it carries only lifecycle fields, the node-resolved cwd and byte
+/// counts. The ACP layer sits above this provider and receives a stdio handle.
+pub(all) struct ProcessSnapshot {
+  run_id : String
+  client_request_id : String
+  status : String
+  risk : String
+  pid : Int
+  cwd : String
+  started_at : String
+  ended_at : String
+  exit_code : Int?
+  signal : Int?
+  stop_reason : String
+  stdout_bytes : Int64
+  stderr_bytes : Int64
+  timed_out : Bool
+  stdout_dropped : Bool
+  stderr_dropped : Bool
+  success : Bool
+}
+
+///|
+pub fn ProcessSnapshot::from_json(json : @json.Json) -> ProcessSnapshot? {
+  let object = match @contracts.as_object(json) {
+    Some(value) => value
+    None => return None
+  }
+  let run_id = @contracts.string_field_or(object, "run_id", "")
+  if run_id == "" {
+    return None
+  }
+  Some({
+    run_id,
+    client_request_id: @contracts.string_field_or(
+      object,
+      "client_request_id",
+      "",
+    ),
+    status: @contracts.string_field_or(object, "status", ""),
+    risk: @contracts.string_field_or(object, "risk", ""),
+    pid: @contracts.int_field_or(object, "pid", 0),
+    cwd: @contracts.string_field_or(object, "cwd", ""),
+    started_at: @contracts.string_field_or(object, "started_at", ""),
+    ended_at: @contracts.string_field_or(object, "ended_at", ""),
+    exit_code: @contracts.int_field(object, "exit_code"),
+    signal: @contracts.int_field(object, "signal"),
+    stop_reason: @contracts.string_field_or(object, "stop_reason", ""),
+    stdout_bytes: @contracts.int64_field_or(object, "stdout_bytes", 0L),
+    stderr_bytes: @contracts.int64_field_or(object, "stderr_bytes", 0L),
+    timed_out: @contracts.bool_field_or(object, "timed_out", false),
+    stdout_dropped: @contracts.bool_field_or(object, "stdout_dropped", false),
+    stderr_dropped: @contracts.bool_field_or(object, "stderr_dropped", false),
+    success: @contracts.bool_field_or(object, "success", false),
+  })
+}
+
+///|
+pub fn ProcessSnapshot::is_terminal(self : ProcessSnapshot) -> Bool {
+  @contracts.run_status_is_terminal(self.status) ||
+  self.status == @contracts.RUN_STATUS_LOST
+}
+
+///|
+pub(all) struct ProcessChunkSnapshot {
+  run_id : String
+  stream : String
+  offset : Int64
+  next_offset : Int64
+  data_b64 : String
+  eof : Bool
+  gap : Bool
+  dropped : Bool
+  total_bytes : Int64
+}
+
+///|
+pub fn ProcessChunkSnapshot::from_json(
+  json : @json.Json,
+) -> ProcessChunkSnapshot? {
+  let object = match @contracts.as_object(json) {
+    Some(value) => value
+    None => return None
+  }
+  let run_id = @contracts.string_field_or(object, "run_id", "")
+  if run_id == "" {
+    return None
+  }
+  Some({
+    run_id,
+    stream: @contracts.string_field_or(object, "stream", ""),
+    offset: @contracts.int64_field_or(object, "offset", 0L),
+    next_offset: @contracts.int64_field_or(object, "next_offset", 0L),
+    data_b64: @contracts.string_field_or(object, "data", ""),
+    eof: @contracts.bool_field_or(object, "eof", false),
+    gap: @contracts.bool_field_or(object, "gap", false),
+    dropped: @contracts.bool_field_or(object, "dropped", false),
+    total_bytes: @contracts.int64_field_or(object, "total_bytes", 0L),
+  })
+}
+
+///|
+fn process_start_params(
+  run_id : String,
+  argv : Array[String],
+  cwd : String,
+  env : Map[String, String],
+  inherit_env : Array[String],
+  timeout_ms : Int64,
+  risk : String,
+  max_output_bytes : Int64,
+) -> Map[String, @json.Json] {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("run_id", @contracts.json_string(run_id))
+  params.set("argv", @contracts.json_string_array(argv))
+  if cwd != "" {
+    params.set("cwd", @contracts.json_string(cwd))
+  }
+  if !env.is_empty() {
+    let entries : Array[(String, @json.Json)] = []
+    for name, value in env {
+      entries.push((name, @contracts.json_string(value)))
+    }
+    params.set("env", @contracts.json_object(entries))
+  }
+  if !inherit_env.is_empty() {
+    params.set("inherit_env", @contracts.json_string_array(inherit_env))
+  }
+  if timeout_ms > 0L {
+    params.set("timeout_ms", @contracts.json_int64(timeout_ms))
+  }
+  if risk != "" {
+    params.set("risk", @contracts.json_string(risk))
+  }
+  if max_output_bytes > 0L {
+    params.set("max_output_bytes", @contracts.json_int64(max_output_bytes))
+  }
+  params
+}
+
+///|
+/// Start a streaming process. The exact argv/env payload is classified by the
+/// node's policy gate; a high-risk start returns the same approval-required
+/// error as `exec.start`, bound to `run_id`.
+pub async fn RuntimeMachine::process_start(
+  self : RuntimeMachine,
+  run_id~ : String,
+  client_request_id~ : String,
+  argv~ : Array[String],
+  cwd~ : String = "",
+  env~ : Map[String, String] = Map([]),
+  inherit_env~ : Array[String] = [],
+  timeout_ms~ : Int64 = 0L,
+  risk~ : String = "",
+  max_output_bytes~ : Int64 = 0L,
+) -> Result[(ProcessSnapshot, Bool), @contracts.RpcError] {
+  let params = process_start_params(
+    run_id,
+    argv,
+    cwd,
+    env,
+    inherit_env,
+    timeout_ms,
+    risk,
+    max_output_bytes,
+  )
+  let json = match
+    self.request_with_id(
+      @contracts.METHOD_RUNTIME_PROCESS_START,
+      params,
+      client_request_id,
+    ) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let object = match @contracts.as_object(json) {
+    Some(value) => value
+    None =>
+      return Err(invalid_machine_result("process.start returned a non-object"))
+  }
+  let existing = @contracts.bool_field_or(object, "existing", false)
+  let process_json = match object.get("process") {
+    Some(value) => value
+    None => return Err(invalid_machine_result("process.start returned no process"))
+  }
+  let process = match ProcessSnapshot::from_json(process_json) {
+    Some(value) => value
+    None =>
+      return Err(invalid_machine_result("process.start returned an invalid process"))
+  }
+  Ok((process, existing))
+}
+
+///|
+pub async fn RuntimeMachine::process_stdin(
+  self : RuntimeMachine,
+  run_id : String,
+  data_b64 : String,
+  client_request_id~ : String,
+) -> Result[ProcessSnapshot, @contracts.RpcError] {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("run_id", @contracts.json_string(run_id))
+  params.set("data", @contracts.json_string(data_b64))
+  let json = match
+    self.request_with_id(
+      @contracts.METHOD_RUNTIME_PROCESS_STDIN,
+      params,
+      client_request_id,
+    ) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let object = match @contracts.as_object(json) {
+    Some(value) => value
+    None => return Err(invalid_machine_result("process.stdin returned a non-object"))
+  }
+  let process_json = match object.get("process") {
+    Some(value) => value
+    None => return Err(invalid_machine_result("process.stdin returned no process"))
+  }
+  match ProcessSnapshot::from_json(process_json) {
+    Some(value) => Ok(value)
+    None =>
+      Err(invalid_machine_result("process.stdin returned an invalid process"))
+  }
+}
+
+///|
+async fn RuntimeMachine::process_read(
+  self : RuntimeMachine,
+  rpc_method : String,
+  run_id : String,
+  offset : Int64,
+  max_bytes : Int,
+) -> Result[ProcessChunkSnapshot, @contracts.RpcError] {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("run_id", @contracts.json_string(run_id))
+  params.set("offset", @contracts.json_int64(offset))
+  if max_bytes > 0 {
+    params.set("max_bytes", @contracts.json_int(max_bytes))
+  }
+  let json = match self.request(rpc_method, params) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let object = match @contracts.as_object(json) {
+    Some(value) => value
+    None => return Err(invalid_machine_result(rpc_method + " returned a non-object"))
+  }
+  let chunk_json = match object.get("chunk") {
+    Some(value) => value
+    None => return Err(invalid_machine_result(rpc_method + " returned no chunk"))
+  }
+  match ProcessChunkSnapshot::from_json(chunk_json) {
+    Some(value) => Ok(value)
+    None => Err(invalid_machine_result(rpc_method + " returned an invalid chunk"))
+  }
+}
+
+///|
+pub async fn RuntimeMachine::process_stdout(
+  self : RuntimeMachine,
+  run_id : String,
+  offset : Int64,
+  max_bytes~ : Int = 0,
+) -> Result[ProcessChunkSnapshot, @contracts.RpcError] {
+  self.process_read(
+    @contracts.METHOD_RUNTIME_PROCESS_STDOUT,
+    run_id,
+    offset,
+    max_bytes,
+  )
+}
+
+///|
+pub async fn RuntimeMachine::process_stderr(
+  self : RuntimeMachine,
+  run_id : String,
+  offset : Int64,
+  max_bytes~ : Int = 0,
+) -> Result[ProcessChunkSnapshot, @contracts.RpcError] {
+  self.process_read(
+    @contracts.METHOD_RUNTIME_PROCESS_STDERR,
+    run_id,
+    offset,
+    max_bytes,
+  )
+}
+
+///|
+pub async fn RuntimeMachine::process_exit(
+  self : RuntimeMachine,
+  run_id : String,
+) -> Result[ProcessSnapshot?, @contracts.RpcError] {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("run_id", @contracts.json_string(run_id))
+  let json = match self.request(@contracts.METHOD_RUNTIME_PROCESS_EXIT, params) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let object = match @contracts.as_object(json) {
+    Some(value) => value
+    None => return Err(invalid_machine_result("process.exit returned a non-object"))
+  }
+  match object.get("process") {
+    Some(@json.Json::Null) => Ok(None)
+    Some(value) => Ok(ProcessSnapshot::from_json(value))
+    None => Err(invalid_machine_result("process.exit returned no process"))
+  }
+}
+
+///|
+pub async fn RuntimeMachine::process_cancel(
+  self : RuntimeMachine,
+  run_id : String,
+  client_request_id~ : String,
+) -> Result[ProcessSnapshot, @contracts.RpcError] {
+  let params : Map[String, @json.Json] = Map([])
+  params.set("run_id", @contracts.json_string(run_id))
+  let json = match
+    self.request_with_id(
+      @contracts.METHOD_RUNTIME_PROCESS_CANCEL,
+      params,
+      client_request_id,
+    ) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let object = match @contracts.as_object(json) {
+    Some(value) => value
+    None => return Err(invalid_machine_result("process.cancel returned a non-object"))
+  }
+  let process_json = match object.get("process") {
+    Some(value) => value
+    None => return Err(invalid_machine_result("process.cancel returned no process"))
+  }
+  match ProcessSnapshot::from_json(process_json) {
+    Some(value) => Ok(value)
+    None =>
+      Err(invalid_machine_result("process.cancel returned an invalid process"))
   }
 }
 
@@ -1032,6 +1388,22 @@ pub async fn RuntimeMachine::reconcile(
         status.status,
         status.exit_code,
       )
+    } else if run.is_process() {
+      // A process exit answer is authoritative. A missing node record means
+      // the node restarted and lost the run: settle it `lost`, never success.
+      match self.process_exit(run.run_id) {
+        Ok(Some(process)) => {
+          let _ = tracker.reconcile_process_status(
+            run.run_id,
+            Some(process.status),
+            process.exit_code,
+          )
+        }
+        Ok(None) => {
+          let _ = tracker.reconcile_process_status(run.run_id, None, None)
+        }
+        Err(error) => return Err(error)
+      }
     }
   }
   Ok(())

@@ -50,6 +50,15 @@ const EVENT_PTY_GAP : String = "runtime.pty.gap"
 const EVENT_PTY_EXITED : String = "runtime.pty.exited"
 
 ///|
+/// Streaming-process lifecycle events (A1.4). Streams are polled directly;
+/// only started/exited are durable events, so a settled process can never be
+/// resurrected by a late chunk or replay.
+const EVENT_PROCESS_STARTED : String = "runtime.process.started"
+
+///|
+const EVENT_PROCESS_EXITED : String = "runtime.process.exited"
+
+///|
 const EVENT_GIT_RESULT : String = "runtime.git.result"
 
 ///|
@@ -105,6 +114,14 @@ pub fn RunPhase::is_pending(self : RunPhase) -> Bool {
 }
 
 ///|
+pub fn RunPhase::is_lost(self : RunPhase) -> Bool {
+  match self {
+    Lost => true
+    _ => false
+  }
+}
+
+///|
 pub fn RunPhase::is_interrupted(self : RunPhase) -> Bool {
   match self {
     Interrupted => true
@@ -150,6 +167,13 @@ pub fn TrackedRun::is_exec(self : TrackedRun) -> Bool {
 ///|
 pub fn TrackedRun::is_pty(self : TrackedRun) -> Bool {
   self.kind == "pty"
+}
+
+///|
+/// A streaming process run (`process.start`), as opposed to an exec run or a
+/// PTY session. Only process runs are launched by AgentRuntime.
+pub fn TrackedRun::is_process(self : TrackedRun) -> Bool {
+  self.kind == "process"
 }
 
 ///|
@@ -247,6 +271,8 @@ fn kind_of_event(event_kind : String) -> String {
     "exec"
   } else if event_kind.has_prefix("runtime.pty.") {
     "pty"
+  } else if event_kind.has_prefix("runtime.process.") {
+    "process"
   } else if event_kind.has_prefix("runtime.git.") {
     "git"
   } else {
@@ -352,6 +378,17 @@ pub fn RunTracker::observe(
     exit_code = terminal_exit_code(event.payload)
     stop_reason = payload_string(event.payload, "stop_reason")
     ended_at = payload_string(event.payload, "ended_at")
+  } else if event.kind == EVENT_PROCESS_STARTED {
+    if phase.is_pending() || phase.is_interrupted() {
+      phase = Running
+    }
+  } else if event.kind == EVENT_PROCESS_EXITED {
+    // A lost terminal event means the node could not observe the exit (e.g.
+    // host restart after a `started` event). That is never success.
+    phase = phase_after_terminal_payload(event.payload, Lost)
+    exit_code = terminal_exit_code(event.payload)
+    stop_reason = payload_string(event.payload, "stop_reason")
+    ended_at = payload_string(event.payload, "ended_at")
   } else if
     event.kind == EVENT_GIT_RESULT ||
     event.kind == EVENT_GIT_WORKTREE_ADDED ||
@@ -433,6 +470,35 @@ pub fn RunTracker::reconcile_status(
     { ..existing, phase, exit_code, ended_at: existing.ended_at },
   )
   true
+}
+
+///|
+/// Reconcile one streaming process with a fresh `process.exit` answer. An
+/// absent record (`None`) settles the run `lost`: the node has no live
+/// process left, so the primary must not keep it running or call it success.
+pub fn RunTracker::reconcile_process_status(
+  self : RunTracker,
+  run_id : String,
+  status : String?,
+  exit_code : Int?,
+) -> Bool {
+  match status {
+    Some(value) => self.reconcile_status(run_id, value, exit_code)
+    None => {
+      let existing = match self.runs.get(run_id) {
+        Some(value) => value
+        None => return false
+      }
+      if existing.phase.is_lost() {
+        return false
+      }
+      self.runs.set(
+        run_id,
+        { ..existing, phase: Lost, exit_code: None, stop_reason: "lost" },
+      )
+      true
+    }
+  }
 }
 
 ///|

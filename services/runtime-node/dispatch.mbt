@@ -383,7 +383,8 @@ fn approval_binding_id(
   params : Map[String, @json.Json],
   client_request_id : String,
 ) -> Result[String, @contracts.RpcError] {
-  if method == @contracts.METHOD_RUNTIME_EXEC_START {
+  if method == @contracts.METHOD_RUNTIME_EXEC_START ||
+    method == @contracts.METHOD_RUNTIME_PROCESS_START {
     return require_safe_id(params, "run_id")
   }
   if method == @contracts.METHOD_RUNTIME_PTY_OPEN {
@@ -512,7 +513,8 @@ async fn execution_request_for(
     Err(error) => return Err(error)
   }
   if method == @contracts.METHOD_RUNTIME_EXEC_START ||
-    method == @contracts.METHOD_RUNTIME_PTY_OPEN {
+    method == @contracts.METHOD_RUNTIME_PTY_OPEN ||
+    method == @contracts.METHOD_RUNTIME_PROCESS_START {
     let argv = match require_argv(params) {
       Ok(value) => value
       Err(error) => return Err(error)
@@ -526,7 +528,8 @@ async fn execution_request_for(
       Err(error) => return Err(error)
     }
     let stdin = optional_string(params, "stdin")
-    let operation = if method == @contracts.METHOD_RUNTIME_EXEC_START {
+    let operation = if method == @contracts.METHOD_RUNTIME_EXEC_START ||
+      method == @contracts.METHOD_RUNTIME_PROCESS_START {
       @policy.PolicyOperation::Exec
     } else {
       @policy.PolicyOperation::Pty
@@ -678,10 +681,33 @@ async fn execution_request_for(
       )),
     )
   }
+  if method == @contracts.METHOD_RUNTIME_PROCESS_STDIN {
+    let run_id = match require_safe_id(params, "run_id") {
+      Ok(value) => value
+      Err(error) => return Err(error)
+    }
+    let data = match @contracts.string_field(params, "data") {
+      Some(value) => value
+      None => return Err(invalid_params("missing data"))
+    }
+    return Ok(
+      Some((
+        @policy.ExecutionRequest::new(
+          operation=@policy.PolicyOperation::Control,
+          argv=["process.stdin", run_id],
+          cwd~,
+          workspace_root~,
+          stdin=data,
+        ),
+        cwd_rooted,
+      )),
+    )
+  }
   // Control continuations mutate a run/session that already passed the
   // classifier. They are evaluated against the installed snapshot like any
   // other mutation and audited as such; they are not silently skipped.
-  let control_id = if method == @contracts.METHOD_RUNTIME_EXEC_CANCEL {
+  let control_id = if method == @contracts.METHOD_RUNTIME_EXEC_CANCEL ||
+    method == @contracts.METHOD_RUNTIME_PROCESS_CANCEL {
     require_safe_id(params, "run_id")
   } else if method == @contracts.METHOD_RUNTIME_PTY_INPUT ||
     method == @contracts.METHOD_RUNTIME_PTY_RESIZE ||
@@ -696,6 +722,8 @@ async fn execution_request_for(
   }
   let label = if method == @contracts.METHOD_RUNTIME_EXEC_CANCEL {
     "exec.cancel"
+  } else if method == @contracts.METHOD_RUNTIME_PROCESS_CANCEL {
+    "process.cancel"
   } else if method == @contracts.METHOD_RUNTIME_PTY_INPUT {
     "pty.input"
   } else if method == @contracts.METHOD_RUNTIME_PTY_RESIZE {
@@ -1076,6 +1104,24 @@ async fn NodeHost::dispatch_inner(
   if method == @contracts.METHOD_RUNTIME_EXEC_CANCEL {
     return self.exec_cancel(request)
   }
+  if method == @contracts.METHOD_RUNTIME_PROCESS_START {
+    return self.process_start(request, group, check)
+  }
+  if method == @contracts.METHOD_RUNTIME_PROCESS_STDIN {
+    return self.process_stdin(request)
+  }
+  if method == @contracts.METHOD_RUNTIME_PROCESS_STDOUT {
+    return self.process_read(request, "stdout")
+  }
+  if method == @contracts.METHOD_RUNTIME_PROCESS_STDERR {
+    return self.process_read(request, "stderr")
+  }
+  if method == @contracts.METHOD_RUNTIME_PROCESS_EXIT {
+    return self.process_exit(request)
+  }
+  if method == @contracts.METHOD_RUNTIME_PROCESS_CANCEL {
+    return self.process_cancel(request)
+  }
   if method == @contracts.METHOD_RUNTIME_FS_READ {
     return self.fs_read(request)
   }
@@ -1265,6 +1311,174 @@ async fn NodeHost::exec_cancel(
       )
   }
   Ok(@contracts.json_object([("run", runtime_info_json(info))]))
+}
+
+///|
+fn process_info_json(info : @runtime.ProcessInfo) -> @json.Json {
+  info.to_json()
+}
+
+///|
+/// Start a streaming process (A1.4). The policy gate has already classified
+/// the exact argv/cwd/env payload as `Exec`, and a high-risk start carries the
+/// same run_id-bound approval as `exec.start`. The node never sees a shell
+/// string and never inherits a credential the primary did not name.
+async fn NodeHost::process_start(
+  self : NodeHost,
+  request : @transport.HandlerRequest,
+  group : @async.TaskGroup[Unit],
+  check : PolicyCheckResult?,
+) -> Result[@json.Json, @contracts.RpcError] {
+  let params = request.params
+  let run_id = match require_safe_id(params, "run_id") {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let client_request_id = if request.client_request_id != "" {
+    request.client_request_id
+  } else {
+    "process-" + run_id
+  }
+  let argv = match require_argv(params) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let env = match env_pairs(params) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let inherit_env = match string_array_param(params, "inherit_env") {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let cwd = match check {
+    Some(value) => value.cwd_rooted
+    None =>
+      match policy_cwd(self.workspace_root, optional_string(params, "cwd")) {
+        Ok((_absolute, rooted)) => rooted
+        Err(error) => return Err(error)
+      }
+  }
+  let spec = @runtime.ProcessSpec::new(
+    argv~,
+    cwd~,
+    env~,
+    inherit_env~,
+    timeout_ms=int64_param_or(params, "timeout_ms", 0L),
+    risk=optional_string(params, "risk"),
+    max_output_bytes=int64_param_or(params, "max_output_bytes", 0L),
+  )
+  let outcome = match
+    self.executor.process().start(
+      group,
+      client_request_id~,
+      run_id~,
+      spec~,
+    ) {
+    Ok(value) => value
+    Err(message) => return Err(start_failure(message))
+  }
+  let (info, existing) = outcome
+  Ok(
+    @contracts.json_object([
+      ("process", process_info_json(info)),
+      ("existing", @contracts.json_bool(existing)),
+    ]),
+  )
+}
+
+///|
+async fn NodeHost::process_stdin(
+  self : NodeHost,
+  request : @transport.HandlerRequest,
+) -> Result[@json.Json, @contracts.RpcError] {
+  let params = request.params
+  let run_id = match require_safe_id(params, "run_id") {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let data = match @contracts.string_field(params, "data") {
+    Some(value) => value
+    None => return Err(invalid_params("missing data"))
+  }
+  if data.length() > 48_000 {
+    return Err(invalid_params("data is larger than the stdin bound"))
+  }
+  let bytes = @base64.decode(data) catch {
+    _ => return Err(invalid_params("data is not valid base64"))
+  }
+  if bytes.length() > @runtime.PROCESS_MAX_STDIN_BYTES {
+    return Err(invalid_params("data is larger than the stdin bound"))
+  }
+  let info = match self.executor.process().write_stdin(run_id, bytes) {
+    Ok(value) => value
+    Err(message) => return Err(@contracts.RpcError::new(@contracts.ERR_HOST, message))
+  }
+  Ok(
+    @contracts.json_object([
+      ("process", process_info_json(info)),
+      ("accepted", @contracts.json_bool(true)),
+      ("bytes", @contracts.json_int(bytes.length())),
+    ]),
+  )
+}
+
+///|
+async fn NodeHost::process_read(
+  self : NodeHost,
+  request : @transport.HandlerRequest,
+  stream : String,
+) -> Result[@json.Json, @contracts.RpcError] {
+  let params = request.params
+  let run_id = match require_safe_id(params, "run_id") {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let offset = int64_param_or(params, "offset", 0L)
+  if offset < 0L {
+    return Err(invalid_params("offset must not be negative"))
+  }
+  let max_bytes = int_param_or(params, "max_bytes", 16_384).max(1).min(
+    @runtime.PROCESS_MAX_READ_BYTES,
+  )
+  let chunk = match
+    self.executor.process().read_stream(run_id, stream, offset, max_bytes) {
+    Ok(value) => value
+    Err(message) => return Err(@contracts.RpcError::new(@contracts.ERR_HOST, message))
+  }
+  Ok(@contracts.json_object([("chunk", chunk.to_json())]))
+}
+
+///|
+async fn NodeHost::process_exit(
+  self : NodeHost,
+  request : @transport.HandlerRequest,
+) -> Result[@json.Json, @contracts.RpcError] {
+  let run_id = match require_safe_id(request.params, "run_id") {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let info = match self.executor.process().exit(run_id) {
+    Ok(value) => value
+    Err(message) => return Err(@contracts.RpcError::new(@contracts.ERR_HOST, message))
+  }
+  Ok(@contracts.json_object([("process", process_info_json(info))]))
+}
+
+///|
+async fn NodeHost::process_cancel(
+  self : NodeHost,
+  request : @transport.HandlerRequest,
+) -> Result[@json.Json, @contracts.RpcError] {
+  let run_id = match require_safe_id(request.params, "run_id") {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let info = match self.executor.process().cancel(run_id) {
+    Ok(value) => value
+    Err(message) => return Err(@contracts.RpcError::new(@contracts.ERR_HOST, message))
+  }
+  Ok(@contracts.json_object([("process", process_info_json(info))]))
 }
 
 ///|

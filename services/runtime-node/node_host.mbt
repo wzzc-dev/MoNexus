@@ -58,7 +58,7 @@ pub const MAX_NONCE_FILE_BYTES : Int64 = 262_144L
 
 ///|
 pub fn node_capabilities() -> Array[String] {
-  ["exec", "fs", "pty", "git"]
+  ["exec", "fs", "pty", "git", "process"]
 }
 
 ///|
