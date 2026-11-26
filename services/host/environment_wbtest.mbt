@@ -346,6 +346,411 @@ async test "environment approval denies, expires and is consumed once" {
 }
 
 ///|
+fn environment_test_runner(
+  home : String,
+  removed : Ref[Array[String]],
+  remove_fails : Bool,
+) -> @environment.DockerRunner {
+  let invoke : @environment.DockerInvoke = async fn(argv, timeout_s) {
+    ignore(argv)
+    ignore(timeout_s)
+    Ok({ exit_code: 0, stdout: "", stderr: "" })
+  }
+  let make_dir : @environment.PathOp = async fn(path) {
+    ignore(path)
+    Ok(())
+  }
+  let write_secret : @environment.WriteSecretOp = async fn(dir, variables) {
+    ignore(dir)
+    ignore(variables)
+    Ok(())
+  }
+  let remove_file : @environment.PathOp = async fn(path) {
+    removed.val.push(path)
+    if remove_fails {
+      return Err(
+        @environment.EnvFailure::new(
+          @contracts.ENVIRONMENT_ERR_CLEANUP_FAILED,
+          "cannot remove env file",
+        ),
+      )
+    }
+    Ok(())
+  }
+  let remove_dir : @environment.PathOp = async fn(path) {
+    ignore(path)
+    Ok(())
+  }
+  {
+    machine_id: "",
+    remote: false,
+    home,
+    target: None,
+    invoke,
+    make_dir,
+    write_secret,
+    remove_file,
+    remove_dir,
+  }
+}
+
+///|
+async fn environment_test_audit_outcomes(
+  state : HostState,
+  action : String,
+) -> Array[String] {
+  state.mutex.acquire()
+  let events = match state.store.load_recent_events(1_000) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      abort("cannot read events: " + message)
+    }
+  }
+  state.mutex.release()
+  let out : Array[String] = []
+  for event in events {
+    if event.event_type == @contracts.EVENT_AUDIT_RECORDED {
+      match @contracts.audit_from_json(event.payload) {
+        Some(record) =>
+          if record.action == action {
+            out.push(record.outcome)
+          }
+        None => ()
+      }
+    }
+  }
+  out
+}
+
+///|
+fn environment_test_intent(
+  id : String,
+  workspace_id : String,
+) -> @contracts.EnvironmentRecord {
+  let now = @async.now()
+  {
+    ..environment_test_record(id, workspace_id, ""),
+    state: @contracts.ENVIRONMENT_STATE_CREATING,
+    created_at: @contracts.format_rfc3339(now),
+    updated_at: @contracts.format_rfc3339(now),
+    started_at: "",
+  }
+}
+
+///|
+async test "approval is not burned when the target conflict or lease wins" {
+  let store = environment_test_open_store()
+  let state = environment_test_state(store)
+  // An active environment already owns the target: the newcomer must lose
+  // before the approval is touched.
+  let active = environment_test_record(
+    "env_ACTIVE000000000000001",
+    "wsp_01ARYZ6S41",
+    "",
+  )
+  match store.put_environment(active) {
+    Ok(_) => ()
+    Err(message) => abort("cannot store active environment: " + message)
+  }
+  let conflict_approval = environment_test_approval(
+    "dec_gate_conflict00000001",
+    @contracts.DECISION_OPTION_APPROVE,
+    "2030-01-01T00:00:00Z",
+  )
+  environment_test_persist_decision(state, conflict_approval)
+  let conflict_intent = environment_test_intent(
+    "env_01ARYZ6S42",
+    "wsp_01ARYZ6S41",
+  )
+  match
+    reserve_environment_creation(
+      state,
+      conflict_intent,
+      "workspace",
+      "wsp_01ARYZ6S41",
+      Some(conflict_approval),
+    ) {
+    Ok(_) => fail("a target conflict must be refused")
+    Err(error) =>
+      assert_true(
+        error.message.has_prefix(@contracts.ENVIRONMENT_ERR_CONFLICT),
+      )
+  }
+  assert_true(!environment_test_decision_consumed(state, conflict_approval.id))
+  assert_eq(environment_test_audit_outcomes(state, "environment.approval.consume").length(), 0)
+  match store.find_lease("workspace", "wsp_01ARYZ6S41") {
+    Ok(None) => ()
+    _ => fail("a losing create must not leave a lease")
+  }
+  match store.get_environment(conflict_intent.id) {
+    Ok(None) => ()
+    _ => fail("a losing create must not persist an intent")
+  }
+  // An active lease without an active record must also stop the create before
+  // the approval is burned.
+  match acquire_environment_lease(state, "env_OTHER00000000000001", "workspace", "wsp_01ARYZ6S43") {
+    Ok(_) => ()
+    Err(error) => fail("cannot seed the lease: " + error.message)
+  }
+  let lease_approval = environment_test_approval(
+    "dec_gate_lease0000000001",
+    @contracts.DECISION_OPTION_APPROVE,
+    "2030-01-01T00:00:00Z",
+  )
+  environment_test_persist_decision(state, lease_approval)
+  let lease_intent = environment_test_intent("env_01ARYZ6S44", "wsp_01ARYZ6S43")
+  match
+    reserve_environment_creation(
+      state,
+      lease_intent,
+      "workspace",
+      "wsp_01ARYZ6S43",
+      Some(lease_approval),
+    ) {
+    Ok(_) => fail("a leased target must be refused")
+    Err(error) =>
+      assert_true(
+        error.message.has_prefix(@contracts.ENVIRONMENT_ERR_CONFLICT),
+      )
+  }
+  assert_true(!environment_test_decision_consumed(state, lease_approval.id))
+  store.close()
+}
+
+///|
+async test "approval consumption append failure fails closed before any create" {
+  let store = environment_test_open_store()
+  let state = environment_test_state(store)
+  let approval = environment_test_approval(
+    "dec_gate_append000000001",
+    @contracts.DECISION_OPTION_APPROVE,
+    "2030-01-01T00:00:00Z",
+  )
+  environment_test_persist_decision(state, approval)
+  let intent = environment_test_intent("env_01ARYZ6S45", "wsp_01ARYZ6S41")
+  state.test_fail_approval_consumption.val = true
+  match
+    reserve_environment_creation(
+      state,
+      intent,
+      "workspace",
+      "wsp_01ARYZ6S41",
+      Some(approval),
+    ) {
+    Ok(_) => fail("an unpersisted approval burn must stop the create")
+    Err(error) =>
+      assert_true(
+        error.message.has_prefix(@contracts.ENVIRONMENT_ERR_INTERNAL),
+      )
+  }
+  state.test_fail_approval_consumption.val = false
+  // Durable state is all-or-nothing: no consumed flag, no lease, no intent,
+  // and the rejection is audited as failed rather than consumed. Docker is
+  // only reached after this gate returns Ok, so no container call can happen.
+  assert_true(!environment_test_decision_consumed(state, approval.id))
+  let consume_outcomes = environment_test_audit_outcomes(
+    state,
+    "environment.approval.consume",
+  )
+  assert_eq(consume_outcomes.length(), 1)
+  assert_eq(consume_outcomes[0], "failed")
+  match store.find_lease("workspace", "wsp_01ARYZ6S41") {
+    Ok(None) => ()
+    _ => fail("a failed approval burn must release the lease")
+  }
+  match store.get_environment(intent.id) {
+    Ok(None) => ()
+    _ => fail("a failed approval burn must leave no create intent")
+  }
+  assert_true(state.env_create_started.get(intent.id).is_none())
+  store.close()
+}
+
+///|
+async test "reserve burns the approval after the gates and blocks a second environment" {
+  let store = environment_test_open_store()
+  let state = environment_test_state(store)
+  let approval = environment_test_approval(
+    "dec_gate_success000000001",
+    @contracts.DECISION_OPTION_APPROVE,
+    "2030-01-01T00:00:00Z",
+  )
+  environment_test_persist_decision(state, approval)
+  let intent = environment_test_intent("env_01ARYZ6S46", "wsp_01ARYZ6S41")
+  assert_true(!environment_test_decision_consumed(state, approval.id))
+  match
+    reserve_environment_creation(
+      state,
+      intent,
+      "workspace",
+      "wsp_01ARYZ6S41",
+      Some(approval),
+    ) {
+    Ok(value) => assert_eq(value.id, intent.id)
+    Err(error) => fail("reserve failed: " + error.message)
+  }
+  assert_true(environment_test_decision_consumed(state, approval.id))
+  match store.find_lease("workspace", "wsp_01ARYZ6S41") {
+    Ok(Some(lease)) => assert_eq(lease.holder, "environment:" + intent.id)
+    _ => fail("a successful reserve must hold the target lease")
+  }
+  // The in-process marker exists in the same mutex section as the intent, so
+  // reconcile cannot classify this live create as stale.
+  assert_true(state.env_create_started.get(intent.id).is_some())
+  match store.get_environment(intent.id) {
+    Ok(Some(record)) =>
+      assert_eq(record.state, @contracts.ENVIRONMENT_STATE_CREATING)
+    _ => fail("a successful reserve must persist the create intent")
+  }
+  // A second create for the same target loses without spending its own grant.
+  let second_approval = environment_test_approval(
+    "dec_gate_second0000000001",
+    @contracts.DECISION_OPTION_APPROVE,
+    "2030-01-01T00:00:00Z",
+  )
+  environment_test_persist_decision(state, second_approval)
+  let second_intent = environment_test_intent("env_01ARYZ6S47", "wsp_01ARYZ6S41")
+  match
+    reserve_environment_creation(
+      state,
+      second_intent,
+      "workspace",
+      "wsp_01ARYZ6S41",
+      Some(second_approval),
+    ) {
+    Ok(_) => fail("a second environment for one target must be refused")
+    Err(error) =>
+      assert_true(
+        error.message.has_prefix(@contracts.ENVIRONMENT_ERR_CONFLICT),
+      )
+  }
+  assert_true(!environment_test_decision_consumed(state, second_approval.id))
+  store.close()
+}
+
+///|
+test "create intent timeout uses the recorded age" {
+  let created_ms = match @contracts.parse_rfc3339_ms("2026-02-01T00:00:00Z") {
+    Some(value) => value
+    None => fail("fixture timestamp did not parse")
+  }
+  let old = environment_test_record("env_01ARYZ6S48", "wsp_01ARYZ6S41", "")
+  assert_true(
+    create_intent_age_timed_out(
+      old,
+      created_ms + @environment.CREATE_INTENT_TIMEOUT_MS,
+    ),
+  )
+  assert_true(!create_intent_age_timed_out(old, created_ms + 1_000L))
+  assert_true(
+    !create_intent_age_timed_out(
+      { ..old, created_at: "not-a-timestamp" },
+      created_ms + @environment.CREATE_INTENT_TIMEOUT_MS,
+    ),
+  )
+}
+
+///|
+async test "reconcile adoption removes a leftover env-file and records the outcome" {
+  let store = environment_test_open_store()
+  let state = environment_test_state(store)
+  let removed : Ref[Array[String]] = Ref([])
+  let runner = environment_test_runner(
+    "/tmp/monexus-environment-wbtest/home",
+    removed,
+    false,
+  )
+  let record = {
+    ..environment_test_record("env_01ARYZ6S41", "wsp_01ARYZ6S41", ""),
+    state: @contracts.ENVIRONMENT_STATE_CREATING,
+  }
+  adopt_environment(state, record, true, runner)
+  assert_eq(removed.val.length(), 1)
+  assert_true(
+    removed.val[0].has_suffix(
+      "/.monexus/environments/env_01ARYZ6S41/env",
+    ),
+  )
+  let stored = match store.get_environment(record.id) {
+    Ok(Some(value)) => value
+    _ => fail("adoption did not persist the record")
+  }
+  assert_eq(stored.state, @contracts.ENVIRONMENT_STATE_RUNNING)
+  assert_true(stored.cleanup_ok)
+  assert_eq(stored.cleanup_detail, "")
+  store.close()
+}
+
+///|
+async test "drift settlement removes the env-file and never reports clean when it remains" {
+  let store = environment_test_open_store()
+  let state = environment_test_state(store)
+  let removed : Ref[Array[String]] = Ref([])
+  let runner = environment_test_runner(
+    "/tmp/monexus-environment-wbtest/home",
+    removed,
+    false,
+  )
+  let record = {
+    ..environment_test_record("env_01ARYZ6S49", "wsp_01ARYZ6S41", ""),
+    state: @contracts.ENVIRONMENT_STATE_CREATING,
+  }
+  match acquire_environment_lease(state, record.id, "workspace", "wsp_01ARYZ6S41") {
+    Ok(_) => ()
+    Err(error) => fail("cannot seed lease: " + error.message)
+  }
+  settle_drifted_create_intent(
+    state,
+    record,
+    runner,
+    "container does not match the recorded plan; container left untouched",
+  )
+  assert_eq(removed.val.length(), 1)
+  assert_true(removed.val[0].has_suffix("/env"))
+  match store.find_lease("workspace", "wsp_01ARYZ6S41") {
+    Ok(None) => ()
+    _ => fail("settling a drift intent must release its lease")
+  }
+  let settled = match store.get_environment(record.id) {
+    Ok(Some(value)) => value
+    _ => fail("drift settlement did not persist the record")
+  }
+  assert_eq(settled.state, @contracts.ENVIRONMENT_STATE_FAILED)
+  assert_true(settled.cleanup_ok)
+  // A removal that cannot be confirmed is recorded as failed, with a cleanup
+  // artifact; cleanup_ok is never set while the secret could remain.
+  let failing_store = environment_test_open_store()
+  let failing_state = environment_test_state(failing_store)
+  let failing_removed : Ref[Array[String]] = Ref([])
+  let failing_runner = environment_test_runner(
+    "/tmp/monexus-environment-wbtest/home",
+    failing_removed,
+    true,
+  )
+  let failing_record = {
+    ..environment_test_record("env_01ARYZ6S50", "wsp_01ARYZ6S43", ""),
+    state: @contracts.ENVIRONMENT_STATE_CREATING,
+  }
+  settle_drifted_create_intent(
+    failing_state,
+    failing_record,
+    failing_runner,
+    "container is missing",
+  )
+  assert_eq(failing_removed.val.length(), 1)
+  let failed = match failing_store.get_environment(failing_record.id) {
+    Ok(Some(value)) => value
+    _ => fail("drift settlement did not persist the failing record")
+  }
+  assert_eq(failed.state, @contracts.ENVIRONMENT_STATE_FAILED)
+  assert_true(!failed.cleanup_ok)
+  assert_true(failed.cleanup_detail != "")
+  store.close()
+  failing_store.close()
+}
+
+///|
 async test "environment approval rejects a missing or unbound decision" {
   let store = environment_test_open_store()
   let state = environment_test_state(store)

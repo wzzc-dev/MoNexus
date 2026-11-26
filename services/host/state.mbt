@@ -86,6 +86,10 @@ pub struct HostState {
   env_exec_cache : Map[String, @json.Json]
   env_exec_tasks : Map[String, EnvironmentExecTask]
   env_create_started : Map[String, Int64]
+  // Whitebox test seam: production never sets this. It makes the durable
+  // approval-consumption append fail so the fail-closed path can be tested
+  // without corrupting the database.
+  test_fail_approval_consumption : Ref[Bool]
 }
 
 ///|
@@ -207,6 +211,7 @@ fn HostState::new(
     env_exec_cache: Map([]),
     env_exec_tasks: Map([]),
     env_create_started: Map([]),
+    test_fail_approval_consumption: Ref(false),
   }
 }
 

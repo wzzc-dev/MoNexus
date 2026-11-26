@@ -35,7 +35,9 @@ pub fn reconcile_decision(
       }
     Some(value) =>
       if !labels_match {
-        MarkDrift("container labels do not match; container left untouched")
+        MarkDrift(
+          "container does not match the recorded plan; container left untouched",
+        )
       } else if record.state == @contracts.ENVIRONMENT_STATE_CREATING {
         // A timed-out create is only destroyed when the container is still
         // incomplete. A complete, running container is adopted rather than

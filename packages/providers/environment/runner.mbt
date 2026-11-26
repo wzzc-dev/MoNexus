@@ -278,6 +278,17 @@ async fn local_remove_file(path : String) -> Result[Unit, EnvFailure] {
         ).with_detail(error.to_string()),
       )
   }
+  // A removal that leaves the secret file behind is a cleanup failure, never
+  // a clean outcome. Reconcile relies on this to set `cleanup_ok` truthfully.
+  let remains = @fs.exists(path) catch { _ => true }
+  if remains {
+    return Err(
+      EnvFailure::new(
+        @contracts.ENVIRONMENT_ERR_CLEANUP_FAILED,
+        "env file still exists after removal",
+      ).with_detail(path),
+    )
+  }
   Ok(())
 }
 
@@ -370,6 +381,21 @@ async fn resolve_remote_home(
 }
 
 ///|
+/// Post-write verification for the SSH env-file (ADR-0013 §3.3). The local
+/// writer verifies 0700/0600 before use; the remote path must verify the same
+/// properties (plus ownership by the executing user) after the write, and
+/// remove the secret on any mismatch. Exit 1 is a refused hand-off.
+fn ssh_env_file_verify_script() -> String {
+  "uid=$(id -u); " +
+  "if [ \"$(stat -c %a -- \"$1\")\" != \"700\" ] || " +
+  "[ \"$(stat -c %u -- \"$1\")\" != \"$uid\" ] || " +
+  "[ \"$(stat -c %a -- \"$1/env\")\" != \"600\" ] || " +
+  "[ \"$(stat -c %u -- \"$1/env\")\" != \"$uid\" ]; then " +
+  "rm -f -- \"$1/env\"; " +
+  "echo \"env file mode or ownership verification failed\" >&2; exit 1; fi"
+}
+
+///|
 pub async fn ssh_runner(
   machine_id~ : String,
   target : @ssh.SshTarget,
@@ -449,14 +475,42 @@ pub async fn ssh_runner(
           ).with_detail(error.to_string()),
         )
     }
-    if result.exit_code == 0 {
+    if result.exit_code != 0 {
+      return Err(remote_script_failure("env file write", result))
+    }
+    // Verify the remote mode and ownership after writing; the verify script
+    // removes the secret on any mismatch, so a failed check never leaves the
+    // env-file behind.
+    let verified = match @ssh.run(
+      target,
+      [
+        "sh", "-c", ssh_env_file_verify_script(), "monexus-env-verify", dir,
+      ],
+      cwd=".",
+      timeout_seconds=30,
+    ) {
+      Ok(value) => value
+      Err(error) =>
+        return Err(
+          EnvFailure::new(
+            @contracts.ENVIRONMENT_ERR_UNREACHABLE,
+            "cannot verify the remote env file",
+          ).with_detail(error.to_string()),
+        )
+    }
+    if verified.exit_code == 0 {
       Ok(())
     } else {
-      Err(remote_script_failure("env file write", result))
+      Err(
+        EnvFailure::new(
+          @contracts.ENVIRONMENT_ERR_SECRET_REJECTED,
+          "remote env file mode or ownership is not owner-only",
+        ).with_detail(verified.stderr),
+      )
     }
   }
   let remove_file : PathOp = async fn(path) {
-    let script = "rm -f -- \"$1\""
+    let script = "rm -f -- \"$1\" && [ ! -e \"$1\" ] && [ ! -L \"$1\" ]"
     let result = match @ssh.run(
       target,
       ["sh", "-c", script, "monexus-env-rm", path],

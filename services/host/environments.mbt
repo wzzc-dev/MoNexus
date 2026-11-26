@@ -457,41 +457,70 @@ async fn request_environment_approval(
 }
 
 ///|
-/// Record the one-time consumption of a grant. This happens before the first
-/// pull/create, so a replay of the same `approval_id` fails closed.
+/// Record the one-time consumption of a grant. This is a durable transition:
+/// if the append fails, the caller must stop before any pull/create. A
+/// consumption that could not be persisted is audited as `failed`, never as
+/// `consumed`, and the approval is not silently treated as burned.
 async fn consume_environment_approval(
   state : HostState,
   decision : @contracts.DecisionRecord,
-) -> Unit {
+) -> Result[Unit, @contracts.RpcError] {
   let timestamp = @contracts.format_rfc3339(@async.now())
   let updated = { ..decision, consumed_at: timestamp }
-  state.mutex.acquire()
-  let appended = state.append_decision_event(
-    @contracts.EVENT_DECISION_CONSUMED,
-    decision.id,
-    @contracts.decision_payload(updated),
-    updated,
-  )
-  state.mutex.release()
-  match appended {
-    Ok(_) => ()
-    Err(message) =>
-      println("monexus-host: cannot persist approval consumption: " + message)
+  let appended = if state.test_fail_approval_consumption.val {
+    Err("simulated approval consumption append failure")
+  } else {
+    state.mutex.acquire()
+    let result = state.append_decision_event(
+      @contracts.EVENT_DECISION_CONSUMED,
+      decision.id,
+      @contracts.decision_payload(updated),
+      updated,
+    )
+    state.mutex.release()
+    result
   }
-  audit(
-    state,
-    "environment.approval.consume",
-    "host",
-    "decision/" + decision.id,
-    "consumed",
-    policy=@contracts.POLICY_ASK,
-    detail=decision.action + " " + decision.plan_digest,
-    decision_id=decision.id,
-  )
+  match appended {
+    Ok(_) => {
+      audit(
+        state,
+        "environment.approval.consume",
+        "host",
+        "decision/" + decision.id,
+        "consumed",
+        policy=@contracts.POLICY_ASK,
+        detail=decision.action + " " + decision.plan_digest,
+        decision_id=decision.id,
+      )
+      Ok(())
+    }
+    Err(message) => {
+      audit(
+        state,
+        "environment.approval.consume",
+        "host",
+        "decision/" + decision.id,
+        "failed",
+        policy=@contracts.POLICY_ASK,
+        detail="cannot persist approval consumption: " + message,
+        decision_id=decision.id,
+      )
+      Err(
+        environment_rpc_error(
+          @contracts.ENVIRONMENT_ERR_INTERNAL,
+          "cannot persist approval consumption; no docker action was attempted",
+          detail=message,
+        ),
+      )
+    }
+  }
 }
 
 ///|
-async fn validate_and_consume_approval(
+/// Load and validate an approval without consuming it. The grant is burned
+/// only after the target-conflict check and lease acquisition succeed, so a
+/// losing create can never spend the owner's approval.
+async fn validate_environment_approval(
   state : HostState,
   approval_id : String,
   action : String,
@@ -552,8 +581,34 @@ async fn validate_and_consume_approval(
       )
     }
   }
-  consume_environment_approval(state, decision)
   Ok(decision)
+}
+
+///|
+async fn validate_and_consume_approval(
+  state : HostState,
+  approval_id : String,
+  action : String,
+  plan_digest : String,
+  machine_id : String,
+  recipe_hash : String,
+) -> Result[@contracts.DecisionRecord, @contracts.RpcError] {
+  let decision = match
+    validate_environment_approval(
+      state,
+      approval_id,
+      action,
+      plan_digest,
+      machine_id,
+      recipe_hash,
+    ) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  match consume_environment_approval(state, decision) {
+    Ok(_) => Ok(decision)
+    Err(error) => Err(error)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -992,6 +1047,91 @@ async fn adopt_existing_environment(
 }
 
 ///|
+/// Serialize the part of create that has no docker side effects: one active
+/// environment per target, the target lease, the one-time approval burn, and
+/// the durable `creating` intent. The approval is consumed only after the
+/// conflict check and lease succeed, so a losing request never spends it. On
+/// any failure after the lease is taken, the lease is released and no intent
+/// remains. The in-process-create marker is written in the same mutex section
+/// as the intent event, so reconcile never sees a live create as a stale one.
+async fn reserve_environment_creation(
+  state : HostState,
+  intent : @contracts.EnvironmentRecord,
+  target_kind : String,
+  target_id : String,
+  approval : @contracts.DecisionRecord?,
+) -> Result[@contracts.EnvironmentRecord, @contracts.RpcError] {
+  state.mutex.acquire()
+  let active = state.store.find_environment_for_target(
+    intent.workspace_id,
+    intent.worktree_id,
+  )
+  state.mutex.release()
+  match active {
+    Ok(Some(record)) =>
+      if record.state == @contracts.ENVIRONMENT_STATE_CREATING ||
+        record.state == @contracts.ENVIRONMENT_STATE_RUNNING ||
+        record.state == @contracts.ENVIRONMENT_STATE_STOPPED ||
+        record.state == @contracts.ENVIRONMENT_STATE_ORPHAN_SUSPECTED {
+        return Err(
+          environment_rpc_error(
+            @contracts.ENVIRONMENT_ERR_CONFLICT,
+            "target already has an active environment",
+            detail=record.id,
+          ),
+        )
+      }
+    _ => ()
+  }
+  match
+    acquire_environment_lease(state, intent.id, target_kind, target_id) {
+    Ok(_) => ()
+    Err(error) => return Err(error)
+  }
+  match approval {
+    Some(decision) =>
+      match consume_environment_approval(state, decision) {
+        Ok(_) => ()
+        Err(error) => {
+          // Fail closed before any docker action, and do not leave a lease
+          // that would block a correctly-ordered retry.
+          release_environment_lease(state, intent.id)
+          return Err(error)
+        }
+      }
+    None => ()
+  }
+  // The `creating` intent is durable BEFORE any docker change. A crash after
+  // this point is repaired by reconcile, never by guessing.
+  state.mutex.acquire()
+  let appended = state.append_environment_event(
+    @contracts.EVENT_ENVIRONMENT_CREATING,
+    intent.id,
+    environment_payload(intent),
+    Some(intent),
+    None,
+  )
+  match appended {
+    Ok(_) => state.env_create_started.set(intent.id, @async.now())
+    Err(_) => state.env_create_started.remove(intent.id)
+  }
+  state.mutex.release()
+  match appended {
+    Ok(_) => Ok(intent)
+    Err(message) => {
+      release_environment_lease(state, intent.id)
+      Err(
+        environment_rpc_error(
+          @contracts.ENVIRONMENT_ERR_INTERNAL,
+          "cannot persist the create intent",
+          detail=message,
+        ),
+      )
+    }
+  }
+}
+
+///|
 async fn create_environment_locked(
   state : HostState,
   request : @contracts.RpcRequest,
@@ -1123,8 +1263,11 @@ async fn create_environment_locked(
   }
   // Approval: a required plan cannot pull or create until an answered,
   // unexpired, unconsumed Decision matches this exact plan. The plan digest
-  // carries the environment id, so the retry must echo the same id.
+  // carries the environment id, so the retry must echo the same id. The grant
+  // is validated here but not burned: `reserve_environment_creation` consumes
+  // it only after the conflict check and lease acquisition succeed.
   let mut approval_id = spec.approval_id
+  let mut approval_decision : @contracts.DecisionRecord? = None
   if plan.requires_approval || spec.approval_id != "" {
     if spec.approval_id == "" {
       let mut mounts_text = ""
@@ -1160,7 +1303,7 @@ async fn create_environment_locked(
       )
     }
     let decision = match
-      validate_and_consume_approval(
+      validate_environment_approval(
         state,
         spec.approval_id,
         @contracts.ENVIRONMENT_APPROVAL_ACTION_CREATE,
@@ -1172,40 +1315,13 @@ async fn create_environment_locked(
       Err(error) => return Err(error)
     }
     approval_id = decision.id
-  }
-  // One active environment per workspace/worktree, enforced by the lease.
-  state.mutex.acquire()
-  let active = state.store.find_environment_for_target(
-    spec.workspace_id,
-    spec.worktree_id,
-  )
-  state.mutex.release()
-  match active {
-    Ok(Some(record)) =>
-      if record.state == @contracts.ENVIRONMENT_STATE_CREATING ||
-        record.state == @contracts.ENVIRONMENT_STATE_RUNNING ||
-        record.state == @contracts.ENVIRONMENT_STATE_STOPPED ||
-        record.state == @contracts.ENVIRONMENT_STATE_ORPHAN_SUSPECTED {
-        return Err(
-          environment_rpc_error(
-            @contracts.ENVIRONMENT_ERR_CONFLICT,
-            "target already has an active environment",
-            detail=record.id,
-          ),
-        )
-      }
-    _ => ()
+    approval_decision = Some(decision)
   }
   let target_kind = if spec.worktree_id == "" { "workspace" } else { "worktree" }
   let target_id = if spec.worktree_id == "" {
     spec.workspace_id
   } else {
     spec.worktree_id
-  }
-  match
-    acquire_environment_lease(state, environment_id, target_kind, target_id) {
-    Ok(_) => ()
-    Err(error) => return Err(error)
   }
   let intent : @contracts.EnvironmentRecord = {
     id: environment_id,
@@ -1236,33 +1352,22 @@ async fn create_environment_locked(
     cleanup_ok: true,
     cleanup_detail: "",
   }
-  // The `creating` intent is durable BEFORE any docker change. A crash after
-  // this point is repaired by reconcile, never by guessing.
-  state.mutex.acquire()
-  let appended = state.append_environment_event(
-    @contracts.EVENT_ENVIRONMENT_CREATING,
-    environment_id,
-    environment_payload(intent),
-    Some(intent),
-    None,
-  )
-  state.mutex.release()
-  match appended {
-    Ok(_) => ()
-    Err(message) => {
-      release_environment_lease(state, environment_id)
-      return Err(
-        environment_rpc_error(
-          @contracts.ENVIRONMENT_ERR_INTERNAL,
-          "cannot persist the create intent",
-          detail=message,
-        ),
-      )
-    }
+  // The conflict check, the lease, the one-time approval burn and the durable
+  // `creating` intent all happen before any docker call. The intent append and
+  // the in-process-create marker are set under one mutex so reconcile can
+  // never observe one without the other.
+  let reserved = match
+    reserve_environment_creation(
+      state,
+      intent,
+      target_kind,
+      target_id,
+      approval_decision,
+    ) {
+    Ok(value) => value
+    Err(error) => return Err(error)
   }
-  state.mutex.acquire()
-  state.env_create_started.set(environment_id, @async.now())
-  state.mutex.release()
+  ignore(reserved)
   audit(
     state,
     "environment.create",
@@ -1327,9 +1432,6 @@ async fn create_environment_locked(
     }
   }
   let created = @environment.create_container(runner, plan)
-  state.mutex.acquire()
-  state.env_create_started.remove(environment_id)
-  state.mutex.release()
   match created {
     Ok(_) => {
       let finished = @contracts.format_rfc3339(@async.now())
@@ -1357,6 +1459,10 @@ async fn create_environment_locked(
         Some(recipe_record),
         false,
       )
+      // Keep the in-process marker until the terminal event exists, so a
+      // concurrent reconcile can never settle a live create as failed or
+      // release its lease early.
+      state.env_create_started.remove(environment_id)
       state.mutex.release()
       match recorded {
         Ok(_) => ()
@@ -1381,17 +1487,20 @@ async fn create_environment_locked(
       )
       Ok(running)
     }
-    Err(failure) =>
-      Err(
-        settle_create_failure(
-          state,
-          intent,
-          failure.failure,
-          failure.cleanup_ok,
-          failure.cleanup_log,
-          target_id,
-        ),
+    Err(failure) => {
+      let settled = settle_create_failure(
+        state,
+        intent,
+        failure.failure,
+        failure.cleanup_ok,
+        failure.cleanup_log,
+        target_id,
       )
+      state.mutex.acquire()
+      state.env_create_started.remove(environment_id)
+      state.mutex.release()
+      Err(settled)
+    }
   }
 }
 
@@ -1869,6 +1978,7 @@ async fn run_exec_task(
       argv,
       workdir,
       timeout_s,
+      exec_id~,
     ) {
     Ok(output) => {
       let raw_stdout = @contracts.redact_secrets(output.stdout)
@@ -2218,12 +2328,43 @@ async fn mark_environment_drift(
 }
 
 ///|
+/// Remove a leftover env-file from a reconciled intent and report whether the
+/// secret is actually gone. `cleanup_ok` is never true while the file remains.
+async fn reconcile_remove_env_file(
+  state : HostState,
+  runner : @environment.DockerRunner,
+  record : @contracts.EnvironmentRecord,
+) -> (Bool, String) {
+  let path = environment_dir(runner, record.id) + "/env"
+  match (runner.remove_file)(path) {
+    Ok(_) => (true, "")
+    Err(error) => {
+      let detail = write_environment_cleanup_artifact(
+        state,
+        record.id,
+        "env file: " + error.to_string(),
+      )
+      (false, detail)
+    }
+  }
+}
+
+///|
 async fn adopt_environment(
   state : HostState,
   record : @contracts.EnvironmentRecord,
   running : Bool,
+  runner : @environment.DockerRunner,
 ) -> Unit {
   let timestamp = @contracts.format_rfc3339(@async.now())
+  // A crash after `docker start` but before `environment.created` leaves the
+  // secret env-file behind. Reconcile removes it best-effort and records the
+  // real outcome; adoption is not reported clean while the file remains.
+  let (cleanup_ok, cleanup_detail) = reconcile_remove_env_file(
+    state,
+    runner,
+    record,
+  )
   let adopted : @contracts.EnvironmentRecord = {
     ..record,
     state: if running {
@@ -2238,6 +2379,8 @@ async fn adopt_environment(
     },
     updated_at: timestamp,
     last_error: "",
+    cleanup_ok,
+    cleanup_detail,
   }
   state.mutex.acquire()
   let appended = state.append_environment_event(
@@ -2261,7 +2404,57 @@ async fn adopt_environment(
     "adopted",
     policy=@contracts.POLICY_ALLOW,
     risk=record.risk,
-    detail="labels matched; container " + record.container_name,
+    detail="plan matched; container " + record.container_name,
+  )
+}
+
+///|
+/// Settle a `creating` intent whose container is absent or drifted. The
+/// env-file written before `docker create` may still exist, so it is removed
+/// best-effort and the cleanup result is recorded rather than assumed.
+async fn settle_drifted_create_intent(
+  state : HostState,
+  record : @contracts.EnvironmentRecord,
+  runner : @environment.DockerRunner,
+  message : String,
+) -> Unit {
+  let timestamp = @contracts.format_rfc3339(@async.now())
+  let (cleanup_ok, cleanup_detail) = reconcile_remove_env_file(
+    state,
+    runner,
+    record,
+  )
+  let failed : @contracts.EnvironmentRecord = {
+    ..record,
+    state: @contracts.ENVIRONMENT_STATE_FAILED,
+    updated_at: timestamp,
+    last_error: message,
+    cleanup_ok,
+    cleanup_detail,
+  }
+  state.mutex.acquire()
+  let appended = state.append_environment_event(
+    @contracts.EVENT_ENVIRONMENT_FAILED,
+    record.id,
+    environment_payload(failed),
+    Some(failed),
+    None,
+  )
+  state.mutex.release()
+  match appended {
+    Ok(_) => ()
+    Err(error) => println("monexus-host: cannot settle create intent: " + error)
+  }
+  release_environment_lease(state, record.id)
+  audit(
+    state,
+    "environment.reconcile",
+    "host",
+    "environment/" + record.id,
+    "failed",
+    policy=@contracts.POLICY_ALLOW,
+    risk=record.risk,
+    detail=message,
   )
 }
 
@@ -2347,6 +2540,22 @@ async fn destroy_timed_out_intent(
 }
 
 ///|
+/// True only when a recorded create intent is older than the ADR bound. The
+/// age comes from the record, never from `state == creating` alone: a live
+/// create in this process is excluded by the in-process marker, and a very
+/// recent intent is left untouched even before that marker is visible.
+fn create_intent_age_timed_out(
+  record : @contracts.EnvironmentRecord,
+  now_ms : Int64,
+) -> Bool {
+  match @contracts.parse_rfc3339_ms(record.created_at) {
+    Some(created_ms) => @environment.create_intent_timed_out(now_ms - created_ms)
+    // An unparseable timestamp is not evidence of a timed-out intent.
+    None => false
+  }
+}
+
+///|
 /// Read-only scan + convergence (ADR-0013 §3.5). It never creates an
 /// environment: it adopts a complete labelled container, removes an incomplete
 /// timed-out create intent, or records drift without touching an unowned
@@ -2400,17 +2609,39 @@ pub async fn reconcile_environments(state : HostState) -> Unit {
       Ok(None) => None
       Err(_) => continue
     }
-    let labels_match = match inspect {
-      Some(value) => @docker.inspect_matches_identity(value, identity)
+    // Adoption requires the full recorded plan, not just managed labels: the
+    // identity labels are necessary but not sufficient. The recipe is loaded
+    // and re-verified so limits can be checked; without it nothing is
+    // adopted (fail closed).
+    let plan_matches = match inspect {
+      Some(value) => {
+        let recipe_record = match load_recipe_stored(state, record.recipe) {
+          Ok(loaded) => Some(loaded)
+          Err(_) => None
+        }
+        let verified = match recipe_record {
+          Some(stored) =>
+            match verify_recipe_record(state, stored) {
+              Ok(recipe) => Some(recipe)
+              Err(_) => None
+            }
+          None => None
+        }
+        @environment.record_matches_inspect(record, identity, value, verified)
+      }
       None => false
     }
     // Any create intent left over in the projection belongs to a previous
-    // execution; its coroutine cannot be alive after a restart.
-    let create_timed_out = record.state == @contracts.ENVIRONMENT_STATE_CREATING
+    // execution; its coroutine cannot be alive after a restart. A live create
+    // in this process is excluded by the marker above, and a recent intent is
+    // not treated as timed out merely because its state is `creating`.
+    let create_timed_out = record.state ==
+      @contracts.ENVIRONMENT_STATE_CREATING &&
+      create_intent_age_timed_out(record, @async.now())
     let action = @environment.reconcile_decision(
       record,
       inspect,
-      labels_match,
+      plan_matches,
       create_timed_out,
     )
     match action {
@@ -2420,7 +2651,7 @@ pub async fn reconcile_environments(state : HostState) -> Unit {
           None => continue
         }
         if record.state == @contracts.ENVIRONMENT_STATE_CREATING {
-          adopt_environment(state, record, some_inspect.running)
+          adopt_environment(state, record, some_inspect.running, runner)
         } else if record.state == @contracts.ENVIRONMENT_STATE_RUNNING &&
           !some_inspect.running {
           mark_environment_drift(
@@ -2441,39 +2672,7 @@ pub async fn reconcile_environments(state : HostState) -> Unit {
         destroy_timed_out_intent(state, record, runner, identity)
       @environment.MarkDrift(message) =>
         if record.state == @contracts.ENVIRONMENT_STATE_CREATING {
-          let timestamp = @contracts.format_rfc3339(@async.now())
-          let failed : @contracts.EnvironmentRecord = {
-            ..record,
-            state: @contracts.ENVIRONMENT_STATE_FAILED,
-            updated_at: timestamp,
-            last_error: message,
-            cleanup_ok: true,
-          }
-          state.mutex.acquire()
-          let appended = state.append_environment_event(
-            @contracts.EVENT_ENVIRONMENT_FAILED,
-            record.id,
-            environment_payload(failed),
-            Some(failed),
-            None,
-          )
-          state.mutex.release()
-          match appended {
-            Ok(_) => ()
-            Err(error) =>
-              println("monexus-host: cannot settle create intent: " + error)
-          }
-          release_environment_lease(state, record.id)
-          audit(
-            state,
-            "environment.reconcile",
-            "host",
-            "environment/" + record.id,
-            "failed",
-            policy=@contracts.POLICY_ALLOW,
-            risk=record.risk,
-            detail=message,
-          )
+          settle_drifted_create_intent(state, record, runner, message)
         } else {
           mark_environment_drift(state, record, message)
         }

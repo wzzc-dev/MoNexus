@@ -194,20 +194,25 @@ fn digest_text(
 /// labels, network, user, environment names and bind mounts all match the plan
 /// may be adopted; a same-named container with different labels is never
 /// touched.
-pub fn plan_matches_inspect(
-  plan : EnvironmentPlan,
+fn plan_fields_match_inspect(
+  identity : @docker.EnvironmentIdentity,
+  network : String,
+  user : String,
+  env_names : Array[String],
+  mounts : Array[@contracts.EnvironmentMount],
+  recipe : @recipes.Recipe,
   inspect : @docker.ContainerInspect,
 ) -> Bool {
-  if !@docker.inspect_matches_identity(inspect, plan.identity) {
+  if !@docker.inspect_matches_identity(inspect, identity) {
     return false
   }
-  if inspect.network_mode != plan.network || inspect.user != plan.user {
+  if inspect.network_mode != network || inspect.user != user {
     return false
   }
-  if inspect.env_names.length() != plan.env_names.length() {
+  if inspect.env_names.length() != env_names.length() {
     return false
   }
-  for name in plan.env_names {
+  for name in env_names {
     let mut found = false
     for observed in inspect.env_names {
       if observed == name {
@@ -218,10 +223,10 @@ pub fn plan_matches_inspect(
       return false
     }
   }
-  if inspect.mounts.length() != plan.mounts.length() {
+  if inspect.mounts.length() != mounts.length() {
     return false
   }
-  for expected in plan.mounts {
+  for expected in mounts {
     let mut found = false
     for observed in inspect.mounts {
       if observed.source == expected.host_path &&
@@ -237,7 +242,7 @@ pub fn plan_matches_inspect(
   // Docker reports the configured limits on the created container. A value
   // that is present must match the plan; absent means the engine did not
   // report it and is not treated as a mismatch.
-  let limits = plan.recipe.effective_limits()
+  let limits = recipe.effective_limits()
   match inspect.memory_bytes {
     Some(value) =>
       if value != limits.memory_mb.to_int64() * 1_048_576L {
@@ -260,6 +265,50 @@ pub fn plan_matches_inspect(
     None => ()
   }
   true
+}
+
+///|
+/// Strict plan comparison for adoption. Every plan-derived field must match:
+/// identity labels, network, user, env names, mounts and limits.
+pub fn plan_matches_inspect(
+  plan : EnvironmentPlan,
+  inspect : @docker.ContainerInspect,
+) -> Bool {
+  plan_fields_match_inspect(
+    plan.identity,
+    plan.network,
+    plan.user,
+    plan.env_names,
+    plan.mounts,
+    plan.recipe,
+    inspect,
+  )
+}
+
+///|
+/// Strict comparison for crash reconciliation, where the original plan object
+/// is gone but its fields were recorded on the intent. The recipe is still
+/// required: without a verified recipe the limits cannot be checked, and an
+/// unverifiable container is never adopted.
+pub fn record_matches_inspect(
+  record : @contracts.EnvironmentRecord,
+  identity : @docker.EnvironmentIdentity,
+  inspect : @docker.ContainerInspect,
+  recipe : @recipes.Recipe?,
+) -> Bool {
+  match recipe {
+    Some(value) =>
+      plan_fields_match_inspect(
+        identity,
+        record.network,
+        record.user,
+        record.env_names,
+        record.mounts,
+        value,
+        inspect,
+      )
+    None => false
+  }
 }
 
 ///|

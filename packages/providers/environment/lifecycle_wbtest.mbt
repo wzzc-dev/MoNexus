@@ -395,6 +395,117 @@ async test "exec verifies ownership, keeps argv separate and never fakes success
 }
 
 ///|
+async test "exec timeout and cancellation TERM the container process group" {
+  let root = @fs.tmpdir(prefix="env-exec-group")
+  defer cleanup_root(root)
+  let home = root + "/home"
+  let workspace = root + "/workspace"
+  @fs.mkdir(home, recursive=true) catch { _ => () }
+  @fs.mkdir(workspace, recursive=true) catch { _ => () }
+  let plan = test_plan(home, workspace, "env_01ARYZ6S41")
+  // A timeout is only reported as `timed_out` after a second exec confirmed the
+  // in-container process group is gone. A single docker-CLI kill would leave
+  // the command running against the bind-mounted workspace.
+  let timed = fake_docker()
+  timed.created.val = true
+  timed.running.val = true
+  timed.exec_mode.val = "timeout"
+  let timed_runner = fake_runner(timed, home, plan.identity)
+  match
+    exec_in_container(
+      timed_runner,
+      plan.identity,
+      ["sleep", "60"],
+      "",
+      1,
+      exec_id="ex_TIMEOUT0001",
+    ) {
+    Ok(output) => {
+      assert_true(output.timed_out)
+      assert_eq(output.exit_code, -1)
+    }
+    Err(error) =>
+      fail("a confirmed timeout must be timed_out data: " + error.to_string())
+  }
+  let execs = calls_with_head(timed, "exec")
+  assert_eq(execs.length(), 2)
+  let command = execs[0]
+  assert_true(call_has_element_containing(command, "setsid"))
+  assert_true(call_has_element_containing(command, "exec-ex_TIMEOUT0001.pid"))
+  assert_true(argv_has(command, "sleep"))
+  assert_true(argv_has(command, "60"))
+  assert_true(call_has_element_containing(execs[1], "monexus-exec-terminate"))
+  assert_true(call_has_element_containing(execs[1], "kill -TERM -$p"))
+  // If termination cannot be confirmed, the exec fails closed; it is never
+  // reported as a completed or cancelled success.
+  let blocked = fake_docker()
+  blocked.created.val = true
+  blocked.running.val = true
+  blocked.exec_mode.val = "timeout"
+  blocked.terminate_ok.val = false
+  let blocked_runner = fake_runner(blocked, home, plan.identity)
+  match
+    exec_in_container(
+      blocked_runner,
+      plan.identity,
+      ["sleep", "60"],
+      "",
+      1,
+      exec_id="ex_BLOCKED0001",
+    ) {
+    Ok(_) => fail("an unconfirmed termination must not report success")
+    Err(error) => {
+      assert_eq(error.code, @contracts.ENVIRONMENT_ERR_TIMEOUT)
+      assert_true(error.message.contains("could not be confirmed terminated"))
+    }
+  }
+  assert_true(
+    count_calls_containing(blocked, "monexus-exec-terminate") >= 1,
+  )
+  // Cancelling the owning task (stop/destroy) must also signal the container
+  // process group; the API result is an error, never success, and the
+  // container itself stays running.
+  let cancelled = fake_docker()
+  cancelled.created.val = true
+  cancelled.running.val = true
+  cancelled.exec_mode.val = "hang"
+  let cancelled_runner = fake_runner(cancelled, home, plan.identity)
+  let outcome : Ref[Result[ExecOutput, EnvFailure]?] = Ref(None)
+  @async.with_task_group(async fn(group : @async.TaskGroup[Unit]) -> Unit {
+    let task = group.spawn(async fn() -> Unit {
+      outcome.val = Some(
+        exec_in_container(
+          cancelled_runner,
+          plan.identity,
+          [
+            "sh",
+            "-c",
+            "while true; do printf x >> /workspace/project/marker; sleep 0.05; done",
+          ],
+          "",
+          600,
+          exec_id="ex_CANCEL00001",
+        ),
+      )
+    })
+    @async.sleep(100)
+    task.cancel()
+  })
+  match outcome.val {
+    Some(Ok(_)) => fail("a cancelled exec must never report success")
+    Some(Err(error)) => {
+      assert_eq(error.code, @contracts.ENVIRONMENT_ERR_TIMEOUT)
+      assert_true(error.message.contains("cancelled"))
+    }
+    None => fail("a cancelled exec left no outcome")
+  }
+  assert_true(
+    count_calls_containing(cancelled, "monexus-exec-terminate") >= 1,
+  )
+  assert_true(cancelled.running.val)
+}
+
+///|
 async test "doctor is read-only and reports missing containers as unhealthy" {
   let root = @fs.tmpdir(prefix="env-doctor")
   defer cleanup_root(root)

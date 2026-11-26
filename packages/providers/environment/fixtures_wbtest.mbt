@@ -110,6 +110,7 @@ struct FakeDocker {
   daemon_down_after_create : Ref[Bool]
   daemon_down : Ref[Bool]
   exec_mode : Ref[String]
+  terminate_ok : Ref[Bool]
   env_file_mode : Ref[String]
 }
 
@@ -132,6 +133,7 @@ fn fake_docker() -> FakeDocker {
     daemon_down_after_create: Ref(false),
     daemon_down: Ref(false),
     exec_mode: Ref("ok"),
+    terminate_ok: Ref(true),
     env_file_mode: Ref(""),
   }
 }
@@ -276,6 +278,18 @@ fn fake_runner(
       return Ok({ exit_code: 1, stdout: "", stderr: "device busy: API_KEY=supersecretvalue" })
     }
     if head == "exec" {
+      // The bounded TERM→KILL helper is a second docker exec; it is not the
+      // user command and must not inherit the fake exec mode.
+      if call_has_element_containing(argv, "monexus-exec-terminate") {
+        if fake.terminate_ok.val {
+          return Ok({ exit_code: 0, stdout: "", stderr: "" })
+        }
+        return Ok({
+          exit_code: 3,
+          stdout: "",
+          stderr: "exec process group survived KILL",
+        })
+      }
       let mode = fake.exec_mode.val
       if mode == "timeout" {
         return Err(
@@ -284,6 +298,10 @@ fn fake_runner(
             "docker exec timed out",
           ),
         )
+      }
+      if mode == "hang" {
+        @async.sleep(60_000)
+        return Ok({ exit_code: 0, stdout: "", stderr: "" })
       }
       if mode == "exit7" {
         return Ok({
@@ -394,6 +412,17 @@ fn call_has_element_containing(
 }
 
 ///|
+fn count_calls_containing(fake : FakeDocker, needle : String) -> Int {
+  let mut count = 0
+  for call in fake.calls.val {
+    if call_has_element_containing(call, needle) {
+      count = count + 1
+    }
+  }
+  count
+}
+
+///|
 async fn cleanup_root(root : String) -> Unit {
   @fs.rmdir(root, recursive=true) catch { _ => () }
 }
@@ -428,6 +457,36 @@ fn test_record(state : String) -> @contracts.EnvironmentRecord {
     last_error: "",
     cleanup_ok: true,
     cleanup_detail: "",
+  }
+}
+
+///|
+fn inspect_matching_plan(plan : EnvironmentPlan, running : Bool) -> @docker.ContainerInspect {
+  let planned_mounts : Array[@docker.InspectMount] = []
+  for mount in plan.mounts {
+    planned_mounts.push({
+      kind: "bind",
+      source: mount.host_path,
+      destination: mount.container_path,
+      read_only: mount.mode == "ro",
+    })
+  }
+  let limits = plan.recipe.effective_limits()
+  {
+    name: @docker.container_name(plan.identity),
+    image: test_image_digest,
+    status: if running { "running" } else { "exited" },
+    running,
+    env_names: plan.env_names,
+    labels: @docker.managed_labels(plan.identity),
+    network_mode: plan.network,
+    init: true,
+    restart_policy: "no",
+    user: plan.user,
+    memory_bytes: Some(limits.memory_mb.to_int64() * 1_048_576L),
+    nano_cpus: Some(limits.cpu_millis.to_int64() * 1_000_000L),
+    pids_limit: Some(limits.pids.to_int64()),
+    mounts: planned_mounts,
   }
 }
 
@@ -480,6 +539,15 @@ async fn fixture_remove_file(path : String) -> Result[Unit, EnvFailure] {
           "cannot remove env file",
         ).with_detail(error.to_string()),
       )
+  }
+  let remains = @fs.exists(path) catch { _ => true }
+  if remains {
+    return Err(
+      EnvFailure::new(
+        @contracts.ENVIRONMENT_ERR_CLEANUP_FAILED,
+        "env file still exists after removal",
+      ).with_detail(path),
+    )
   }
   Ok(())
 }

@@ -444,6 +444,116 @@ pub fn exec_argv(
 }
 
 ///|
+/// Path of the fixed exec PID file inside the container (ADR-0013 §3.3).
+pub fn exec_pidfile(marker : String) -> String {
+  "/run/monexus/exec-" + marker + ".pid"
+}
+
+///|
+/// Fallback PID file for images whose runtime user cannot write `/run`.
+pub fn exec_pidfile_fallback(marker : String) -> String {
+  "/tmp/monexus-exec-" + marker + ".pid"
+}
+
+///|
+/// Fixed wrapper for `environment.exec` (ADR-0013 §3.3). The process is
+/// started with `setsid`, so its pid is also its process-group id, and the
+/// pid is written where the cancellation path can find it. The wrapper keeps
+/// stdout/stderr attached to the docker exec client, waits for the command and
+/// removes the PID file. `argv` is passed positionally; recipe or caller text
+/// never becomes part of this shell string.
+///
+/// The marker is validated as a bounded runtime id, so the generated paths
+/// cannot inject shell syntax or escape the fixed directory.
+pub fn exec_wrapped_argv(
+  identity : EnvironmentIdentity,
+  argv : Array[String],
+  marker : String,
+  workdir~ : String = "",
+) -> Result[Array[String], DockerError] {
+  if argv.is_empty() {
+    return Err(
+      DockerError::new(Internal).at("argv").with_detail("exec argv is empty"),
+    )
+  }
+  if !is_valid_runtime_id(marker) {
+    return Err(
+      DockerError::new(InvalidEnvironmentId).at("marker").with_detail(
+        "expected a bounded [A-Za-z0-9_-] exec marker",
+      ),
+    )
+  }
+  let primary = exec_pidfile(marker)
+  let fallback = exec_pidfile_fallback(marker)
+  let script = "pidfile=\"" + primary + "\"; " +
+    "rm -f \"$pidfile\" \"" + fallback + "\" 2>/dev/null; " +
+    "mkdir -p /run/monexus 2>/dev/null && " +
+    "printf x > \"$pidfile\" 2>/dev/null && rm -f \"$pidfile\" " +
+    "|| pidfile=\"" + fallback + "\"; " +
+    "setsid \"$@\" & pid=$!; " +
+    "printf '%s' \"$pid\" > \"$pidfile\" 2>/dev/null || true; " +
+    "wait \"$pid\"; code=$?; " +
+    "rm -f \"$pidfile\" 2>/dev/null; " +
+    "exit \"$code\""
+  let out : Array[String] = ["exec"]
+  if workdir != "" {
+    if !@recipes.is_valid_container_path(workdir) {
+      return Err(
+        DockerError::new(InvalidContainerPath).at("workdir").with_detail(
+          "expected an absolute normalised container path",
+        ),
+      )
+    }
+    out.push("--workdir")
+    out.push(workdir)
+  }
+  out.push(container_name(identity))
+  out.push("sh")
+  out.push("-c")
+  out.push(script)
+  out.push("monexus-exec")
+  for arg in argv {
+    out.push(arg)
+  }
+  Ok(out)
+}
+
+///|
+/// Bounded TERM→KILL termination for one wrapped exec. The script reads the
+/// PID file the wrapper wrote, signals the whole process group, waits one
+/// second, sends KILL, and reports whether the group is still observable.
+/// A missing or empty PID file is *unverified* (exit 3), never "terminated":
+/// the caller must not report a cancelled command as success.
+pub fn exec_terminate_argv(
+  identity : EnvironmentIdentity,
+  marker : String,
+) -> Result[Array[String], DockerError] {
+  if !is_valid_runtime_id(marker) {
+    return Err(
+      DockerError::new(InvalidEnvironmentId).at("marker").with_detail(
+        "expected a bounded [A-Za-z0-9_-] exec marker",
+      ),
+    )
+  }
+  let primary = exec_pidfile(marker)
+  let fallback = exec_pidfile_fallback(marker)
+  let script = "pidfile=\"" + primary + "\"; " +
+    "[ -s \"$pidfile\" ] || pidfile=\"" + fallback + "\"; " +
+    "p=$(cat \"$pidfile\" 2>/dev/null); " +
+    "if [ -z \"$p\" ]; then " +
+    "echo \"exec pid file is missing\" >&2; exit 3; fi; " +
+    "kill -TERM -$p 2>/dev/null; sleep 1; " +
+    "kill -KILL -$p 2>/dev/null; sleep 1; " +
+    "if kill -0 -$p 2>/dev/null; then " +
+    "echo \"exec process group survived KILL\" >&2; exit 3; fi; " +
+    "rm -f \"$pidfile\" 2>/dev/null; exit 0"
+  Ok([
+    "exec", container_name(identity), "sh", "-c", script,
+    "monexus-exec-terminate",
+  ])
+}
+
+///|
 /// Interactive exec argv for the terminal transport. `-i` keeps stdin open
 /// and `-t` allocates a container TTY; the host allocates its own PTY or SSH
 /// TTY in front of it.

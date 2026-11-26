@@ -720,14 +720,67 @@ pub(all) struct ExecOutput {
 }
 
 ///|
+/// Pick the PID-file marker for one exec. A caller-provided `exec_id` is used
+/// only when it already fits the bounded runtime-id alphabet; otherwise a
+/// fresh ULID is generated, so an untrusted id can never shape a container
+/// path.
+fn exec_marker(exec_id : String) -> String {
+  if exec_id != "" && @docker.is_valid_runtime_id(exec_id) {
+    exec_id
+  } else {
+    @contracts.new_id("ex", @async.now())
+  }
+}
+
+///|
+/// TERM→KILL the container-side process group of one wrapped exec and verify
+/// it is gone. `Ok` means the group was signalled and is no longer
+/// observable; `Err` means termination could not be confirmed and the caller
+/// must not report the exec as successful.
+async fn terminate_container_exec(
+  runner : DockerRunner,
+  identity : @docker.EnvironmentIdentity,
+  marker : String,
+) -> Result[Unit, EnvFailure] {
+  let argv = match @docker.exec_terminate_argv(identity, marker) {
+    Ok(value) => value
+    Err(error) => return Err(env_failure_from_docker(error))
+  }
+  let result = match (runner.invoke)(argv, 10) {
+    Ok(value) => value
+    Err(error) =>
+      return Err(
+        EnvFailure::new(
+          @contracts.ENVIRONMENT_ERR_TIMEOUT,
+          "exec termination could not be sent to the container",
+        ).with_detail(error.to_string()),
+      )
+  }
+  if result.exit_code == 0 {
+    Ok(())
+  } else {
+    Err(
+      EnvFailure::new(
+        @contracts.ENVIRONMENT_ERR_TIMEOUT,
+        "exec process group termination could not be confirmed",
+      ).with_detail(result.stderr),
+    )
+  }
+}
+
+///|
 /// Execute an argv inside the container. This is the `environment.exec` path:
-/// no shell string, no environment values in argv.
+/// no shell string, no environment values in argv. The command runs in its own
+/// container-side process group (fixed `setsid` wrapper + PID file), so a
+/// timeout or cancellation sends TERM→KILL to the whole group and never
+/// leaves a detached command mutating the bind-mounted workspace.
 pub async fn exec_in_container(
   runner : DockerRunner,
   identity : @docker.EnvironmentIdentity,
   argv : Array[String],
   workdir : String,
   timeout_s : Int,
+  exec_id~ : String = "",
 ) -> Result[ExecOutput, EnvFailure] {
   let inspect = match container_ownership(runner, identity) {
     Ok(Owned(value)) => value
@@ -755,30 +808,72 @@ pub async fn exec_in_container(
       ),
     )
   }
-  let docker_argv = match @docker.exec_argv(identity, argv, workdir=workdir) {
+  let marker = exec_marker(exec_id)
+  let docker_argv = match
+    @docker.exec_wrapped_argv(identity, argv, marker, workdir=workdir) {
     Ok(value) => value
     Err(error) => return Err(env_failure_from_docker(error))
   }
-  let result = match (runner.invoke)(docker_argv, timeout_s) {
-    Ok(value) => value
-    Err(error) =>
+  let attempt = @async.handle_cancellation(
+    async fn() -> Result[DockerOutput, EnvFailure] {
+      (runner.invoke)(docker_argv, timeout_s)
+    },
+  )
+  match attempt {
+    Some(Ok(result)) =>
+      Ok({
+        exit_code: result.exit_code,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        timed_out: false,
+      })
+    Some(Err(error)) =>
       if error.code == @contracts.ENVIRONMENT_ERR_TIMEOUT {
-        return Ok({
-          exit_code: -1,
-          stdout: "",
-          stderr: "",
-          timed_out: true,
-        })
+        match terminate_container_exec(runner, identity, marker) {
+          Ok(_) =>
+            Ok({
+              exit_code: -1,
+              stdout: "",
+              stderr: "",
+              timed_out: true,
+            })
+          Err(termination) =>
+            Err(
+              EnvFailure::new(
+                @contracts.ENVIRONMENT_ERR_TIMEOUT,
+                "exec timed out and its process group could not be confirmed terminated",
+              ).with_detail(termination.to_string()),
+            )
+        }
       } else {
-        return Err(error)
+        Err(error)
       }
+    None => {
+      // The owning task was cancelled. Termination is protected so the
+      // container-side command cannot keep running after the API reports a
+      // cancellation. A cancelled exec never returns a successful result.
+      let termination : Ref[Result[Unit, EnvFailure]] = Ref(Ok(()))
+      @async.protect_from_cancel(async fn() {
+        termination.val = terminate_container_exec(runner, identity, marker)
+      })
+      match termination.val {
+        Ok(_) =>
+          Err(
+            EnvFailure::new(
+              @contracts.ENVIRONMENT_ERR_TIMEOUT,
+              "exec cancelled",
+            ),
+          )
+        Err(error) =>
+          Err(
+            EnvFailure::new(
+              @contracts.ENVIRONMENT_ERR_TIMEOUT,
+              "exec cancelled and its process group could not be confirmed terminated",
+            ).with_detail(error.to_string()),
+          )
+      }
+    }
   }
-  Ok({
-    exit_code: result.exit_code,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    timed_out: false,
-  })
 }
 
 ///|

@@ -104,3 +104,49 @@ test "plan matching requires labels, limits, network and exact mounts" {
   )
   assert_true(!plan_matches_inspect(plan, { ..inspect, env_names: ["HOME"] }))
 }
+
+///|
+test "crash reconciliation requires recorded plan fields and a verified recipe" {
+  let plan = test_plan("/home/dev", "/home/dev/work", "env_01ARYZ6S41")
+  let inspect = inspect_matching_plan(plan, true)
+  let record : @contracts.EnvironmentRecord = {
+    ..test_record(@contracts.ENVIRONMENT_STATE_CREATING),
+    container_name: @docker.container_name(plan.identity),
+    network: plan.network,
+    user: plan.user,
+    mounts: plan.mounts,
+    env_names: plan.env_names,
+  }
+  assert_true(record_matches_inspect(record, plan.identity, inspect, Some(test_recipe())))
+  // Without a re-verified recipe the limits cannot be checked; refuse adoption.
+  assert_true(!record_matches_inspect(record, plan.identity, inspect, None))
+  // Labels alone are not enough: a same-labelled container whose network,
+  // user, mounts or env differ from the recorded intent is not adopted.
+  let label_only : @docker.ContainerInspect = {
+    ..inspect,
+    network_mode: "bridge",
+    user: "root",
+    env_names: [],
+    mounts: [],
+  }
+  assert_true(@docker.inspect_matches_identity(label_only, plan.identity))
+  assert_true(
+    !record_matches_inspect(record, plan.identity, label_only, Some(test_recipe())),
+  )
+  assert_true(
+    !record_matches_inspect(
+      record,
+      plan.identity,
+      { ..inspect, memory_bytes: Some(1L) },
+      Some(test_recipe()),
+    ),
+  )
+  assert_true(
+    !record_matches_inspect(
+      record,
+      plan.identity,
+      { ..inspect, mounts: [] },
+      Some(test_recipe()),
+    ),
+  )
+}
