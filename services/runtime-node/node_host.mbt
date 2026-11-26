@@ -30,6 +30,13 @@ pub const NODE_TOKEN_FILE_NAME : String = "token"
 pub const NODE_IDENTITY_FILE_NAME : String = "identity.json"
 
 ///|
+/// Persisted policy announcement. The file lives in the node's 0700 state
+/// directory, is written 0600 and contains only the public snapshot and its
+/// content hash. It is re-verified on every open; a tampered file is ignored
+/// and the gate stays fail-closed (or operator-overridden).
+pub const NODE_POLICY_FILE_NAME : String = "policy.json"
+
+///|
 pub fn node_capabilities() -> Array[String] {
   ["exec", "fs", "pty", "git"]
 }
@@ -59,6 +66,13 @@ pub struct NodeHost {
   workspace_root : String
   mut policy : PolicyGate
   cache : IdempotencyCache
+  /// Bounded replay memory for consumed approval grant nonces. This is the
+  /// only approval-related state the node keeps: it does not hold Decisions,
+  /// pending approvals or grants, and cannot approve anything itself.
+  nonces : @policy.ConsumedNonces
+  /// Node-local bounded audit ring for policy decisions and snapshot
+  /// installation. The primary remains the system of record.
+  audit : @transport.AuditLog
 }
 
 ///|
@@ -92,6 +106,87 @@ pub fn NodeHost::policy(self : NodeHost) -> PolicyGate {
 /// before this call, leaving the previous gate in place.
 pub fn NodeHost::set_policy(self : NodeHost, policy : PolicyGate) -> Unit {
   self.policy = policy
+}
+
+///|
+pub fn NodeHost::policy_path(self : NodeHost) -> String {
+  self.state_dir + "/" + NODE_POLICY_FILE_NAME
+}
+
+///|
+/// Node-local audit text (redacted, bounded). Used by tests and doctor output.
+pub fn NodeHost::audit_text(self : NodeHost) -> String {
+  self.audit.text()
+}
+
+///|
+fn node_audit(
+  host : NodeHost,
+  action : String,
+  outcome : String,
+  detail : String,
+) -> Unit {
+  host.audit.record(
+    action,
+    host.runtime_id,
+    outcome,
+    detail,
+    @async.now(),
+  )
+}
+
+///|
+/// Install a policy announcement pushed by the primary. The pinned hash is
+/// re-verified here; only a valid snapshot replaces the gate. The announcement
+/// is persisted 0600 in the node state directory so a restart resumes under
+/// the same policy, and re-verified when it is loaded again.
+pub async fn NodeHost::install_policy_announcement(
+  self : NodeHost,
+  announcement : @transport.PolicyAnnouncement,
+) -> Result[Unit, String] {
+  let snapshot = match announcement.verify() {
+    Ok(value) => value
+    Err(message) => {
+      node_audit(
+        self,
+        "policy.snapshot_rejected",
+        "rejected",
+        "source=primary version=" +
+        announcement.version +
+        " reason=" +
+        message,
+      )
+      return Err(message)
+    }
+  }
+  let text = announcement.to_json().stringify()
+  match
+    @transport.save_policy_announcement(self.policy_path(), text) {
+    Ok(_) => ()
+    Err(message) => {
+      node_audit(
+        self,
+        "policy.snapshot_rejected",
+        "rejected",
+        "source=primary version=" +
+        announcement.version +
+        " reason=" +
+        message,
+      )
+      return Err(message)
+    }
+  }
+  self.policy = PolicyGate::from_policy_snapshot(snapshot)
+  node_audit(
+    self,
+    "policy.snapshot_installed",
+    "ok",
+    "source=primary version=" +
+    snapshot.version +
+    " hash=" +
+    snapshot.content_hash,
+  )
+  Ok(())
 }
 
 ///|
@@ -235,9 +330,63 @@ pub async fn NodeHost::open(
       return Err("cannot open runtime workspace: " + message)
     }
   }
+  // Restore the last policy snapshot the primary published. The file is
+  // re-verified against its pinned hash; a missing or tampered file leaves the
+  // node fail-closed until the next successful install.
+  let audit = @transport.AuditLog::new()
+  let policy_path = state_dir + "/" + NODE_POLICY_FILE_NAME
+  let policy_file_exists = @fs.exists(policy_path) catch { _ => false }
+  let restored : @policy.PolicySnapshot? = if policy_file_exists {
+    match @transport.load_policy_announcement(policy_path) {
+      Ok(announcement) =>
+        match announcement.verify() {
+          Ok(snapshot) => {
+            audit.record(
+              "policy.snapshot_restored",
+              runtime_id,
+              "ok",
+              "source=disk version=" +
+              snapshot.version +
+              " hash=" +
+              snapshot.content_hash,
+              @async.now(),
+            )
+            Some(snapshot)
+          }
+          Err(message) => {
+            audit.record(
+              "policy.snapshot_rejected",
+              runtime_id,
+              "rejected",
+              "source=disk reason=" + message,
+              @async.now(),
+            )
+            None
+          }
+        }
+      Err(message) => {
+        audit.record(
+          "policy.snapshot_rejected",
+          runtime_id,
+          "rejected",
+          "source=disk reason=" + message,
+          @async.now(),
+        )
+        None
+      }
+    }
+  } else {
+    None
+  }
+  // An explicit policy argument (operator override or a test gate) wins over
+  // the restored file; otherwise the persisted primary snapshot is used.
   let effective_policy = match policy {
     Some(value) => value
-    None => PolicyGate::fail_closed()
+    None =>
+      match restored {
+        Some(snapshot) => PolicyGate::from_policy_snapshot(snapshot)
+        None => PolicyGate::fail_closed()
+      }
   }
   Ok({
     runtime_id,
@@ -249,6 +398,8 @@ pub async fn NodeHost::open(
     workspace_root: workspace.root(),
     policy: effective_policy,
     cache: IdempotencyCache::new(),
+    nonces: @policy.ConsumedNonces::new(),
+    audit,
   })
 }
 
@@ -337,10 +488,11 @@ async fn platform_facts() -> (String, String, String) {
 /// host's own API (no ACP connection, no shell interpolation of user text).
 pub async fn NodeHost::probe_profile(self : NodeHost) -> @json.Json {
   let (os, arch, hostname) = platform_facts()
-  let policy_text = if self.policy.has_snapshot() {
-    "snapshot"
-  } else {
-    "fail_closed"
+  let policy_text = self.policy.mode()
+  let (policy_version, policy_hash) = match
+    self.policy.verified_snapshot() {
+    Some(snapshot) => (snapshot.version, snapshot.content_hash)
+    None => ("", "")
   }
   @contracts.json_object([
     ("runtime_id", @contracts.json_string(self.runtime_id)),
@@ -363,6 +515,8 @@ pub async fn NodeHost::probe_profile(self : NodeHost) -> @json.Json {
       ]),
     ),
     ("policy", @contracts.json_string(policy_text)),
+    ("policy_version", @contracts.json_string(policy_version)),
+    ("policy_hash", @contracts.json_string(policy_hash)),
     ("state_version", @contracts.json_int(NODE_STATE_VERSION)),
   ])
 }
@@ -423,7 +577,11 @@ pub fn NodeHost::service(
     self.probe_profile()
   }
   let outbox = self.outbox_port()
-  @transport.NodeService::new(handlers~, probe~, outbox~)
+  let install_policy : async (@transport.PolicyAnnouncement) -> Result[Unit, String] =
+    async fn(announcement) {
+      self.install_policy_announcement(announcement)
+    }
+  @transport.NodeService::new(handlers~, probe~, outbox~, install_policy~)
 }
 
 ///|

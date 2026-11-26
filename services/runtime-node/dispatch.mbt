@@ -275,6 +275,486 @@ fn runtime_info_json(info : @runtime.RunInfo) -> @json.Json {
   info.to_json()
 }
 
+// ---------------------------------------------------------------------------
+// Policy classification (A1.3b)
+// ---------------------------------------------------------------------------
+
+///|
+/// The result of the local risk check for one request. `decision` is the same
+/// `@policy.PolicyDecision` the primary derives; it is attached to results as
+/// bounded metadata (never argv values).
+struct PolicyCheckResult {
+  decision : @policy.PolicyDecision
+  approval_verified : Bool
+}
+
+///|
+fn policy_denied_error(
+  decision : @policy.PolicyDecision,
+  operation : String,
+) -> @contracts.RpcError {
+  @contracts.RpcError::new(
+    @transport.ERR_POLICY_DENIED,
+    "operation denied by installed policy: " + decision.reason,
+    data=@contracts.json_object([
+      ("kind", @contracts.json_string("policy_denied")),
+      ("operation", @contracts.json_string(operation)),
+      ("risk", @contracts.json_string(decision.risk)),
+      ("reason", @contracts.json_string(decision.reason)),
+      ("digest", @contracts.json_string(decision.digest)),
+      ("policy_version", @contracts.json_string(decision.policy_version)),
+      ("policy_hash", @contracts.json_string(decision.policy_hash)),
+    ]),
+  )
+}
+
+///|
+fn policy_unverifiable_error(
+  decision : @policy.PolicyDecision,
+  operation : String,
+) -> @contracts.RpcError {
+  @contracts.RpcError::new(
+    @transport.ERR_POLICY_STALE,
+    "operation cannot be verified under the installed policy: " +
+    decision.reason,
+    data=@contracts.json_object([
+      ("kind", @contracts.json_string("policy_unverifiable")),
+      ("operation", @contracts.json_string(operation)),
+      ("risk", @contracts.json_string(decision.risk)),
+      ("reason", @contracts.json_string(decision.reason)),
+      ("digest", @contracts.json_string(decision.digest)),
+      ("policy_version", @contracts.json_string(decision.policy_version)),
+      ("policy_hash", @contracts.json_string(decision.policy_hash)),
+    ]),
+  )
+}
+
+///|
+fn approval_required_error(
+  decision : @policy.PolicyDecision,
+  operation : String,
+  binding_run_id : String,
+  snapshot_expires_at_ms : Int64,
+) -> @contracts.RpcError {
+  @contracts.RpcError::new(
+    @transport.ERR_APPROVAL_REQUIRED,
+    "owner approval is required for this operation",
+    data=@contracts.json_object([
+      ("kind", @contracts.json_string("approval_binding")),
+      ("operation", @contracts.json_string(operation)),
+      ("run_id", @contracts.json_string(binding_run_id)),
+      ("risk", @contracts.json_string(decision.risk)),
+      ("reason", @contracts.json_string(decision.reason)),
+      ("digest", @contracts.json_string(decision.digest)),
+      ("policy_version", @contracts.json_string(decision.policy_version)),
+      ("policy_hash", @contracts.json_string(decision.policy_hash)),
+      ("snapshot_expires_at_ms", @contracts.json_int64(snapshot_expires_at_ms)),
+    ]),
+  )
+}
+
+///|
+fn grant_rejected_error(error : @policy.GrantError) -> @contracts.RpcError {
+  @contracts.RpcError::new(
+    @transport.ERR_APPROVAL_INVALID,
+    error.message(),
+    data=@contracts.json_object([
+      ("kind", @contracts.json_string("grant_rejected")),
+      ("reason", @contracts.json_string(error.label())),
+    ]),
+  )
+}
+
+///|
+fn malformed_grant_error() -> @contracts.RpcError {
+  grant_rejected_error(@policy.GrantError::MalformedGrant)
+}
+
+///|
+/// Bind a Decision/grant to the operation it authorizes. `exec.start` uses
+/// its run id, `pty.open` its session id, and one-shot mutations their
+/// idempotent `client_request_id`. Without a binding id the request cannot be
+/// approved safely, so it is refused as invalid input rather than guessing.
+fn approval_binding_id(
+  method : String,
+  params : Map[String, @json.Json],
+  client_request_id : String,
+) -> Result[String, @contracts.RpcError] {
+  if method == @contracts.METHOD_RUNTIME_EXEC_START {
+    return require_safe_id(params, "run_id")
+  }
+  if method == @contracts.METHOD_RUNTIME_PTY_OPEN {
+    return require_safe_id(params, "session_id")
+  }
+  if client_request_id == "" {
+    return Err(
+      invalid_params(
+        "client_request_id is required for an approval-bound mutation",
+      ),
+    )
+  }
+  Ok(client_request_id)
+}
+
+///|
+fn env_names_for_policy(
+  params : Map[String, @json.Json],
+) -> Result[Array[String], @contracts.RpcError] {
+  let names : Array[String] = []
+  let env = match env_pairs(params) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  for pair in env {
+    names.push(pair.name)
+  }
+  let inherit = match string_array_param(params, "inherit_env") {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  for name in inherit {
+    names.push(name)
+  }
+  Ok(names)
+}
+
+///|
+/// The exact execution request the node classifies. It mirrors the primary's
+/// pre-check: same argv, same cwd resolution (empty cwd means the workspace
+/// root), same env *names*, same operation label. `None` means the method is a
+/// continuation or read-only method that cannot start new work.
+fn execution_request_for(
+  method : String,
+  params : Map[String, @json.Json],
+  workspace_root : String,
+) -> Result[@policy.ExecutionRequest?, @contracts.RpcError] {
+  let requested_cwd = optional_string(params, "cwd")
+  let cwd = if requested_cwd == "" {
+    workspace_root
+  } else {
+    requested_cwd
+  }
+  if method == @contracts.METHOD_RUNTIME_EXEC_START ||
+    method == @contracts.METHOD_RUNTIME_PTY_OPEN {
+    let argv = match require_argv(params) {
+      Ok(value) => value
+      Err(error) => return Err(error)
+    }
+    let names = match env_names_for_policy(params) {
+      Ok(value) => value
+      Err(error) => return Err(error)
+    }
+    let operation = if method == @contracts.METHOD_RUNTIME_EXEC_START {
+      @policy.PolicyOperation::Exec
+    } else {
+      @policy.PolicyOperation::Pty
+    }
+    return Ok(
+      Some(
+        @policy.ExecutionRequest::new(
+          operation~,
+          argv~,
+          cwd~,
+          workspace_root~,
+          env_names=names,
+        ),
+      ),
+    )
+  }
+  if method == @contracts.METHOD_RUNTIME_FS_WRITE {
+    let path = match require_string(params, "path") {
+      Ok(value) => value
+      Err(error) => return Err(error)
+    }
+    return Ok(
+      Some(
+        @policy.ExecutionRequest::new(
+          operation=@policy.PolicyOperation::FsWrite,
+          argv=[path],
+          cwd~,
+          workspace_root~,
+        ),
+      ),
+    )
+  }
+  if method == @contracts.METHOD_RUNTIME_GIT_BRANCH_CREATE {
+    let name = match require_string(params, "name") {
+      Ok(value) => value
+      Err(error) => return Err(error)
+    }
+    let start = optional_string(params, "start")
+    let argv = if start == "" {
+      ["branch.create", name]
+    } else {
+      ["branch.create", name, start]
+    }
+    return Ok(
+      Some(
+        @policy.ExecutionRequest::new(
+          operation=@policy.PolicyOperation::GitWrite,
+          argv~,
+          cwd~,
+          workspace_root~,
+        ),
+      ),
+    )
+  }
+  if method == @contracts.METHOD_RUNTIME_GIT_CHECKOUT {
+    let branch = match require_string(params, "branch") {
+      Ok(value) => value
+      Err(error) => return Err(error)
+    }
+    let argv = if bool_param_or(params, "create", false) {
+      ["checkout", branch, "create"]
+    } else {
+      ["checkout", branch]
+    }
+    return Ok(
+      Some(
+        @policy.ExecutionRequest::new(
+          operation=@policy.PolicyOperation::GitWrite,
+          argv~,
+          cwd~,
+          workspace_root~,
+        ),
+      ),
+    )
+  }
+  if method == @contracts.METHOD_RUNTIME_GIT_WORKTREE_ADD {
+    let path = match require_string(params, "path") {
+      Ok(value) => value
+      Err(error) => return Err(error)
+    }
+    let branch = optional_string(params, "branch")
+    let base = optional_string(params, "base")
+    let argv = ["worktree.add", path]
+    if branch != "" {
+      argv.push(branch)
+    }
+    if base != "" {
+      argv.push(base)
+    }
+    return Ok(
+      Some(
+        @policy.ExecutionRequest::new(
+          operation=@policy.PolicyOperation::GitWrite,
+          argv~,
+          cwd~,
+          workspace_root~,
+        ),
+      ),
+    )
+  }
+  if method == @contracts.METHOD_RUNTIME_GIT_WORKTREE_REMOVE {
+    let path = match require_string(params, "path") {
+      Ok(value) => value
+      Err(error) => return Err(error)
+    }
+    return Ok(
+      Some(
+        @policy.ExecutionRequest::new(
+          operation=@policy.PolicyOperation::GitWrite,
+          argv=["worktree.remove", path],
+          cwd~,
+          workspace_root~,
+        ),
+      ),
+    )
+  }
+  Ok(None)
+}
+
+///|
+fn attach_policy_metadata(
+  result : @json.Json,
+  check : PolicyCheckResult,
+) -> @json.Json {
+  let object = match @contracts.as_object(result) {
+    Some(value) => value
+    None => return result
+  }
+  object.set("policy", check.decision.to_json())
+  if check.approval_verified {
+    object.set("approval_verified", @contracts.json_bool(true))
+  }
+  @json.Json::object(object)
+}
+
+///|
+/// Classify one request under the installed snapshot and enforce the result.
+///
+/// - `snapshot` mode: `evaluate` runs the same policy the primary runs.
+///   `Allow` proceeds, `Deny` returns 1011, `Unverifiable` returns 1006, and
+///   `ApprovalRequired` needs a grant bound to this run and digest; the grant
+///   nonce is consumed exactly once before execution.
+/// - `override`/`fail_closed`: no typed snapshot, so the workspace-root gate
+///   (already enforced before this call) is the whole check. Reads are
+///   audited; mutations under override are audited as operator-overridden.
+fn NodeHost::classify_policy(
+  self : NodeHost,
+  request : @transport.HandlerRequest,
+) -> Result[PolicyCheckResult?, @contracts.RpcError] {
+  let method = request.rpc_method
+  let snapshot = match self.policy.verified_snapshot() {
+    Some(value) => value
+    None => {
+      let override = @contracts.runtime_method_mutates(method)
+      let outcome = if override {
+        "operator_override"
+      } else {
+        "read_unverified"
+      }
+      let detail = "method=" +
+        method +
+        " mode=" +
+        self.policy.mode() +
+        " outcome=" +
+        outcome
+      node_audit(self, "policy.decision", "ok", detail)
+      return Ok(None)
+    }
+  }
+  let execution = match
+    execution_request_for(method, request.params, self.workspace_root) {
+    Ok(Some(value)) => value
+    Ok(None) => {
+      node_audit(
+        self,
+        "policy.decision",
+        "read_only",
+        "method=" +
+        method +
+        " policy_version=" +
+        snapshot.version +
+        " outcome=control",
+      )
+      return Ok(None)
+    }
+    Err(error) => return Err(error)
+  }
+  let context = @policy.PolicyContext::with_snapshot(
+    snapshot,
+    now_ms=@async.now(),
+    primary_reachable=true,
+  )
+  let decision = @policy.evaluate(context, execution)
+  let operation = execution.operation.label()
+  let detail = "method=" +
+    method +
+    " operation=" +
+    operation +
+    " risk=" +
+    decision.risk +
+    " kind=" +
+    decision.kind.label() +
+    " digest=" +
+    decision.digest +
+    " policy_version=" +
+    decision.policy_version
+  match decision.kind {
+    @policy.DecisionKind::Allow => {
+      node_audit(self, "policy.decision", decision.kind.label(), detail)
+      Ok(Some({ decision, approval_verified: false }))
+    }
+    @policy.DecisionKind::Deny => {
+      node_audit(self, "policy.decision", decision.kind.label(), detail)
+      Err(policy_denied_error(decision, operation))
+    }
+    @policy.DecisionKind::Unverifiable => {
+      node_audit(self, "policy.decision", decision.kind.label(), detail)
+      Err(policy_unverifiable_error(decision, operation))
+    }
+    @policy.DecisionKind::ApprovalRequired => {
+      let binding_run_id = match
+        approval_binding_id(method, request.params, request.client_request_id) {
+        Ok(value) => value
+        Err(error) => return Err(error)
+      }
+      let grant_text = match
+        @contracts.string_field(request.params, "approval") {
+        Some(value) => value
+        None => ""
+      }
+      if grant_text == "" {
+        node_audit(
+          self,
+          "policy.decision",
+          decision.kind.label(),
+          detail + " run_id=" + binding_run_id + " outcome=waiting_for_owner",
+        )
+        return Err(
+          approval_required_error(
+            decision,
+            operation,
+            binding_run_id,
+            snapshot.expires_at_ms,
+          ),
+        )
+      }
+      let grant = match @policy.ApprovalGrant::decode(grant_text) {
+        Ok(value) => value
+        Err(_) => {
+          node_audit(
+            self,
+            "policy.approval_rejected",
+            "rejected",
+            detail + " reason=malformed_grant",
+          )
+          return Err(malformed_grant_error())
+        }
+      }
+      match
+        @policy.verify_and_consume_for_request(
+          grant,
+          binding_run_id,
+          execution,
+          Some(snapshot),
+          @async.now(),
+          self.nonces,
+        ) {
+        Ok(_) => {
+          node_audit(
+            self,
+            "policy.approval_used",
+            decision.kind.label(),
+            detail + " run_id=" + binding_run_id + " outcome=consumed",
+          )
+          Ok(Some({ decision, approval_verified: true }))
+        }
+        Err(error) => {
+          node_audit(
+            self,
+            "policy.approval_rejected",
+            "rejected",
+            detail +
+            " run_id=" +
+            binding_run_id +
+            " reason=" +
+            error.label(),
+          )
+          Err(grant_rejected_error(error))
+        }
+      }
+    }
+  }
+}
+
+///|
+/// Combined workspace-root and policy gate for one request. Keeping both checks
+/// in one synchronous place lets `dispatch` stay a single decision point: the
+/// cache is consulted only after the gate passed, so a replayed mutating
+/// request can never bypass a rotated or unverifiable policy.
+fn NodeHost::policy_gate(
+  self : NodeHost,
+  request : @transport.HandlerRequest,
+) -> Result[PolicyCheckResult?, @contracts.RpcError] {
+  match self.policy.authorize(request.rpc_method, self.workspace_root) {
+    Ok(_) => ()
+    Err(error) => return Err(error)
+  }
+  self.classify_policy(request)
+}
+
 ///|
 pub async fn NodeHost::dispatch(
   self : NodeHost,
@@ -282,8 +762,10 @@ pub async fn NodeHost::dispatch(
   group : @async.TaskGroup[Unit],
 ) -> Result[@json.Json, @contracts.RpcError] {
   let method = request.rpc_method
-  match self.policy.authorize(method, self.workspace_root) {
-    Ok(_) => ()
+  // The policy check runs before the idempotency cache so a revoked, stale or
+  // rotated policy cannot be bypassed by replaying a cached mutating request.
+  let check = match self.policy_gate(request) {
+    Ok(value) => value
     Err(error) => return Err(error)
   }
   let crid = request.client_request_id
@@ -292,13 +774,16 @@ pub async fn NodeHost::dispatch(
     None => ()
   }
   let result = self.dispatch_inner(request, group)
-  match result {
-    Ok(value) => {
-      self.cache.remember(method, crid, value)
-      Ok(value)
-    }
-    Err(error) => Err(error)
+  let value = match result {
+    Ok(value) => value
+    Err(error) => return Err(error)
   }
+  let stamped = match check {
+    Some(metadata) => attach_policy_metadata(value, metadata)
+    None => value
+  }
+  self.cache.remember(method, crid, stamped)
+  Ok(stamped)
 }
 
 ///|

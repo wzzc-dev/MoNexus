@@ -190,6 +190,10 @@ pub const ERR_PATH_DENIED : Int = 1009
 pub const ERR_RESULT_TOO_LARGE : Int = 1010
 
 ///|
+/// The installed policy explicitly denies the operation (A1.3b).
+pub const ERR_POLICY_DENIED : Int = 1011
+
+///|
 /// JSON-RPC method names in the runtime namespace.
 pub const METHOD_PAIR : String = "runtime.pair"
 
@@ -221,6 +225,15 @@ pub const METHOD_DRAIN : String = "runtime.drain"
 pub const METHOD_REPLAY_GAP : String = "runtime.replay_gap"
 
 ///|
+/// Primary→node policy snapshot update (notification). The params object is a
+/// `PolicyAnnouncement` (A1.3b).
+pub const METHOD_POLICY_UPDATE : String = "runtime.policy.update"
+
+///|
+/// Node→primary acknowledgement of an installed or rejected snapshot.
+pub const METHOD_POLICY_ACK : String = "runtime.policy.ack"
+
+///|
 /// Transport-owned methods cannot be replaced through the handler registry.
 pub fn reserved_method(method : String) -> Bool {
   method == METHOD_PAIR ||
@@ -232,7 +245,9 @@ pub fn reserved_method(method : String) -> Bool {
   method == METHOD_EVENT ||
   method == METHOD_ACK ||
   method == METHOD_DRAIN ||
-  method == METHOD_REPLAY_GAP
+  method == METHOD_REPLAY_GAP ||
+  method == METHOD_POLICY_UPDATE ||
+  method == METHOD_POLICY_ACK
 }
 
 ///|

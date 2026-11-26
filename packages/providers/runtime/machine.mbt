@@ -43,14 +43,28 @@ fn invalid_machine_result(message : String) -> @contracts.RpcError {
 pub(all) struct RuntimeMachine {
   state : @transport.PrimaryState
   runtime_id : String
+  /// Pending owner approvals, keyed by `method|binding id`. The primary keeps
+  /// the Decision; this map only remembers the binding (nonce, decision id and
+  /// policy version) so a reconnect resumes the same Decision instead of
+  /// asking the owner again. It is bounded and holds no argv values.
+  pending_approvals : Map[String, PendingApproval]
+  pending_order : Array[String]
 }
+
+///|
+pub const MAX_PENDING_APPROVALS : Int = 64
 
 ///|
 pub fn RuntimeMachine::new(
   state : @transport.PrimaryState,
   runtime_id : String,
 ) -> RuntimeMachine {
-  { state, runtime_id }
+  {
+    state,
+    runtime_id,
+    pending_approvals: Map([]),
+    pending_order: [],
+  }
 }
 
 ///|
@@ -94,7 +108,27 @@ async fn RuntimeMachine::request(
   }
   // `client_request_id` is optional at the transport layer; application
   // methods that need it validate it themselves.
-  channel.request(rpc_method, params)
+  let result = channel.request(rpc_method, params)
+  match result {
+    Ok(_) =>
+      self.state.record_audit(
+        "runtime.request",
+        self.runtime_id,
+        "ok",
+        "method=" + rpc_method,
+      )
+    Err(error) =>
+      self.state.record_audit(
+        "runtime.request",
+        self.runtime_id,
+        "error",
+        "method=" +
+        rpc_method +
+        " code=" +
+        error.code.to_string(),
+      )
+  }
+  result
 }
 
 ///|
@@ -127,6 +161,8 @@ pub(all) struct RuntimeProbe {
   arch : String
   hostname : String
   policy : String
+  policy_version : String
+  policy_hash : String
   state_version : Int
 }
 
@@ -147,6 +183,8 @@ pub fn RuntimeProbe::to_json(self : RuntimeProbe) -> @json.Json {
       ]),
     ),
     ("policy", @contracts.json_string(self.policy)),
+    ("policy_version", @contracts.json_string(self.policy_version)),
+    ("policy_hash", @contracts.json_string(self.policy_hash)),
     ("state_version", @contracts.json_int(self.state_version)),
   ])
 }
@@ -250,6 +288,8 @@ pub fn RuntimeProbe::from_json(json : @json.Json) -> RuntimeProbe? {
     arch: @contracts.string_field_or(platform_object, "arch", ""),
     hostname: @contracts.string_field_or(platform_object, "hostname", ""),
     policy: @contracts.string_field_or(object, "policy", ""),
+    policy_version: @contracts.string_field_or(object, "policy_version", ""),
+    policy_hash: @contracts.string_field_or(object, "policy_hash", ""),
     state_version: @contracts.int_field_or(object, "state_version", 0),
   })
 }

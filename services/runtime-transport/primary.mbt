@@ -127,6 +127,11 @@ pub struct PrimaryState {
   /// observe run progress without a second durable store. The outbox remains
   /// the node's only durable log.
   recent_events : Array[(String, WireEvent)]
+  /// The current policy snapshot announcement (A1.3b). The primary is the only
+  /// authority for policy: it publishes the snapshot to every live node and
+  /// repeats it in the `runtime.hello` result so a reconnect always receives
+  /// the current version. Not durable; the host re-publishes after restart.
+  policy_publication : Ref[PolicyAnnouncement?]
 }
 
 ///|
@@ -172,6 +177,7 @@ pub async fn PrimaryState::open_with_clock(
     draining: Ref(false),
     channels: Map([]),
     recent_events: [],
+    policy_publication: Ref(None),
   }
   match snapshot {
     Some(value) => {
@@ -1161,6 +1167,111 @@ pub fn PrimaryState::drop_channel(
 ///|
 pub fn PrimaryState::channel_count(self : PrimaryState) -> Int {
   self.channels.length()
+}
+
+// ---------------------------------------------------------------------------
+// Policy snapshot distribution (A1.3b)
+// ---------------------------------------------------------------------------
+
+///|
+/// The currently published policy announcement, if any. `runtime.hello`
+/// repeats it on every connect so a node that was offline catches up.
+pub fn PrimaryState::policy_announcement(
+  self : PrimaryState,
+) -> PolicyAnnouncement? {
+  self.policy_publication.val
+}
+
+///|
+/// Publish (or replace) the policy snapshot. The announcement is remembered
+/// for future hellos and pushed to every live channel as
+/// `runtime.policy.update`. A node that cannot receive it keeps its previous
+/// snapshot and fails closed for operations the stale snapshot cannot verify.
+///
+/// Publishing a new version also invalidates outstanding approval grants:
+/// grants name the policy version, and the node verifies against the snapshot
+/// now installed, so a grant minted under the old version no longer matches.
+pub async fn PrimaryState::publish_policy(
+  self : PrimaryState,
+  snapshot : @policy.PolicySnapshot,
+) -> Result[PolicyAnnouncement, String] {
+  let announcement = match PolicyAnnouncement::from_snapshot(snapshot) {
+    Ok(value) => value
+    Err(message) => return Err(message)
+  }
+  self.policy_publication.val = Some(announcement)
+  let now_ms = (self.now)()
+  self.audit.record(
+    "policy.version_published",
+    "",
+    "ok",
+    "version=" +
+    clamp_text(announcement.version, 128) +
+    " hash=" +
+    announcement.hash +
+    " expires_at_ms=" +
+    snapshot.expires_at_ms.to_string(),
+    now_ms,
+  )
+  let channels : Array[SessionChannel] = []
+  for _runtime_id, channel in self.channels {
+    channels.push(channel)
+  }
+  let mut delivered = 0
+  let mut failed = 0
+  for channel in channels {
+    match channel.notify(METHOD_POLICY_UPDATE, announcement.to_params()) {
+      Ok(_) => delivered = delivered + 1
+      Err(_) => failed = failed + 1
+    }
+  }
+  self.audit.record(
+    "policy.version_delivered",
+    "",
+    if failed > 0 {
+      "partial"
+    } else {
+      "ok"
+    },
+    "version=" +
+    clamp_text(announcement.version, 128) +
+    " delivered=" +
+    delivered.to_string() +
+    " failed=" +
+    failed.to_string(),
+    now_ms,
+  )
+  Ok(announcement)
+}
+
+///|
+/// Whether an acknowledgement names the currently published snapshot. An ack
+/// for an older version means the node missed an update (or acknowledged a
+/// stale one) and is audited as rejected rather than silently accepted.
+pub fn PrimaryState::policy_ack_matches(
+  self : PrimaryState,
+  version : String,
+  hash : String,
+) -> Bool {
+  match self.policy_publication.val {
+    Some(announcement) =>
+      announcement.version == version && announcement.hash == hash
+    None => false
+  }
+}
+
+///|
+/// Record a primary-side audit event. The runtime machine provider uses this
+/// for policy/approval decisions: the primary owns audit, the node keeps only
+/// its snapshot and result cache.
+pub fn PrimaryState::record_audit(
+  self : PrimaryState,
+  action : String,
+  subject : String,
+  outcome : String,
+  detail : String,
+) -> Unit {
+  self.audit.record(action, subject, outcome, detail, (self.now)())
 }
 
 ///|

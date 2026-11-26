@@ -1,5 +1,6 @@
 import {
   "monexus/contracts" @contracts,
+  "monexus/policy" @policy,
   "monexus/git-runtime" @git_runtime,
   "monexus/runtime" @runtime,
   "monexus/pty-runtime" @pty_runtime,
