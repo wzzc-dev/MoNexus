@@ -229,6 +229,73 @@ target. The round-1 remote-agent PoC is gated: start the host with
 over `ssh -T` (see `docs/usage.md` §4). This is a PoC — `agent.probe`,
 `agent.resume` and `agent.start` env forwarding are still local-only.
 
+## Triggers
+
+**Every `trigger.*` call returns `unsupported`.** The feature flag is off.
+Start the host with `--trigger-enabled true` (or
+`MONEXUS_TRIGGER_ENABLED=1`) and retry. While off, `/hooks/*` returns the
+uniform 401 and existing Task/Run/Decision behavior is unchanged.
+
+**`trigger.create` rejects a timezone as `unsupported`.** IANA zones need
+readable TZif data: set `MONEXUS_TZDATA_DIR` or install system tzdata
+(`/usr/share/zoneinfo`). Invalid names, unreadable files and parse failures
+are rejected rather than falling back to UTC. `UTC` and fixed `±HH:MM`
+offsets never need tzdata. IANA-zone behavior is verified on Linux native/CI;
+other platforms have not been exercised — verify tzdata availability there
+before relying on named zones.
+
+**A schedule trigger is not firing.** `trigger.get` shows `state`,
+`next_fire_at` and the recent fire ledger. Check the trigger is `active` (not
+disabled/expired), the host clock is sane, and the slot is actually due for
+the configured zone. A restart applies the missed policy once: `skip` creates
+no catch-up Task, `coalesce_once` creates at most one (`coalesced=true`).
+`trigger.fire` is the manual path for a one-off test.
+
+**A webhook gets 401.** This is deliberately uniform for unknown/disabled
+key, revoked key, bad signature, stale timestamp, replay and nonce reuse; the
+detailed `reason` is only in the `trigger.rejected` event. Check that the key
+belongs to this trigger, the timestamp is fresh (default ±300 s), the nonce is
+16–64 characters, and the signature is HMAC-SHA256 over the exact bytes
+`monexus-webhook-v1\n<key_id>\n<trigger_id>\n<timestamp>\n<nonce>\n<raw_body>`
+using the hex-encoded 32-byte secret from the key file. A proxy must not
+rewrite the body or path.
+
+**A webhook gets 429 or 413.** 429 means the per-trigger, per-key or global
+token bucket is exhausted; honor `Retry-After`. The rejection audit coalesces
+to at most one event per trigger per minute with `suppressed_count`. 413 means
+the body exceeded the configured limit. Both happen before any Task exists.
+
+**A retry creates no second Task.** Reusing the same
+`X-Monexus-Delivery-Id` (or the same nonce with the same body) returns 202
+with `duplicate=true` and the original `task_id`. A different body with a
+reused nonce is 401 `nonce_reuse`.
+
+**A trigger Task stays `planned`.** That is `target.start_run=false`. Set
+`start_run=true` together with `agent_id` and `workspace_id`; the Task is then
+created `ready` and the host queues one agent Run after the Task commit. If a
+crash lands between the two commits, restarting with triggers enabled starts
+the pending Run with the same idempotency key.
+
+**A trigger-created Run stays `waiting_approval`.** That is the existing
+Decision flow, not a trigger failure. Answer it from the owner Inbox. The
+trigger cannot answer or grant it. Denying the permission, or letting the
+Decision expire, makes the Run not-successful; the ACP adapter may still end
+its turn normally, so use the Run status and Decision record as the outcome,
+not just the adapter transcript.
+
+**Disabling a trigger did not stop an existing Run.** By design: disable
+stops new Tasks and does not cancel work or pending Decisions. Use
+`run.cancel`/`task.cancel` for that. Duplicate disable is idempotent; an
+expired trigger needs `enabled=true` and a future `expires_at` to become
+active again.
+
+**`scripts/trigger_smoke.sh` fails immediately.** It needs the built host
+binary plus `jq`, `curl`, `openssl`, `python3` and `node` on `PATH`; export
+the moon/node paths used by the other smoke scripts. It uses temporary
+HOME/state/workspace directories and loopback-only hosts, and intentionally
+waits through a real missed schedule window (~2 minutes), so it is slower than
+the other smokes. A failure prints the assertion, RPC output and host log.
+
 ## Acceptance and tests
 
 **Acceptance fails at P0 packaging.** Read the kept `package.log`; then run

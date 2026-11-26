@@ -341,6 +341,12 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
       allow_failure=true,
       async fn() { environment_reconcile_loop(state) },
     )
+    // A3.2: repair the Task-then-Run split for fires committed before a
+    // crash and queue Runs for fires created by the startup schedule pass.
+    // This needs the task group, because run dispatch spawns an executor.
+    if options.trigger_enabled {
+      trigger_start_pending_runs(state)
+    }
     server.run_forever(allow_failure=true, max_connections=64) <|
     ((request, _body, conn) => {
       handle_connection(state, request, conn)

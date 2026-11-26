@@ -1288,6 +1288,16 @@ async fn trigger_webhook_process(
     }
   }
   state.mutex.release()
+  // A committed fire may queue its one agent Run through the existing
+  // run.create handler. Rejected/duplicate commits are no-ops here: the
+  // ledger row either does not exist or already carries a run_id.
+  match trigger_start_run_for_fire(state, trigger.id, fire_key) {
+    Ok(_) => ()
+    Err(message) =>
+      println(
+        "monexus-host: cannot start run for webhook trigger fire: " + message,
+      )
+  }
   match outcome {
     Ok(@machines.WebhookFireNonceReuse) =>
       trigger_webhook_audit(

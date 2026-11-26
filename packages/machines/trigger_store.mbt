@@ -66,6 +66,7 @@ fn trigger_store_migrate(
     "key_id TEXT NOT NULL DEFAULT '', " +
     "task_id TEXT NOT NULL DEFAULT '', " +
     "run_id TEXT NOT NULL DEFAULT '', " +
+    "run_intent INTEGER NOT NULL DEFAULT 0, " +
     "coalesced INTEGER NOT NULL DEFAULT 0, " +
     "depth INTEGER NOT NULL DEFAULT 1, " +
     "created_at TEXT NOT NULL" +
@@ -167,6 +168,23 @@ fn trigger_store_migrate(
   } catch {
     _ => ()
   }
+  // A3.2: a fire records whether its Task was created with `start_run=true`.
+  // Rows migrated from A3.1 default to no-run so flipping a trigger to
+  // `start_run=true` cannot start Runs for historical Tasks. A fire already
+  // linked to a Run keeps its intent.
+  let _ = try {
+    exec_raise(
+      conn,
+      "ALTER TABLE trigger_fires ADD COLUMN " +
+      "run_intent INTEGER NOT NULL DEFAULT 0",
+    )
+  } catch {
+    _ => ()
+  }
+  exec_raise(
+    conn,
+    "UPDATE trigger_fires SET run_intent=1 WHERE run_id != ''",
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -368,8 +386,8 @@ fn trigger_fire_put_raw(
   let stmt = conn.prepare(
     "INSERT INTO trigger_fires (" +
     "id,trigger_id,source,fire_key,event_id,scheduled_for_ms,key_id," +
-    "task_id,run_id,coalesced,depth,created_at" +
-    ") VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) " +
+    "task_id,run_id,run_intent,coalesced,depth,created_at" +
+    ") VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) " +
     "ON CONFLICT(trigger_id, fire_key) DO NOTHING",
   )
   stmt.bind(index=1, fire.id)
@@ -381,9 +399,10 @@ fn trigger_fire_put_raw(
   stmt.bind(index=7, fire.key_id)
   stmt.bind(index=8, fire.task_id)
   stmt.bind(index=9, fire.run_id)
-  stmt.bind(index=10, if fire.coalesced { 1L } else { 0L })
-  stmt.bind(index=11, fire.depth.to_int64())
-  stmt.bind(index=12, fire.created_at)
+  stmt.bind(index=10, if fire.run_intent { 1L } else { 0L })
+  stmt.bind(index=11, if fire.coalesced { 1L } else { 0L })
+  stmt.bind(index=12, fire.depth.to_int64())
+  stmt.bind(index=13, fire.created_at)
   let _ = stmt.step()
   stmt.finalize()
 }
@@ -554,7 +573,7 @@ pub fn MachineStore::get_trigger_fire_row(
   try {
     let stmt = self.conn.prepare(
       "SELECT id,trigger_id,source,fire_key,event_id,scheduled_for_ms," +
-      "key_id,task_id,run_id,coalesced,depth,created_at " +
+      "key_id,task_id,run_id,run_intent,coalesced,depth,created_at " +
       "FROM trigger_fires WHERE trigger_id=?1 AND fire_key=?2",
     )
     stmt.bind(index=1, trigger_id)
@@ -570,9 +589,10 @@ pub fn MachineStore::get_trigger_fire_row(
       let key_id : String = stmt.column(index=6)
       let task_id : String = stmt.column(index=7)
       let run_id : String = stmt.column(index=8)
-      let coalesced : Int64 = stmt.column(index=9)
-      let depth : Int64 = stmt.column(index=10)
-      let created_at : String = stmt.column(index=11)
+      let run_intent_flag : Int64 = stmt.column(index=9)
+      let coalesced : Int64 = stmt.column(index=10)
+      let depth : Int64 = stmt.column(index=11)
+      let created_at : String = stmt.column(index=12)
       found = @contracts.TriggerFire::new(
         id~,
         trigger_id=row_trigger_id,
@@ -583,6 +603,7 @@ pub fn MachineStore::get_trigger_fire_row(
         key_id~,
         task_id~,
         run_id~,
+        run_intent=run_intent_flag != 0L,
         coalesced=coalesced != 0L,
         depth=depth.to_int(),
         created_at~,
@@ -606,7 +627,7 @@ pub fn MachineStore::get_trigger_fires(
   try {
     let stmt = self.conn.prepare(
       "SELECT id,trigger_id,source,fire_key,event_id,scheduled_for_ms," +
-      "key_id,task_id,run_id,coalesced,depth,created_at " +
+      "key_id,task_id,run_id,run_intent,coalesced,depth,created_at " +
       "FROM trigger_fires WHERE trigger_id=?1 " +
       "ORDER BY created_at DESC, id DESC LIMIT ?2",
     )
@@ -623,9 +644,10 @@ pub fn MachineStore::get_trigger_fires(
       let key_id : String = stmt.column(index=6)
       let task_id : String = stmt.column(index=7)
       let run_id : String = stmt.column(index=8)
-      let coalesced : Int64 = stmt.column(index=9)
-      let depth : Int64 = stmt.column(index=10)
-      let created_at : String = stmt.column(index=11)
+      let run_intent_flag : Int64 = stmt.column(index=9)
+      let coalesced : Int64 = stmt.column(index=10)
+      let depth : Int64 = stmt.column(index=11)
+      let created_at : String = stmt.column(index=12)
       out.push(
         @contracts.TriggerFire::new(
           id~,
@@ -637,6 +659,98 @@ pub fn MachineStore::get_trigger_fires(
           key_id~,
           task_id~,
           run_id~,
+          run_intent=run_intent_flag != 0L,
+          coalesced=coalesced != 0L,
+          depth=depth.to_int(),
+          created_at~,
+        ),
+      )
+    }
+    stmt.finalize()
+    Ok(out)
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
+/// Link the Run created for a fire back into the dedupe/audit ledger. The
+/// Task transaction and `run.create` are separate commits (ADR-0014 §5), so
+/// this write closes the link after the Run is durable. A repeated call is a
+/// no-op: the first non-empty `run_id` wins.
+pub fn MachineStore::set_trigger_fire_run_id(
+  self : MachineStore,
+  trigger_id : String,
+  fire_key : String,
+  run_id : String,
+) -> Result[Bool, String] {
+  if run_id == "" {
+    return Ok(false)
+  }
+  try {
+    let stmt = self.conn.prepare(
+      "UPDATE trigger_fires SET run_id=?3 " +
+      "WHERE trigger_id=?1 AND fire_key=?2 AND run_id='' AND run_intent=1",
+    )
+    stmt.bind(index=1, trigger_id)
+    stmt.bind(index=2, fire_key)
+    stmt.bind(index=3, run_id)
+    let _ = stmt.step()
+    let changed = (self.conn.changes() > 0L)
+    stmt.finalize()
+    Ok(changed)
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
+/// Fires whose Task was committed but whose Run was not (crash between the
+/// Task transaction and `run.create`). Oldest first, bounded. The caller
+/// re-invokes `run.create` with the same idempotency key, so a retry either
+/// creates the Run once or observes the already-created one (ADR-0014 §5).
+pub fn MachineStore::get_trigger_fires_missing_run(
+  self : MachineStore,
+  trigger_id : String,
+  limit : Int,
+) -> Result[Array[@contracts.TriggerFire], String] {
+  try {
+    let stmt = self.conn.prepare(
+      "SELECT id,trigger_id,source,fire_key,event_id,scheduled_for_ms," +
+      "key_id,task_id,run_id,run_intent,coalesced,depth,created_at " +
+      "FROM trigger_fires WHERE trigger_id=?1 AND run_id='' " +
+      "AND run_intent=1 " +
+      "ORDER BY created_at ASC, id ASC LIMIT ?2",
+    )
+    stmt.bind(index=1, trigger_id)
+    stmt.bind(index=2, limit.max(0).min(100).to_int64())
+    let out : Array[@contracts.TriggerFire] = []
+    while stmt.step() {
+      let id : String = stmt.column(index=0)
+      let trigger_id : String = stmt.column(index=1)
+      let source : String = stmt.column(index=2)
+      let fire_key : String = stmt.column(index=3)
+      let event_id : String = stmt.column(index=4)
+      let scheduled_for_ms : Int64 = stmt.column(index=5)
+      let key_id : String = stmt.column(index=6)
+      let task_id : String = stmt.column(index=7)
+      let run_id : String = stmt.column(index=8)
+      let run_intent_flag : Int64 = stmt.column(index=9)
+      let coalesced : Int64 = stmt.column(index=10)
+      let depth : Int64 = stmt.column(index=11)
+      let created_at : String = stmt.column(index=12)
+      out.push(
+        @contracts.TriggerFire::new(
+          id~,
+          trigger_id~,
+          source~,
+          fire_key~,
+          event_id~,
+          scheduled_for_ms~,
+          key_id~,
+          task_id~,
+          run_id~,
+          run_intent=run_intent_flag != 0L,
           coalesced=coalesced != 0L,
           depth=depth.to_int(),
           created_at~,

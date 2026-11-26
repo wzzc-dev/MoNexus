@@ -836,7 +836,43 @@ async fn run_agent_step(
         value.status == @contracts.RUN_STATUS_CANCELLED
       _ => false
     }
+    // A permission request pauses the turn. The Run must keep waiting while
+    // the Decision is pending, and must not succeed when the owner denied it
+    // or the decision expired. The ACP reply (written by decision.respond)
+    // resumes the same session for an allow.
+    let mut decision_failure = ""
+    match state.store.list_decisions("", session_id) {
+      Ok(decisions) =>
+        for decision in decisions {
+          if decision.kind != @contracts.DECISION_KIND_PERMISSION {
+            continue
+          }
+          if decision.status == @contracts.DECISION_STATUS_EXPIRED {
+            decision_failure = "permission decision expired: " + decision.id
+          } else if decision.status == @contracts.DECISION_STATUS_ANSWERED {
+            let mut rejected = decision.option_id == "" ||
+              decision.option_id.has_prefix("reject")
+            for option in decision.options {
+              if option.option_id == decision.option_id &&
+                option.kind.has_prefix("reject") {
+                rejected = true
+              }
+            }
+            if rejected {
+              decision_failure = "permission denied by owner: " + decision.id
+            } else if decision.delivery_error != "" {
+              decision_failure = "permission answer was not delivered: " +
+                decision.delivery_error
+            }
+          }
+        }
+      Err(_) => ()
+    }
     state.mutex.release()
+    if decision_failure != "" {
+      failure = decision_failure
+      break
+    }
     match record {
       Some(session) => {
         if cancelled {
@@ -857,10 +893,6 @@ async fn run_agent_step(
             } else {
               " (" + session.last_error + ")"
             })
-          break
-        }
-        if session.state == "waiting_decision" {
-          failure = "agent session is waiting for a decision"
           break
         }
       }

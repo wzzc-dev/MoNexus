@@ -504,6 +504,20 @@ async fn record_permission_decision(
     state.mutex.release()
     return
   }
+  // Link a Run-owned ACP session to its Run so the Inbox, audit trail and
+  // cancellation can find it. Standalone agent sessions keep run_id="".
+  let mut run_id = ""
+  match state.store.list_runs("", "") {
+    Ok(runs) =>
+      for run in runs {
+        if run_id == "" &&
+          run.session_id == runtime.id &&
+          !@contracts.run_status_is_terminal(run.status) {
+          run_id = run.id
+        }
+      }
+    Err(_) => ()
+  }
   let decision = @contracts.DecisionRecord::new(
     id=@contracts.new_id("dec", now),
     kind=@contracts.DECISION_KIND_PERMISSION,
@@ -513,6 +527,7 @@ async fn record_permission_decision(
     agent_id=runtime.agent_id,
     options=permission_options(params),
     created_at=timestamp,
+    run_id~,
   )
   let _ = state.append_decision_event(
     @contracts.EVENT_DECISION_REQUESTED,

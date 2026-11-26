@@ -714,6 +714,9 @@ async fn trigger_schedule_startup(state : HostState) -> Result[Unit, String] {
     }
     let outcome = trigger_schedule_process_locked(state, fresh, zone, now_ms)
     state.mutex.release()
+    // Run creation waits until the task group exists (serve() calls
+    // trigger_start_pending_runs after the group is installed); dispatching
+    // here would leave a Run marked running with no executor.
     match outcome {
       Ok(_) => ()
       Err(message) =>
@@ -908,7 +911,7 @@ async fn trigger_schedule_loop(state : HostState) -> Unit {
       let outcome = trigger_schedule_process_locked(state, fresh, zone, now_ms)
       state.mutex.release()
       match outcome {
-        Ok(_) => ()
+        Ok(_) => trigger_start_pending_runs_for_trigger(state, record.id)
         Err(message) =>
           println(
             "monexus-host: schedule " + record.id + " failed: " + message,

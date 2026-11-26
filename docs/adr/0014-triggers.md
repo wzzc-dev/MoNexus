@@ -422,6 +422,25 @@ A3 的验收按 `docs/v0.2-plan.md` §2.3，测试可离线重复运行：
 - **A3.2 集成/测试**：Task→Run→ACP→Decision 全链路、重启/重放/停机/风暴矩阵、`trigger_smoke.sh`、回归与 CI。对应验收 4、5 与整体回归。
 - 每个阶段可独立启用/停用；A3.2 通过后才把 `trigger.enabled` 交给 owner 开启。
 
+## A3.2 实施记录（2026-11-26）
+
+A3.0/A3.1 合入后完成 A3.2 集成与验收；A3 仍保持 **默认关闭**，由 owner 在验收签署后显式开启。本次只做集成、端到端测试、smoke 脚本与文档，未新增触发器功能，未改动 runtime/policy/pty/git/transport/providers/desktop。
+
+集成修复（均由验收测试复现）：
+
+1. **`start_run=true` 落地**：Task 提交后经既有 `run.create` 排一个 `mode=agent` Run，幂等键 `trigger:<trigger_id>:<fire_key>`；`trigger_fires.run_id` 回填，另写 `trigger.run.start` 审计（source、fire_key、task_id、run_id）。事件/日程/webhook/manual 四条路径都在提交后走同一函数；`serve()` 在 `reconcile_runs` 之后补跑 `trigger_start_pending_runs`，修复「Task 已提交、Run 未提交」的崩溃窗口，且不重复执行。
+2. **Permission Decision 关联 Run**：`record_permission_decision` 通过 `run.session_id` 反查非终态 Run 并写入 `run_id`（独立 session 保持为空），使审计、取消与过期能关联到 Run。
+3. **审批等待与拒绝语义**：`run_agent_step` 不再在 session 进入 `waiting_decision` 时立即失败；它等待 owner 应答，拒绝选项、已过期 Decision 或未送达的 answer 使 Run `failed`，允许后继续到 ACP 会话结束。此前实现会在 owner 应答前就结束 Run，属测试证明的缺陷。
+
+验收覆盖：`scripts/trigger_smoke.sh`（Linux native）覆盖功能开关、创建/停用/过期、事件恰好一次（重复投递、游标回退、重启）、`ignore_self`、级联深度 8 与 ping-pong 有界、日程首 slot/重复 tick/停机 skip 与 coalesce、webhook 签名成功/重放/nonce 复用/过期/坏签名 401/429 限流与合并审计、密钥 0600 与 secret 不进入事件/日志/DB、Task→Agent Run→ACP permission→Decision→拒绝后 Run 不成功、审计关联 source/fire_key/Task/Run。脚本使用临时 HOME/state/workspace 与 loopback host，不需要特权或宿主机改动；因真实等待 125 s 停机窗口，运行时间约 3–4 分钟。
+
+已知残余：
+
+- `trigger.fired` 与 Task 在同一事务提交，此时 Run 尚未创建，事件 payload 的 `run_id` 为空；权威关联是 `trigger_fires.run_id` 与 `trigger.run.start` 审计。启动补跑可能在此后回填该列。
+- webhook 速率桶与「每分钟合并审计」状态在进程内，host 重启后重置；ADR §9 已列为有意残余。
+- ACP 会话本身不跨 host 重启持久化，触发器 Run 与其他 Run 一样受既有 recovery 语义约束。
+- 时区仅在本次 Linux native/CI 验证；macOS 与其他平台的 tzdata 尚未实测，named IANA zone 需先确认 TZif 可读，UTC/固定偏移不受影响。
+
 ## 回退与停用
 
 - **功能开关**：`trigger.enabled=false`（默认）时 `trigger.*` 返回 `unsupported`，webhook 路由统一 401；既有 Task/Run/Decision/事件完全不受影响。
