@@ -191,6 +191,30 @@ fn looks_like_path(item : String) -> Bool {
   item.contains("/../")
 }
 
+///|
+/// Whether this argv is a container-engine invocation
+/// (`docker`/`podman`/`nerdctl`/`containerd` as argv[0]).
+///
+/// ADR-0013 §5 executes environment recipes through exactly this channel. The
+/// built-in classifier always classifies a container-engine argv as High, so
+/// every such request needs a primary-minted grant bound to the exact digest;
+/// it can never be silently low-risk. Its path arguments name node-owned
+/// roots outside the workspace (the environment directory, the scratch
+/// directory, container bind sources), which is why the workspace-containment
+/// loop below does not apply. Structural checks, cwd containment and the
+/// classifier itself are unchanged, and an argv whose argv[0] is a shell is
+/// not exempt.
+fn is_container_engine_argv(argv : Array[String]) -> Bool {
+  if argv.length() == 0 {
+    return false
+  }
+  let engine = command_basename(argv[0])
+  engine == "docker" ||
+  engine == "podman" ||
+  engine == "nerdctl" ||
+  engine == "containerd"
+}
+
 // ---------------------------------------------------------------------------
 // Request validation
 // ---------------------------------------------------------------------------
@@ -256,21 +280,26 @@ pub fn ExecutionRequest::validate(self : ExecutionRequest) -> String? {
   }
   // Executable path (argv[0]) is a machine path, not workspace data. Every
   // later argument that looks like a path must stay under the workspace root;
-  // otherwise a read-only command could read or write outside it.
-  let mut index = 1
-  while index < self.argv.length() {
-    let item = self.argv[index]
-    if looks_like_path(item) {
-      let target = if item.has_prefix("/") {
-        item
-      } else {
-        cwd + "/" + item
+  // otherwise a read-only command could read or write outside it. A container
+  // engine is the environment execution channel (ADR-0013 §5): its arguments
+  // deliberately name node-owned roots outside the workspace, and the built-in
+  // High classification plus the digest-bound grant are what constrain it.
+  if !is_container_engine_argv(self.argv) {
+    let mut index = 1
+    while index < self.argv.length() {
+      let item = self.argv[index]
+      if looks_like_path(item) {
+        let target = if item.has_prefix("/") {
+          item
+        } else {
+          cwd + "/" + item
+        }
+        if !path_within_root(root, target) {
+          return Some("command path argument escapes the workspace root")
+        }
       }
-      if !path_within_root(root, target) {
-        return Some("command path argument escapes the workspace root")
-      }
+      index = index + 1
     }
-    index = index + 1
   }
   None
 }

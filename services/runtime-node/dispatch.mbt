@@ -29,6 +29,221 @@ pub const MAX_RUNS_PER_STATUS : Int = 256
 pub const MAX_GIT_OUTPUT_CHARS : Int = 32_768
 
 ///|
+pub const MAX_EXEC_OUTPUT_CHARS : Int = 32_768
+
+// ---------------------------------------------------------------------------
+// Rooted environment filesystem (A2.2)
+// ---------------------------------------------------------------------------
+
+///|
+/// The `root` selector carried by fs requests. An absent value means the
+/// workspace, preserving the A1.2 contract; the only other value is the
+/// node-owned environment root.
+fn fs_root_selector(
+  params : Map[String, @json.Json],
+) -> Result[String, @contracts.RpcError] {
+  let root = optional_string(params, "root")
+  if root == "" || root == @contracts.RUNTIME_FS_ROOT_WORKSPACE {
+    return Ok(@contracts.RUNTIME_FS_ROOT_WORKSPACE)
+  }
+  if root == @contracts.RUNTIME_FS_ROOT_ENVIRONMENTS {
+    return Ok(@contracts.RUNTIME_FS_ROOT_ENVIRONMENTS)
+  }
+  Err(invalid_params("unknown filesystem root selector"))
+}
+
+///|
+/// Resolve the rooted directory named by the selector. A node without a home
+/// has no environment root and refuses the request instead of guessing.
+async fn NodeHost::selected_root(
+  self : NodeHost,
+  selector : String,
+) -> Result[@runtime.RootedDir, @contracts.RpcError] {
+  if selector == @contracts.RUNTIME_FS_ROOT_ENVIRONMENTS {
+    match self.environments {
+      Some(value) => Ok(value)
+      None =>
+        return Err(
+          @contracts.RpcError::new(
+            @transport.ERR_PATH_DENIED,
+            "this runtime node has no environment root",
+          ),
+        )
+    }
+  } else {
+    Ok(self.workspace)
+  }
+}
+
+///|
+fn real_within_root(root : String, real : String) -> Bool {
+  real == root || real.has_prefix(root + "/")
+}
+
+///|
+/// Create a directory at a rooted-relative path. Every existing component
+/// must resolve under the real root; a missing component is created 0700.
+/// Symlinks are followed only when their real target stays inside the root.
+async fn rooted_mkdir(
+  root : @runtime.RootedDir,
+  relative : String,
+  recursive : Bool,
+) -> Result[Unit, String] {
+  let normalized = match @runtime.normalize_rooted_path(relative) {
+    Ok(value) => value
+    Err(message) => return Err(message)
+  }
+  if normalized == "" {
+    return Err("path is the root directory")
+  }
+  let root_path = root.root()
+  let mut current = root_path
+  let parts = normalized.split("/")
+  let mut index = 0
+  for part in parts {
+    index = index + 1
+    current = current + "/" + part.to_owned()
+    let exists = @fs.exists(current) catch { _ => false }
+    if exists {
+      let real = @fs.realpath(current) catch {
+        error => return Err("cannot resolve path: " + error.to_string())
+      }
+      if !real_within_root(root_path, real) {
+        return Err("path escapes the root after resolution")
+      }
+      let kind = @fs.kind(real, follow_symlink=true) catch {
+        error => return Err("cannot stat path: " + error.to_string())
+      }
+      guard kind is @fs.FileKind::Directory else {
+        return Err("path is not a directory")
+      }
+      current = real
+    } else {
+      if !recursive && index < parts.length() {
+        return Err("parent directory does not exist")
+      }
+      // Do not follow a symlink in the final component: create it directly.
+      @fs.mkdir(current, permission=0o700, recursive=false, allow_exist=false) catch {
+        error => {
+          // A concurrent creator may have won the race; only accept it if the
+          // resolved path is a directory inside the root.
+          let real = @fs.realpath(current) catch {
+            _ => return Err("cannot create directory: " + error.to_string())
+          }
+          if !real_within_root(root_path, real) {
+            return Err("path escapes the root after resolution")
+          }
+          let kind = @fs.kind(real, follow_symlink=true) catch {
+            _ => return Err("cannot create directory: " + error.to_string())
+          }
+          guard kind is @fs.FileKind::Directory else {
+            return Err("cannot create directory: " + error.to_string())
+          }
+          current = real
+        }
+      }
+      let real = @fs.realpath(current) catch {
+        error => return Err("cannot resolve directory: " + error.to_string())
+      }
+      if !real_within_root(root_path, real) {
+        return Err("path escapes the root after resolution")
+      }
+      current = real
+    }
+  }
+  @fs.chmod(current, 0o700) catch { _ => () }
+  Ok(())
+}
+
+///|
+/// Remove one file, symlink or directory at a rooted-relative path. The path
+/// itself and its parent must resolve under the real root; the root itself is
+/// never removable. Missing entries are a success (the operation is
+/// idempotent), matching the local/SSH remove semantics.
+async fn rooted_remove(
+  root : @runtime.RootedDir,
+  relative : String,
+  recursive : Bool,
+) -> Result[Unit, String] {
+  let normalized = match @runtime.normalize_rooted_path(relative) {
+    Ok(value) => value
+    Err(message) => return Err(message)
+  }
+  if normalized == "" {
+    return Err("path is the root directory")
+  }
+  let root_path = root.root()
+  let parts : Array[String] = []
+  for part in normalized.split("/") {
+    parts.push(part.to_owned())
+  }
+  let name = parts[parts.length() - 1]
+  let parent_rel : Array[String] = []
+  for index in 0..<(parts.length() - 1) {
+    parent_rel.push(parts[index])
+  }
+  // Missing entries are a success, including when their parent is already
+  // gone (destroy removes the environment directory before the scratch
+  // directory nested inside it). No removal happens on a missing path.
+  let lexical = root_path + "/" + normalized
+  let exists = @fs.exists(lexical) catch { _ => false }
+  if !exists {
+    return Ok(())
+  }
+  let parent = if parent_rel.length() == 0 {
+    root_path
+  } else {
+    let lexical_parent = root_path + "/" + parent_rel.join("/")
+    let real = @fs.realpath(lexical_parent) catch {
+      error => return Err("cannot resolve parent directory: " + error.to_string())
+    }
+    if !real_within_root(root_path, real) {
+      return Err("path escapes the root after resolution")
+    }
+    let kind = @fs.kind(real, follow_symlink=true) catch {
+      error => return Err("cannot stat parent directory: " + error.to_string())
+    }
+    guard kind is @fs.FileKind::Directory else {
+      return Err("parent path is not a directory")
+    }
+    real
+  }
+  let target = parent + "/" + name
+  // lstat the final component: a symlink inside the root is removed as a
+  // link, never followed.
+  let kind = @fs.kind(target, follow_symlink=false) catch {
+    error => return Err("cannot stat path: " + error.to_string())
+  }
+  match kind {
+    @fs.FileKind::Directory => {
+      let real = @fs.realpath(target) catch {
+        error => return Err("cannot resolve directory: " + error.to_string())
+      }
+      if !real_within_root(root_path, real) {
+        return Err("path escapes the root after resolution")
+      }
+      @fs.rmdir(real, recursive=recursive) catch {
+        error => return Err("cannot remove directory: " + error.to_string())
+      }
+    }
+    @fs.FileKind::Regular | @fs.FileKind::SymLink =>
+      @fs.remove(target) catch {
+        error => return Err("cannot remove file: " + error.to_string())
+      }
+    _ => return Err("path is not a file or directory")
+  }
+  let remains = @fs.exists(target) catch { _ => true }
+  if remains {
+    return Err("path still exists after removal")
+  }
+  Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Rooted exec log read (A2.2)
+// ---------------------------------------------------------------------------
+
+///|
 fn invalid_params(message : String) -> @contracts.RpcError {
   @contracts.RpcError::new(@contracts.ERR_INVALID_PARAMS, message)
 }
@@ -550,6 +765,10 @@ async fn execution_request_for(
     )
   }
   if method == @contracts.METHOD_RUNTIME_FS_WRITE {
+    let selector = match fs_root_selector(params) {
+      Ok(value) => value
+      Err(error) => return Err(error)
+    }
     let path = match require_string(params, "path") {
       Ok(value) => value
       Err(error) => return Err(error)
@@ -558,15 +777,62 @@ async fn execution_request_for(
       Some(value) => value
       None => return Err(invalid_params("missing content"))
     }
+    // The selected root is part of the digest: writing the same relative path
+    // under the workspace and under the environment root are different
+    // operations. The workspace form keeps the A1.2 argv exactly.
+    let argv = if selector == @contracts.RUNTIME_FS_ROOT_ENVIRONMENTS {
+      ["environments:" + path]
+    } else {
+      [path]
+    }
     return Ok(
       Some((
         @policy.ExecutionRequest::new(
           operation=@policy.PolicyOperation::FsWrite,
-          argv=[path],
+          argv~,
           cwd~,
           workspace_root~,
           content~,
         ),
+        cwd_rooted,
+      )),
+    )
+  }
+  if method == @contracts.METHOD_RUNTIME_FS_MKDIR ||
+    method == @contracts.METHOD_RUNTIME_FS_REMOVE {
+    let selector = match fs_root_selector(params) {
+      Ok(value) => value
+      Err(error) => return Err(error)
+    }
+    let path = match require_string(params, "path") {
+      Ok(value) => value
+      Err(error) => return Err(error)
+    }
+    let recursive = bool_param_or(params, "recursive", false)
+    let target = if selector == @contracts.RUNTIME_FS_ROOT_ENVIRONMENTS {
+      "environments:" + path
+    } else {
+      path
+    }
+    let argv = if method == @contracts.METHOD_RUNTIME_FS_MKDIR {
+      if recursive {
+        ["mkdir", target, "recursive"]
+      } else {
+        ["mkdir", target]
+      }
+    } else if recursive {
+      ["remove", target, "recursive"]
+    } else {
+      ["remove", target]
+    }
+    let operation = if method == @contracts.METHOD_RUNTIME_FS_MKDIR {
+      @policy.PolicyOperation::FsWrite
+    } else {
+      @policy.PolicyOperation::FsDelete
+    }
+    return Ok(
+      Some((
+        @policy.ExecutionRequest::new(operation~, argv~, cwd~, workspace_root~),
         cwd_rooted,
       )),
     )
@@ -1101,6 +1367,9 @@ async fn NodeHost::dispatch_inner(
   if method == @contracts.METHOD_RUNTIME_EXEC_STATUS {
     return self.exec_status(request)
   }
+  if method == @contracts.METHOD_RUNTIME_EXEC_READ {
+    return self.exec_read(request)
+  }
   if method == @contracts.METHOD_RUNTIME_EXEC_CANCEL {
     return self.exec_cancel(request)
   }
@@ -1127,6 +1396,12 @@ async fn NodeHost::dispatch_inner(
   }
   if method == @contracts.METHOD_RUNTIME_FS_WRITE {
     return self.fs_write(request)
+  }
+  if method == @contracts.METHOD_RUNTIME_FS_MKDIR {
+    return self.fs_mkdir(request)
+  }
+  if method == @contracts.METHOD_RUNTIME_FS_REMOVE {
+    return self.fs_remove(request)
   }
   if method == @contracts.METHOD_RUNTIME_FS_LIST {
     return self.fs_list(request)
@@ -1482,6 +1757,117 @@ async fn NodeHost::process_cancel(
 }
 
 ///|
+/// Read a bounded slice of one exec stream log. The run id is validated before
+/// it becomes a path component, the resolved file must be a regular file under
+/// the node's real logs root, and the slice is bounded by both the transport
+/// result limit and the file size. This is a read method: no approval is
+/// required, and it never returns a run's status as success.
+async fn NodeHost::exec_read(
+  self : NodeHost,
+  request : @transport.HandlerRequest,
+) -> Result[@json.Json, @contracts.RpcError] {
+  let params = request.params
+  let run_id = match require_safe_id(params, "run_id") {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let stream = optional_string(params, "stream")
+  let stream = if stream == "" { "stdout" } else { stream }
+  if stream != "stdout" && stream != "stderr" {
+    return Err(invalid_params("stream must be stdout or stderr"))
+  }
+  let offset = int64_param_or(params, "offset", 0L)
+  if offset < 0L {
+    return Err(invalid_params("offset must not be negative"))
+  }
+  let max_bytes = int_param_or(params, "max_bytes", MAX_EXEC_OUTPUT_CHARS)
+    .max(1)
+    .min(MAX_EXEC_OUTPUT_CHARS)
+  let logs_root = @fs.realpath(self.executor.state_root() + "/logs") catch {
+    _ =>
+      return Err(
+        @contracts.RpcError::new(
+          @contracts.ERR_INVALID_PARAMS,
+          "no exec log directory exists on this node",
+        ),
+      )
+  }
+  let path = logs_root + "/" + run_id + "/" + stream + ".log"
+  let stat = match @transport.lstat_path(path) {
+    None =>
+      return Err(
+        @contracts.RpcError::new(
+          @contracts.ERR_INVALID_PARAMS,
+          "no such exec log",
+        ),
+      )
+    Some(value) => value
+  }
+  match stat.kind {
+    @transport.PathKind::Regular => ()
+    _ => return Err(fs_failure("exec log is not a regular file"))
+  }
+  let real = @fs.realpath(path) catch {
+    error => return Err(fs_failure("cannot resolve exec log: " + error.to_string()))
+  }
+  if !real_within_root(logs_root, real) {
+    return Err(
+      @contracts.RpcError::new(
+        @transport.ERR_PATH_DENIED,
+        "exec log escapes the node log root",
+      ),
+    )
+  }
+  let size = stat.size
+  let mut read_bytes = 0L
+  let data = if offset >= size {
+    ""
+  } else {
+    let available = size - offset
+    let requested = if available > max_bytes.to_int64() {
+      max_bytes
+    } else {
+      available.to_int()
+    }
+    let file = @fs.open(
+      real,
+      mode=@fs.Mode::ReadOnly,
+      create_mode=@fs.CreateMode::OpenExisting,
+    ) catch {
+      error => return Err(fs_failure("cannot open exec log: " + error.to_string()))
+    }
+    defer file.close()
+    let buffer : FixedArray[Byte] = FixedArray::make(requested, b'\x00')
+    let mut got = 0
+    while got < requested {
+      let count = file.read_at(
+        buffer,
+        position=offset + got.to_int64(),
+        offset=got,
+        len=requested - got,
+      )
+      if count <= 0 {
+        break
+      }
+      got = got + count
+    }
+    read_bytes = got.to_int64()
+    @utf8.decode_lossy(Bytes::from_fixedarray(buffer, len=got)[:], ignore_bom=false)
+  }
+  Ok(
+    @contracts.json_object([
+      ("run_id", @contracts.json_string(run_id)),
+      ("stream", @contracts.json_string(stream)),
+      ("offset", @contracts.json_int64(offset)),
+      ("data", @contracts.json_string(data)),
+      ("bytes", @contracts.json_int64(read_bytes)),
+      ("eof", @contracts.json_bool(offset + read_bytes >= size)),
+      ("log_bytes", @contracts.json_int64(size)),
+    ]),
+  )
+}
+
+///|
 async fn NodeHost::fs_read(
   self : NodeHost,
   request : @transport.HandlerRequest,
@@ -1532,6 +1918,10 @@ async fn NodeHost::fs_write(
   request : @transport.HandlerRequest,
 ) -> Result[@json.Json, @contracts.RpcError] {
   let params = request.params
+  let selector = match fs_root_selector(params) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
   let path = match require_string(params, "path") {
     Ok(value) => value
     Err(error) => return Err(error)
@@ -1547,7 +1937,11 @@ async fn NodeHost::fs_write(
       ),
     )
   }
-  match self.workspace.write_text(path, content) {
+  let root = match self.selected_root(selector) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  match root.write_text(path, content) {
     Ok(_) => ()
     Err(message) => return Err(fs_failure(message))
   }
@@ -1556,6 +1950,71 @@ async fn NodeHost::fs_write(
       ("path", @contracts.json_string(path)),
       ("bytes", @contracts.json_int(content.length())),
       ("written", @contracts.json_bool(true)),
+      ("root", @contracts.json_string(selector)),
+    ]),
+  )
+}
+
+///|
+async fn NodeHost::fs_mkdir(
+  self : NodeHost,
+  request : @transport.HandlerRequest,
+) -> Result[@json.Json, @contracts.RpcError] {
+  let params = request.params
+  let selector = match fs_root_selector(params) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let path = match require_string(params, "path") {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let recursive = bool_param_or(params, "recursive", false)
+  let root = match self.selected_root(selector) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  match rooted_mkdir(root, path, recursive) {
+    Ok(_) => ()
+    Err(message) => return Err(fs_failure(message))
+  }
+  Ok(
+    @contracts.json_object([
+      ("path", @contracts.json_string(path)),
+      ("created", @contracts.json_bool(true)),
+      ("root", @contracts.json_string(selector)),
+    ]),
+  )
+}
+
+///|
+async fn NodeHost::fs_remove(
+  self : NodeHost,
+  request : @transport.HandlerRequest,
+) -> Result[@json.Json, @contracts.RpcError] {
+  let params = request.params
+  let selector = match fs_root_selector(params) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let path = match require_string(params, "path") {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let recursive = bool_param_or(params, "recursive", false)
+  let root = match self.selected_root(selector) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  match rooted_remove(root, path, recursive) {
+    Ok(_) => ()
+    Err(message) => return Err(fs_failure(message))
+  }
+  Ok(
+    @contracts.json_object([
+      ("path", @contracts.json_string(path)),
+      ("removed", @contracts.json_bool(true)),
+      ("root", @contracts.json_string(selector)),
     ]),
   )
 }
@@ -1604,19 +2063,39 @@ async fn NodeHost::fs_stat(
   self : NodeHost,
   request : @transport.HandlerRequest,
 ) -> Result[@json.Json, @contracts.RpcError] {
-  let path = optional_string(request.params, "path")
-  let stat = match self.workspace.stat(path) {
+  let params = request.params
+  let selector = match fs_root_selector(params) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let path = optional_string(params, "path")
+  let root = match self.selected_root(selector) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let stat = match root.stat(path) {
     Ok(value) => value
     Err(message) =>
       return Err(
         @contracts.RpcError::new(@contracts.ERR_INVALID_PARAMS, message),
       )
   }
+  let absolute = if stat.path == "" {
+    root.root()
+  } else {
+    root.root() + "/" + stat.path
+  }
+  let mode = match @transport.stat_path(absolute) {
+    Some(value) => value.mode & 0o777
+    None => 0
+  }
   Ok(
     @contracts.json_object([
       ("path", @contracts.json_string(stat.path)),
       ("kind", @contracts.json_string(stat.kind)),
       ("size", @contracts.json_int64(stat.size)),
+      ("mode", @contracts.json_int(mode)),
+      ("root", @contracts.json_string(selector)),
     ]),
   )
 }

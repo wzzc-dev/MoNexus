@@ -144,12 +144,13 @@ pub(all) struct ResolvedRoots {
 pub fn ResolvedRoots::new(
   workspace_root~ : String,
   scratch_root~ : String,
+  allow_state_scratch~ : Bool = false,
 ) -> Result[ResolvedRoots, DockerError] {
-  match validate_root(workspace_root, "workspace_root") {
+  match validate_root(workspace_root, "workspace_root", false) {
     Ok(_) => ()
     Err(error) => return Err(error)
   }
-  match validate_root(scratch_root, "scratch_root") {
+  match validate_root(scratch_root, "scratch_root", allow_state_scratch) {
     Ok(_) => ()
     Err(error) => return Err(error)
   }
@@ -165,7 +166,17 @@ pub fn ResolvedRoots::new(
 }
 
 ///|
-fn validate_root(path : String, field : String) -> Result[Unit, DockerError] {
+/// `allow_state_scratch` is set only for A2.2 runtime plans, whose scratch
+/// directory is the primary-derived per-environment directory under the
+/// node-owned `~/.monexus/environments` root. It exempts that root from the
+/// `.monexus` secret-segment rule; system state directories and every other
+/// secret segment stay forbidden, and the environment plan sets it only for
+/// the exact `<home>/.monexus/environments/<id>/scratch` layout.
+fn validate_root(
+  path : String,
+  field : String,
+  allow_state_scratch : Bool,
+) -> Result[Unit, DockerError] {
   if !@recipes.is_valid_host_path(path) {
     return Err(
       DockerError::new(InvalidRoot).at(field).with_detail(
@@ -173,7 +184,7 @@ fn validate_root(path : String, field : String) -> Result[Unit, DockerError] {
       ),
     )
   }
-  if is_forbidden_root(path) {
+  if is_forbidden_root(path, allow_state_scratch) {
     return Err(
       DockerError::new(ForbiddenRoot).at(field).with_detail(
         "root points at system state or owner secrets",
@@ -184,7 +195,7 @@ fn validate_root(path : String, field : String) -> Result[Unit, DockerError] {
 }
 
 ///|
-fn is_forbidden_root(path : String) -> Bool {
+fn is_forbidden_root(path : String, allow_state_scratch : Bool) -> Bool {
   if path == "/" {
     return true
   }
@@ -197,6 +208,12 @@ fn is_forbidden_root(path : String) -> Bool {
     }
   }
   for secret_segment in [".ssh", ".aws", ".gnupg", ".kube", ".monexus"] {
+    // The node environment root's descendants are the only state path the
+    // A2.2 plan may use, and never the root itself.
+    if secret_segment == ".monexus" && allow_state_scratch &&
+      !path.has_suffix("/.monexus") {
+      continue
+    }
     if has_segment(path, secret_segment) {
       return true
     }
@@ -290,7 +307,7 @@ pub fn ExtraMount::new(
   target~ : String,
   read_only~ : Bool,
 ) -> Result[ExtraMount, DockerError] {
-  match validate_root(source, "extra_mount.source") {
+  match validate_root(source, "extra_mount.source", false) {
     Ok(_) => ()
     Err(error) => return Err(error)
   }

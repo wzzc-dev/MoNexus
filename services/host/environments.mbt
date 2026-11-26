@@ -116,6 +116,38 @@ async fn environment_runner_for_machine(
       ),
     )
   }
+  if record.kind == @contracts.MACHINE_KIND_RUNTIME {
+    // A2.2: the same lifecycle runs through the paired runtime node. No SSH
+    // fallback exists for a runtime kind, and an unattached session is an
+    // honest `unreachable`, never a local execution.
+    let link = match runtime_link_for(state, record.id) {
+      Some(value) => value
+      None =>
+        return Err(
+          environment_rpc_error(
+            @contracts.ENVIRONMENT_ERR_UNREACHABLE,
+            "runtime machine has no paired transport session attached",
+            detail="machine " + record.id,
+          ),
+        )
+    }
+    let ops = match
+      @environment.runtime_ops_for_machine(
+        machine=link.machine,
+        home=link.home,
+        workspace_root=link.workspace_root,
+      ) {
+      Ok(value) => value
+      Err(error) => return Err(environment_failure_error(error))
+    }
+    return Ok(
+      @environment.runtime_runner(
+        machine_id=record.id,
+        home=link.home,
+        ops~,
+      ),
+    )
+  }
   match
     @environment.ssh_runner(machine_id=record.id, machine_target(record)) {
     Ok(value) => Ok(value)
@@ -161,16 +193,42 @@ fn environment_dir(
 /// Recovered from the recorded workspace mount so a destroy after a restart
 /// removes exactly what create made.
 fn environment_scratch_dir(record : @contracts.EnvironmentRecord) -> String {
+  let mut scratch_root = ""
   let mut workspace_root = ""
   for mount in record.mounts {
-    if mount.source == "workspace" {
+    if mount.source == "scratch" {
+      scratch_root = mount.host_path
+    } else if mount.source == "workspace" {
       workspace_root = mount.host_path
     }
+  }
+  // The recorded plan mount is authoritative. Local and SSH plans record the
+  // same derived path as before, so their behavior is unchanged; runtime plans
+  // record the node-side directory under `~/.monexus/environments/<id>/`.
+  if scratch_root != "" {
+    return scratch_root
   }
   if workspace_root == "" {
     return ""
   }
   workspace_root + @environment.DEFAULT_SCRATCH_SUFFIX + record.id
+}
+
+///|
+/// The scratch directory for one plan. Local and SSH machines keep the
+/// workspace-derived path byte-for-byte; a paired runtime node keeps it inside
+/// the environment directory on the node, so one recursive removal of
+/// `~/.monexus/environments/<id>` also removes it.
+fn environment_scratch_root(
+  runner : @environment.DockerRunner,
+  target_root : String,
+  environment_id : String,
+) -> String {
+  if runner.is_runtime() {
+    runner.home + "/.monexus/environments/" + environment_id + "/scratch"
+  } else {
+    target_root + @environment.DEFAULT_SCRATCH_SUFFIX + environment_id
+  }
 }
 
 ///|
@@ -1246,8 +1304,7 @@ async fn create_environment_locked(
     machine_id,
     primary_id: @contracts.ORG_LOCAL,
     workspace_root: target_root,
-    scratch_root: target_root + @environment.DEFAULT_SCRATCH_SUFFIX +
-    environment_id,
+    scratch_root: environment_scratch_root(runner, target_root, environment_id),
     env_values: spec.env_values,
     extra_mounts: spec.extra_mounts,
   }
@@ -1368,6 +1425,7 @@ async fn create_environment_locked(
     Err(error) => return Err(error)
   }
   ignore(reserved)
+  runner.set_approval_decision(approval_id)
   audit(
     state,
     "environment.create",
@@ -1606,6 +1664,7 @@ async fn start_environment_locked(
     Ok(value) => value
     Err(error) => return Err(error)
   }
+  runner.set_approval_decision(used_approval)
   match @environment.start_container(runner, record, recipe, identity) {
     Ok(_) => ()
     Err(error) => {

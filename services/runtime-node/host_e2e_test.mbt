@@ -214,6 +214,7 @@ async fn host_run_scenario(
   max_attempts : Int,
   pty_limits : @pty_runtime.PtyLimits?,
   body : async (NodeHarness) -> Unit,
+  sandbox_home~ : Bool = false,
 ) -> Unit {
   let pki = host_make_pki()
   defer @fs.rmdir(pki.dir, recursive=true)
@@ -252,6 +253,7 @@ async fn host_run_scenario(
         runtime_id,
         state_base=base,
         workspace_root="",
+        home=if sandbox_home { base + "/home" } else { "" },
         policy=None,
         pty_limits~,
       ) {

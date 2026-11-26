@@ -3,6 +3,8 @@ import {
   "monexus/recipes" @recipes,
   "monexus/providers/docker" @docker,
   "monexus/providers/ssh" @ssh,
+  "monexus/providers/runtime" @runtime,
+  "monexus/runtime-transport" @transport,
   "monexus/providers/workspace" @workspace,
   "moonbit-community/pty" @pty,
   "moonbitlang/async",
@@ -11,6 +13,7 @@ import {
   "moonbitlang/async/process",
   "moonbitlang/core/encoding/utf8" @utf8,
   "moonbitlang/core/env",
+  "moonbitlang/core/json",
   "moonbitlang/core/string",
 }
 

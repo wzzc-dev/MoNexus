@@ -36,6 +36,18 @@ pub type WriteSecretOp = async (
 ) -> Result[Unit, EnvFailure]
 
 ///|
+/// Container terminal transport for a paired runtime node. The argv excludes
+/// the `docker` program name, matching `DockerInvoke`; the runtime node
+/// resolves and streams it through `runtime.pty.*`.
+pub type RuntimeTerminalOp = async (
+  Array[String],
+  Int32,
+  Int32,
+  @aqueue.Queue[@workspace.TerminalInput],
+  @aqueue.Queue[@workspace.TerminalEvent],
+) -> Unit
+
+///|
 pub(all) struct DockerRunner {
   machine_id : String
   remote : Bool
@@ -46,6 +58,18 @@ pub(all) struct DockerRunner {
   write_secret : WriteSecretOp
   remove_file : PathOp
   remove_dir : PathOp
+  /// True when this runner executes on a paired runtime node (A2.2). Docker
+  /// argv and the environment filesystem go through `runtime.exec.*` and
+  /// `runtime.fs.*`; the local/SSH behavior is unchanged.
+  runtime : Bool
+  /// The A2.1 environment-approval Decision bound to this lifecycle
+  /// operation, when one exists. Empty means the primary authorizes the
+  /// operation directly. The runtime adapter mints one-time A1.3b grants from
+  /// this value; it never creates a second approval path.
+  authorization : Ref[String]?
+  /// PTY transport for runtime terminals. `None` on local/SSH runners, which
+  /// use the existing PTY/SSH paths.
+  terminal : RuntimeTerminalOp?
 }
 
 ///|
@@ -85,6 +109,24 @@ pub fn EnvFailure::to_string(self : EnvFailure) -> String {
     text = text + ": " + self.detail
   }
   text
+}
+
+///|
+/// Bind this runner's runtime authorizations to the A2.1 environment Decision
+/// that already authorized the plan. A no-op for local/SSH runners.
+pub fn DockerRunner::set_approval_decision(
+  self : DockerRunner,
+  decision_id : String,
+) -> Unit {
+  match self.authorization {
+    Some(value) => value.val = decision_id
+    None => ()
+  }
+}
+
+///|
+pub fn DockerRunner::is_runtime(self : DockerRunner) -> Bool {
+  self.runtime
 }
 
 ///|
@@ -334,6 +376,9 @@ pub async fn local_runner(
       result
     },
     remove_dir: async fn(path) { local_remove_dir(path) },
+    runtime: false,
+    authorization: None,
+    terminal: None,
   }
 }
 
@@ -565,5 +610,8 @@ pub async fn ssh_runner(
     write_secret,
     remove_file,
     remove_dir,
+    runtime: false,
+    authorization: None,
+    terminal: None,
   })
 }

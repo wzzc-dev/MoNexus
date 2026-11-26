@@ -356,6 +356,9 @@ fn fake_runner(
     write_secret,
     remove_file,
     remove_dir,
+    runtime: false,
+    authorization: None,
+    terminal: None,
   }
 }
 
