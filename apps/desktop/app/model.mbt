@@ -147,6 +147,8 @@ pub fn MachineDraft::new() -> MachineDraft {
 /// local or SSH: it only holds the machine id (`""` = local) and a root.
 pub(all) struct ProjectState {
   machine_id : String
+  machine_picker_open : Bool
+  advanced : Bool
   root : String
   workspace : @contracts.WorkspaceRecord?
   workspaces : Array[@contracts.WorkspaceRecord]
@@ -172,6 +174,8 @@ pub(all) struct ProjectState {
 pub fn ProjectState::new() -> ProjectState {
   {
     machine_id: "",
+    machine_picker_open: false,
+    advanced: false,
     root: "",
     workspace: None,
     workspaces: [],
@@ -201,6 +205,10 @@ pub(all) struct AgentState {
   mode : String
   workspace_id : String
   worktree_id : String
+  agent_picker_open : Bool
+  workspace_picker_open : Bool
+  session_picker_open : Bool
+  advanced : Bool
   prompt : String
   input : String
   session : @contracts.AgentSessionRecord?
@@ -220,6 +228,10 @@ pub fn AgentState::new() -> AgentState {
     mode: @contracts.AGENT_MODE_ACP,
     workspace_id: "",
     worktree_id: "",
+    agent_picker_open: false,
+    workspace_picker_open: false,
+    session_picker_open: false,
+    advanced: false,
     prompt: "Reply with a short greeting.",
     input: "",
     session: None,
@@ -273,6 +285,9 @@ pub(all) struct TaskState {
   command : String
   workspace_id : String
   machine_id : String
+  workspace_picker_open : Bool
+  machine_picker_open : Bool
+  advanced : Bool
   tasks : Array[@contracts.TaskRecord]
   selected_task : String
   runs : Array[@contracts.RunRecord]
@@ -294,6 +309,9 @@ pub fn TaskState::new() -> TaskState {
     command: "moon test --target native",
     workspace_id: "",
     machine_id: "",
+    workspace_picker_open: false,
+    machine_picker_open: false,
+    advanced: false,
     tasks: [],
     selected_task: "",
     runs: [],
@@ -352,6 +370,9 @@ pub struct Model {
   hover_row : String
   /// Bumped on every page switch so the body scroll view resets to the top.
   scroll_epoch : Int32
+  /// Last clipboard action result, shown in the status bar. IDs are secondary
+  /// metadata in this shell, so the copy affordance needs visible feedback.
+  clipboard_note : String
 }
 
 ///|
@@ -459,6 +480,7 @@ pub fn Model::new_with_preferences(
     lang_note: language.note,
     hover_row: "",
     scroll_epoch: 0,
+    clipboard_note: "",
   }
 }
 
@@ -562,6 +584,10 @@ pub(all) enum Msg {
   ProjectOpen
   ProjectRoot(String)
   ProjectMachine(String)
+  ProjectMachineSelect(String)
+  ProjectMachinePicker(Bool)
+  ProjectMachineToggle
+  ProjectAdvanced(Bool)
   ProjectOpened(@contracts.WorkspaceRecord)
   ProjectWorkspaces(Array[@contracts.WorkspaceRecord])
   ProjectSelectWorkspace(String)
@@ -592,6 +618,17 @@ pub(all) enum Msg {
   AgentMode(String)
   AgentWorkspace(String)
   AgentWorktree(String)
+  AgentSelect(String)
+  AgentWorkspaceSelect(String)
+  AgentPicker(Bool)
+  AgentWorkspacePicker(Bool)
+  AgentSessionPicker(Bool)
+  AgentToggle
+  AgentWorkspaceToggle
+  AgentSessionToggle
+  AgentAdvanced(Bool)
+  AgentUseDefault
+  AgentSelectSession(String)
   AgentPromptDraft(String)
   AgentInputDraft(String)
   AgentRefresh
@@ -618,6 +655,13 @@ pub(all) enum Msg {
   TaskCommand(String)
   TaskWorkspace(String)
   TaskMachine(String)
+  TaskWorkspaceSelect(String)
+  TaskMachineSelect(String)
+  TaskWorkspacePicker(Bool)
+  TaskMachinePicker(Bool)
+  TaskWorkspaceToggle
+  TaskMachineToggle
+  TaskAdvanced(Bool)
   TaskCreateSubmit
   TasksRefresh
   TasksLoaded(Array[@contracts.TaskRecord])
@@ -633,6 +677,9 @@ pub(all) enum Msg {
   EventsLoaded(Array[@contracts.EventEnvelope], Int64)
   TaskNotice(String)
   TaskError(String)
+  // Secondary ID copy affordance and its status-bar feedback.
+  CopyId(String, String)
+  ClipboardCopied(Bool, String)
   // M5 Search.
   SearchQuery(String)
   SearchSubmit
@@ -669,6 +716,8 @@ pub(all) enum MachineCommand {
   AgentSend(String, String)
   AgentStop(String)
   AgentResume(String)
+  AgentRead(String)
+  CopyText(String, String)
   AgentList
   DecisionList(String)
   DecisionRespond(String, String, String, String)
@@ -899,6 +948,165 @@ fn workspace_by_id(
 }
 
 ///|
+fn root_basename(root : String) -> String {
+  let parts = root.trim_end().split("/")
+  let mut name = ""
+  for part in parts {
+    if part != "" {
+      name = part.to_owned()
+    }
+  }
+  if name == "" {
+    root
+  } else {
+    name
+  }
+}
+
+///|
+pub fn workspace_display_name(record : @contracts.WorkspaceRecord) -> String {
+  if record.name != "" {
+    record.name
+  } else {
+    root_basename(record.root)
+  }
+}
+
+///|
+pub fn machine_display_name(
+  machines : Array[@contracts.MachineRecord],
+  machine_id : String,
+  lang : Lang,
+) -> String {
+  if machine_id == "" {
+    return tr(lang, "Local machine", "本地机器")
+  }
+  for record in machines {
+    if record.id == machine_id {
+      return if record.name == "" {
+        tr(lang, "Unnamed machine", "未命名机器")
+      } else {
+        record.name
+      }
+    }
+  }
+  tr(lang, "Machine unavailable", "机器不可用")
+}
+
+///|
+pub fn workspace_choice_label(
+  machines : Array[@contracts.MachineRecord],
+  record : @contracts.WorkspaceRecord,
+  lang : Lang,
+) -> String {
+  workspace_display_name(record) +
+  " · " +
+  machine_display_name(machines, record.machine_id, lang)
+}
+
+///|
+fn workspace_recency(record : @contracts.WorkspaceRecord) -> String {
+  if record.updated_at != "" {
+    record.updated_at
+  } else {
+    record.created_at
+  }
+}
+
+///|
+fn most_recent_workspace(
+  records : Array[@contracts.WorkspaceRecord],
+) -> @contracts.WorkspaceRecord? {
+  let mut best : @contracts.WorkspaceRecord? = None
+  for record in records {
+    let replace = match best {
+      None => true
+      Some(current) =>
+        workspace_recency(record) > workspace_recency(current) ||
+        (workspace_recency(record) == workspace_recency(current) &&
+          record.id < current.id)
+    }
+    if replace {
+      best = Some(record)
+    }
+  }
+  best
+}
+
+///|
+fn default_workspace_id(
+  model : Model,
+  records : Array[@contracts.WorkspaceRecord],
+) -> String {
+  match model.project.workspace {
+    Some(record) => record.id
+    None =>
+      match most_recent_workspace(records) {
+        Some(record) => record.id
+        None => ""
+      }
+  }
+}
+
+///|
+/// When host projections arrive, fill empty selectors with the current Project
+/// or the most recently used workspace. Explicit selections are preserved.
+fn apply_workspace_defaults(
+  model : Model,
+  records : Array[@contracts.WorkspaceRecord],
+) -> Model {
+  let default = default_workspace_id(model, records)
+  if default == "" {
+    return model
+  }
+  let agent_workspace = if model.agent.session is None &&
+    model.agent.workspace_id == "" {
+    default
+  } else {
+    model.agent.workspace_id
+  }
+  let task_workspace = if model.task.workspace_id == "" {
+    default
+  } else {
+    model.task.workspace_id
+  }
+  {
+    ..model,
+    agent: { ..model.agent, workspace_id: agent_workspace },
+    task: { ..model.task, workspace_id: task_workspace },
+  }
+}
+
+///|
+fn session_recency(record : @contracts.AgentSessionRecord) -> String {
+  if record.updated_at != "" {
+    record.updated_at
+  } else {
+    record.started_at
+  }
+}
+
+///|
+fn most_recent_session(
+  records : Array[@contracts.AgentSessionRecord],
+) -> @contracts.AgentSessionRecord? {
+  let mut best : @contracts.AgentSessionRecord? = None
+  for record in records {
+    let replace = match best {
+      None => true
+      Some(current) =>
+        session_recency(record) > session_recency(current) ||
+        (session_recency(record) == session_recency(current) &&
+          record.id < current.id)
+    }
+    if replace {
+      best = Some(record)
+    }
+  }
+  best
+}
+
+///|
 /// Pure update: returns the next model plus the commands the command worker
 /// should run. `update` below is the model-only view used by tests.
 pub fn update_full(
@@ -915,10 +1123,10 @@ pub fn update_full(
         scroll_epoch: model.scroll_epoch + 1,
       },
       match page {
-        Agents => [AgentList]
+        Agents => [AgentList, ProjectList, RefreshMachines]
         Inbox => [DecisionList("")]
-        Projects => [ProjectList]
-        Tasks => [TaskRefresh(model.task.event_seq)]
+        Projects => [ProjectList, RefreshMachines]
+        Tasks => [TaskRefresh(model.task.event_seq), ProjectList, RefreshMachines]
         _ => none
       },
     )
@@ -1198,6 +1406,38 @@ pub fn update_full(
       { ..model, project: { ..model.project, machine_id: value } },
       none,
     )
+    ProjectMachineSelect(value) => (
+      {
+        ..model,
+        project: {
+          ..model.project,
+          machine_id: value,
+          machine_picker_open: false,
+        },
+      },
+      none,
+    )
+    ProjectMachinePicker(open) => (
+      {
+        ..model,
+        project: { ..model.project, machine_picker_open: open },
+      },
+      none,
+    )
+    ProjectMachineToggle => (
+      {
+        ..model,
+        project: {
+          ..model.project,
+          machine_picker_open: !model.project.machine_picker_open,
+        },
+      },
+      none,
+    )
+    ProjectAdvanced(open) => (
+      { ..model, project: { ..model.project, advanced: open } },
+      none,
+    )
     ProjectOpened(record) => {
       let workspaces : Array[@contracts.WorkspaceRecord] = []
       let mut replaced = false
@@ -1212,41 +1452,40 @@ pub fn update_full(
       if !replaced {
         workspaces.push(record)
       }
-      (
-        {
-          ..model,
-          project: {
-            ..model.project,
-            workspace: Some(record),
-            workspaces: sort_workspaces(workspaces),
-            workspaces_loaded: true,
-            entries: [],
-            selected: "",
-            content: "",
-            dirty: false,
-            status_text: "",
-            diff_text: "",
-            terminal_id: "",
-            terminal_text: "",
-            terminal_cursor: 0L,
-            busy: false,
-            message: tr(model.lang, "opened ", "已打开 ") + record.root,
-          },
-        },
-        none,
-      )
-    }
-    ProjectWorkspaces(records) => (
-      {
+      let opened = {
         ..model,
         project: {
           ..model.project,
-          workspaces: sort_workspaces(records),
+          workspace: Some(record),
+          workspaces: sort_workspaces(workspaces),
+          workspaces_loaded: true,
+          entries: [],
+          selected: "",
+          content: "",
+          dirty: false,
+          status_text: "",
+          diff_text: "",
+          terminal_id: "",
+          terminal_text: "",
+          terminal_cursor: 0L,
+          busy: false,
+          message: tr(model.lang, "opened ", "已打开 ") + record.root,
+        },
+      }
+      (apply_workspace_defaults(opened, opened.project.workspaces), none)
+    }
+    ProjectWorkspaces(records) => {
+      let sorted = sort_workspaces(records)
+      let loaded = {
+        ..model,
+        project: {
+          ..model.project,
+          workspaces: sorted,
           workspaces_loaded: true,
         },
-      },
-      none,
-    )
+      }
+      (apply_workspace_defaults(loaded, sorted), none)
+    }
     ProjectSelectWorkspace(workspace_id) =>
       match workspace_by_id(model.project.workspaces, workspace_id) {
         Some(record) => (
@@ -1654,6 +1893,151 @@ pub fn update_full(
       { ..model, agent: { ..model.agent, worktree_id: value } },
       none,
     )
+    AgentSelect(value) => (
+      {
+        ..model,
+        agent: {
+          ..model.agent,
+          agent_id: value,
+          agent_picker_open: false,
+        },
+      },
+      none,
+    )
+    AgentWorkspaceSelect(value) => (
+      {
+        ..model,
+        agent: {
+          ..model.agent,
+          workspace_id: value,
+          workspace_picker_open: false,
+        },
+      },
+      none,
+    )
+    AgentPicker(open) => (
+      {
+        ..model,
+        agent: { ..model.agent, agent_picker_open: open },
+      },
+      none,
+    )
+    AgentWorkspacePicker(open) => (
+      {
+        ..model,
+        agent: { ..model.agent, workspace_picker_open: open },
+      },
+      none,
+    )
+    AgentSessionPicker(open) => (
+      {
+        ..model,
+        agent: { ..model.agent, session_picker_open: open },
+      },
+      none,
+    )
+    AgentToggle => (
+      {
+        ..model,
+        agent: {
+          ..model.agent,
+          agent_picker_open: !model.agent.agent_picker_open,
+        },
+      },
+      none,
+    )
+    AgentWorkspaceToggle => (
+      {
+        ..model,
+        agent: {
+          ..model.agent,
+          workspace_picker_open: !model.agent.workspace_picker_open,
+        },
+      },
+      none,
+    )
+    AgentSessionToggle => (
+      {
+        ..model,
+        agent: {
+          ..model.agent,
+          session_picker_open: !model.agent.session_picker_open,
+        },
+      },
+      none,
+    )
+    AgentAdvanced(open) => (
+      { ..model, agent: { ..model.agent, advanced: open } },
+      none,
+    )
+    AgentUseDefault => (
+      {
+        ..model,
+        agent: {
+          ..model.agent,
+          agent_id: "default",
+          message: tr(
+            model.lang,
+            "Default agent selected. The host creates its home on first start.",
+            "已选择默认智能体。主机将在首次启动时创建其主目录。",
+          ),
+        },
+      },
+      none,
+    )
+    AgentSelectSession(session_id) => {
+      let mut selected : @contracts.AgentSessionRecord? = None
+      for record in model.agent.sessions {
+        if record.id == session_id {
+          selected = Some(record)
+        }
+      }
+      match selected {
+        Some(record) =>
+          (
+            {
+              ..model,
+              agent: {
+                ..model.agent,
+                session: Some(record),
+                agent_id: if record.agent_id == "" {
+                  model.agent.agent_id
+                } else {
+                  record.agent_id
+                },
+                workspace_id: if record.workspace_id == "" {
+                  model.agent.workspace_id
+                } else {
+                  record.workspace_id
+                },
+                worktree_id: record.worktree_id,
+                transcript: "",
+                cursor: 0L,
+                state_text: record.state,
+                stop_reason: record.stop_reason,
+                pending_decision: "",
+                session_picker_open: false,
+                message: tr(model.lang, "reading transcript...", "正在读取对话..."),
+              },
+            },
+            [AgentRead(record.id)],
+          )
+        None => (
+          {
+            ..model,
+            agent: {
+              ..model.agent,
+              message: tr(
+                model.lang,
+                "that session is no longer listed",
+                "该会话已不在列表中",
+              ),
+            },
+          },
+          none,
+        )
+      }
+    }
     AgentPromptDraft(value) => (
       { ..model, agent: { ..model.agent, prompt: value } },
       none,
@@ -1675,31 +2059,49 @@ pub fn update_full(
       },
       [AgentProbe(model.agent.agent_id, model.agent.mode, "")],
     )
-    AgentStartSession => (
-      {
-        ..model,
-        agent: {
-          ..model.agent,
-          transcript: "",
-          cursor: 0L,
-          pending_decision: "",
-          state_text: "starting",
-          stop_reason: "",
-          message: tr(model.lang, "starting ", "正在启动 ") +
-          model.agent.agent_id +
-          "...",
-        },
-      },
-      [
-        AgentStart(
-          model.agent.agent_id,
-          model.agent.mode,
-          model.agent.workspace_id,
-          model.agent.worktree_id,
-          model.agent.prompt,
-        ),
-      ],
-    )
+    AgentStartSession =>
+      if model.agent.agent_id.trim() == "" {
+        (
+          {
+            ..model,
+            agent: {
+              ..model.agent,
+              message: tr(
+                model.lang,
+                "start failed: select an agent",
+                "启动失败：请选择一个智能体",
+              ),
+            },
+          },
+          none,
+        )
+      } else {
+        (
+          {
+            ..model,
+            agent: {
+              ..model.agent,
+              transcript: "",
+              cursor: 0L,
+              pending_decision: "",
+              state_text: "starting",
+              stop_reason: "",
+              message: tr(model.lang, "starting ", "正在启动 ") +
+              model.agent.agent_id +
+              "...",
+            },
+          },
+          [
+            AgentStart(
+              model.agent.agent_id,
+              model.agent.mode,
+              model.agent.workspace_id,
+              model.agent.worktree_id,
+              model.agent.prompt,
+            ),
+          ],
+        )
+      }
     AgentSendInput =>
       match model.agent.session {
         Some(record) =>
@@ -1783,34 +2185,74 @@ pub fn update_full(
         agent: {
           ..model.agent,
           session: Some(record),
+          agent_id: if record.agent_id == "" {
+            model.agent.agent_id
+          } else {
+            record.agent_id
+          },
+          workspace_id: if record.workspace_id == "" {
+            model.agent.workspace_id
+          } else {
+            record.workspace_id
+          },
+          worktree_id: record.worktree_id,
           transcript: "",
           cursor: 0L,
           state_text: record.state,
           stop_reason: record.stop_reason,
           pending_decision: "",
-          message:
-            "session " +
-            record.id +
-            " · " +
-            record.mode +
-            " · " +
-            record.cwd,
+          message: tr(model.lang, "session started · ", "会话已启动 · ") +
+          record.mode +
+          " · " +
+          record.cwd,
         },
       },
       [AgentList],
     )
-    AgentSessions(records) => (
-      {
-        ..model,
-        agent: {
-          ..model.agent,
-          sessions: records,
-          message: tr(model.lang, "sessions: ", "会话数：") +
-          records.length().to_string(),
-        },
-      },
-      none,
-    )
+    AgentSessions(records) => {
+      let mut agent : AgentState = {
+        ..model.agent,
+        sessions: records,
+        message: tr(model.lang, "sessions: ", "会话数：") +
+        records.length().to_string(),
+      }
+      let commands : Array[MachineCommand] = []
+      if agent.session is None {
+        match most_recent_session(records) {
+          Some(record) => {
+            agent = {
+              ..agent,
+              session: Some(record),
+              agent_id: if record.agent_id == "" {
+                agent.agent_id
+              } else {
+                record.agent_id
+              },
+              workspace_id: if record.workspace_id == "" {
+                agent.workspace_id
+              } else {
+                record.workspace_id
+              },
+              worktree_id: record.worktree_id,
+              transcript: "",
+              cursor: 0L,
+              state_text: record.state,
+              stop_reason: record.stop_reason,
+              pending_decision: "",
+              session_picker_open: false,
+              message: tr(
+                model.lang,
+                "loaded the most recent session",
+                "已加载最近会话",
+              ),
+            }
+            commands.push(AgentRead(record.id))
+          }
+          None => ()
+        }
+      }
+      ({ ..model, agent }, commands)
+    }
     AgentStreamState(session_id, state, stop_reason, pending) => {
       let current = model.agent.session
       let same = match current {
@@ -1947,6 +2389,66 @@ pub fn update_full(
       { ..model, task: { ..model.task, machine_id: value } },
       none,
     )
+    TaskWorkspaceSelect(value) => (
+      {
+        ..model,
+        task: {
+          ..model.task,
+          workspace_id: value,
+          workspace_picker_open: false,
+        },
+      },
+      none,
+    )
+    TaskMachineSelect(value) => (
+      {
+        ..model,
+        task: {
+          ..model.task,
+          machine_id: value,
+          machine_picker_open: false,
+        },
+      },
+      none,
+    )
+    TaskWorkspacePicker(open) => (
+      {
+        ..model,
+        task: { ..model.task, workspace_picker_open: open },
+      },
+      none,
+    )
+    TaskMachinePicker(open) => (
+      {
+        ..model,
+        task: { ..model.task, machine_picker_open: open },
+      },
+      none,
+    )
+    TaskWorkspaceToggle => (
+      {
+        ..model,
+        task: {
+          ..model.task,
+          workspace_picker_open: !model.task.workspace_picker_open,
+        },
+      },
+      none,
+    )
+    TaskMachineToggle => (
+      {
+        ..model,
+        task: {
+          ..model.task,
+          machine_picker_open: !model.task.machine_picker_open,
+        },
+      },
+      none,
+    )
+    TaskAdvanced(open) => (
+      { ..model, task: { ..model.task, advanced: open } },
+      none,
+    )
     TaskCreateSubmit => {
       let state = model.task
       let title = state.title.trim().to_owned()
@@ -1982,8 +2484,8 @@ pub fn update_full(
               workspace_id,
               message: tr(
                 model.lang,
-                "create failed: open a Project or paste a workspace id",
-                "创建失败：请打开一个项目或粘贴工作区 ID",
+                "create failed: select a workspace or open a Project",
+                "创建失败：请选择工作区或打开一个项目",
               ),
             },
           },
@@ -2279,6 +2781,31 @@ pub fn update_full(
     )
     TaskError(text) => (
       { ..model, task: { ..model.task, message: text } },
+      none,
+    )
+    CopyId(label, id) => (
+      {
+        ..model,
+        clipboard_note: tr(model.lang, "Copying ", "正在复制 ") +
+        label +
+        "...",
+      },
+      [CopyText(label, id)],
+    )
+    ClipboardCopied(ok, label) => (
+      {
+        ..model,
+        clipboard_note: if ok {
+          tr(model.lang, "Copied ", "已复制 ") + label
+        } else {
+          tr(
+            model.lang,
+            "Clipboard unavailable; select the text to copy manually: ",
+            "剪贴板不可用；请手动选择复制：",
+          ) +
+          label
+        },
+      },
       none,
     )
     SearchQuery(value) => (

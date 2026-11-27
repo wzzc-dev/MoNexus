@@ -12,3 +12,6 @@ node_modules/
 
 # Release packaging output
 /dist/
+
+# Local MoUI vendor checkout (vendor workflow; never committed)
+vendor/

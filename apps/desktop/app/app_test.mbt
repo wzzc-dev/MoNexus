@@ -116,6 +116,51 @@ fn test_machine(
 }
 
 ///|
+fn test_workspace_record(
+  id : String,
+  name : String,
+  machine_id : String,
+  updated_at : String,
+) -> @contracts.WorkspaceRecord {
+  {
+    id,
+    machine_id,
+    kind: if machine_id == "" { "local" } else { "ssh" },
+    root: "/tmp/" + name,
+    name,
+    git_root: "/tmp/" + name,
+    is_git: true,
+    state: "open",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at,
+  }
+}
+
+///|
+fn test_agent_session(
+  id : String,
+  agent_id : String,
+  workspace_id : String,
+  updated_at : String,
+) -> @contracts.AgentSessionRecord {
+  let base = @contracts.AgentSessionRecord::new(
+    id~,
+    agent_id~,
+    mode=@contracts.AGENT_MODE_ACP,
+    cwd="/tmp/demo",
+    started_at=updated_at,
+  )
+  {
+    ..base,
+    workspace_id,
+    agent_name: "Planner",
+    state: @contracts.AGENT_STATE_IDLE,
+    updated_at,
+    turns: 2,
+  }
+}
+
+///|
 test "machine draft validation produces a readable error and no command" {
   let model = Model::new()
   let empty = update_full(model, SubmitMachine)
@@ -253,6 +298,173 @@ test "project open requires a root and emits OpenProject" {
 }
 
 ///|
+test "workspace projections seed the most recent name-based selectors" {
+  let older = test_workspace_record("wsp_old", "Old", "", "2026-01-01T00:00:00Z")
+  let newer = test_workspace_record(
+    "wsp_new",
+    "New",
+    "mch_1",
+    "2026-01-03T00:00:00Z",
+  )
+  let model = update(Model::new(), ProjectWorkspaces([newer, older]))
+  assert_true(model.project.workspaces_loaded)
+  assert_eq(model.agent.workspace_id, "wsp_new")
+  assert_eq(model.task.workspace_id, "wsp_new")
+  let explicit = update(model, TaskWorkspaceSelect("wsp_old"))
+  assert_eq(explicit.task.workspace_id, "wsp_old")
+  let refreshed = update(explicit, ProjectWorkspaces([older, newer]))
+  assert_eq(refreshed.task.workspace_id, "wsp_old")
+}
+
+///|
+test "agent sessions auto-load the most recent session and read its transcript" {
+  let older = test_agent_session(
+    "ses_old",
+    "agent_old",
+    "wsp_old",
+    "2026-01-01T00:00:00Z",
+  )
+  let newer = test_agent_session(
+    "ses_new",
+    "agent_new",
+    "wsp_new",
+    "2026-01-03T00:00:00Z",
+  )
+  let (model, commands) = update_full(Model::new(), AgentSessions([older, newer]))
+  match model.agent.session {
+    Some(record) => {
+      assert_eq(record.id, "ses_new")
+      assert_eq(model.agent.agent_id, "agent_new")
+      assert_eq(model.agent.workspace_id, "wsp_new")
+    }
+    None => fail("expected the most recent agent session")
+  }
+  assert_eq(commands.length(), 1)
+  match commands[0] {
+    AgentRead(session_id) => assert_eq(session_id, "ses_new")
+    _ => fail("expected AgentRead for the most recent session")
+  }
+}
+
+///|
+test "agent follow-up, stop and resume target the selected session" {
+  let record = test_agent_session(
+    "ses_live",
+    "planner",
+    "wsp_live",
+    "2026-01-03T00:00:00Z",
+  )
+  let (model, _) = update_full(Model::new(), AgentSessions([record]))
+  let drafted = update(model, AgentInputDraft("continue the review"))
+  let (sent, send_commands) = update_full(drafted, AgentSendInput)
+  assert_eq(sent.agent.input, "")
+  assert_eq(sent.agent.state_text, "running")
+  assert_eq(send_commands.length(), 1)
+  match send_commands[0] {
+    AgentSend(session_id, prompt) => {
+      assert_eq(session_id, "ses_live")
+      assert_eq(prompt, "continue the review")
+    }
+    _ => fail("expected AgentSend")
+  }
+  let (_, stop_commands) = update_full(sent, AgentStopSession)
+  assert_eq(stop_commands.length(), 1)
+  match stop_commands[0] {
+    AgentStop(session_id) => assert_eq(session_id, "ses_live")
+    _ => fail("expected AgentStop")
+  }
+  let (_, resume_commands) = update_full(sent, AgentResumeSession)
+  assert_eq(resume_commands.length(), 1)
+  match resume_commands[0] {
+    AgentResume(session_id) => assert_eq(session_id, "ses_live")
+    _ => fail("expected AgentResume")
+  }
+  let (streamed, _) = update_full(
+    sent,
+    AgentStreamText(42L, "the review is clean"),
+  )
+  assert_eq(streamed.agent.transcript, "the review is clean")
+  assert_eq(streamed.agent.cursor, 42L)
+}
+
+///|
+test "agent start uses selected names instead of typed ids" {
+  let model = update(Model::new(), AgentSelect("planner"))
+  let model = update(model, AgentWorkspaceSelect("wsp_1"))
+  let model = update(model, AgentWorktree("wt_1"))
+  let model = update(model, AgentPromptDraft("ship it"))
+  let (next, commands) = update_full(model, AgentStartSession)
+  assert_eq(next.agent.state_text, "starting")
+  assert_eq(commands.length(), 1)
+  match commands[0] {
+    AgentStart(agent_id, mode, workspace_id, worktree_id, prompt) => {
+      assert_eq(agent_id, "planner")
+      assert_eq(mode, @contracts.AGENT_MODE_ACP)
+      assert_eq(workspace_id, "wsp_1")
+      assert_eq(worktree_id, "wt_1")
+      assert_eq(prompt, "ship it")
+    }
+    _ => fail("expected AgentStart")
+  }
+}
+
+///|
+test "agent start rejects a blank selector" {
+  let model = update(Model::new(), AgentId(""))
+  let (next, commands) = update_full(model, AgentStartSession)
+  assert_eq(commands.length(), 0)
+  assert_true(next.agent.message.contains("select an agent"))
+  let defaulted = update(next, AgentUseDefault)
+  assert_eq(defaulted.agent.agent_id, "default")
+  assert_true(defaulted.agent.message.contains("Default agent selected"))
+}
+
+///|
+test "task create and dispatch preserve selected workspace and machine" {
+  let custom = update(Model::new(), TaskWorkspaceSelect("wsp_custom"))
+  let titled = update(custom, TaskTitle("ship input UX"))
+  let (_, created) = update_full(titled, TaskCreateSubmit)
+  assert_eq(created.length(), 1)
+  match created[0] {
+    TaskCreate(_, _, workspace_id, _) => assert_eq(workspace_id, "wsp_custom")
+    _ => fail("expected TaskCreate")
+  }
+  let task = task_test_record("tsk_1", "ship input UX")
+  let selected = update(Model::new(), TasksLoaded([task]))
+  let selected = update(selected, TaskSelect("tsk_1"))
+  let selected = update(selected, TaskMachineSelect("mch_remote"))
+  let selected = update(selected, TaskCommand("moon test"))
+  let (_, dispatched) = update_full(selected, RunDispatch)
+  assert_eq(dispatched.length(), 1)
+  match dispatched[0] {
+    RunCreate(task_id, _, machine_id, workspace_id) => {
+      assert_eq(task_id, "tsk_1")
+      assert_eq(machine_id, "mch_remote")
+      assert_eq(workspace_id, "wsp_1")
+    }
+    _ => fail("expected RunCreate")
+  }
+}
+
+///|
+test "copy id queues a native clipboard command and reports status" {
+  let (copying, commands) = update_full(Model::new(), CopyId("Agent ID", "agent_1"))
+  assert_eq(copying.clipboard_note, "Copying Agent ID...")
+  assert_eq(commands.length(), 1)
+  match commands[0] {
+    CopyText(label, text) => {
+      assert_eq(label, "Agent ID")
+      assert_eq(text, "agent_1")
+    }
+    _ => fail("expected CopyText")
+  }
+  let copied = update(copying, ClipboardCopied(true, "Agent ID"))
+  assert_eq(copied.clipboard_note, "Copied Agent ID")
+  let unavailable = update(copying, ClipboardCopied(false, "Agent ID"))
+  assert_true(unavailable.clipboard_note.contains("Clipboard unavailable"))
+}
+
+///|
 test "rpc params carry the mandatory client_request_id" {
   let params = @app.rpc_params(
     "cmd_test", Map([("limit", @contracts.json_int(5))]),
@@ -263,12 +475,28 @@ test "rpc params carry the mandatory client_request_id" {
 }
 
 ///|
-test "selecting Projects asks the worker for the open workspace list" {
+test "selecting name-selector pages asks the worker for projections" {
   let (_, commands) = update_full(Model::new(), SelectPage(Projects))
-  assert_eq(commands.length(), 1)
+  assert_eq(commands.length(), 2)
   match commands[0] {
     ProjectList => ()
     _ => fail("expected ProjectList")
+  }
+  match commands[1] {
+    RefreshMachines => ()
+    _ => fail("expected RefreshMachines")
+  }
+  let (_, agent_commands) = update_full(Model::new(), SelectPage(Agents))
+  assert_eq(agent_commands.length(), 3)
+  match agent_commands[2] {
+    RefreshMachines => ()
+    _ => fail("expected RefreshMachines for Agents")
+  }
+  let (_, task_commands) = update_full(Model::new(), SelectPage(Tasks))
+  assert_eq(task_commands.length(), 3)
+  match task_commands[2] {
+    RefreshMachines => ()
+    _ => fail("expected RefreshMachines for Tasks")
   }
 }
 
@@ -592,4 +820,32 @@ test "the Settings appearance note describes persistence" {
       "Applies immediately and is saved for future launches; MONEXUS_THEME picks the startup mode only until you choose one.",
     ),
   )
+}
+
+///|
+test "Agents and Tasks use name selectors and hide raw ids by default" {
+  let harness = @test_support.WidgetHarness::from_program(
+    program=program(),
+    width=1280.0,
+    height=800.0,
+  )
+  harness.tap_text("Agents")
+  assert_true(harness.has_text("Agents / Sessions"))
+  assert_true(harness.has_text("Agent: Default agent"))
+  assert_true(harness.has_text("Workspace: Select a workspace"))
+  assert_true(harness.has_text("Use default agent"))
+  assert_true(harness.has_text("Follow-up prompt"))
+  assert_true(harness.has_text("Start session"))
+  assert_false(harness.has_text("Agent id override"))
+  assert_false(harness.has_text("Workspace id override"))
+  harness.tap_text("Advanced")
+  assert_true(harness.has_text("Agent id override"))
+  assert_true(harness.has_text("Workspace id override"))
+  harness.tap_text("Tasks")
+  assert_true(harness.has_text("Create task"))
+  assert_true(harness.has_text("Workspace: Select a workspace"))
+  assert_false(harness.has_text("Workspace id override"))
+  assert_false(harness.has_text("Machine id override"))
+  harness.tap_text("Advanced")
+  assert_true(harness.has_text("Workspace id override"))
 }

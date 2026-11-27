@@ -39,6 +39,8 @@ fn machine_notice(command : MachineCommand, detail : String) -> String {
     AgentSend(_, _) => "prompt sent"
     AgentStop(_) => "session stopped"
     AgentResume(_) => "session resumed"
+    AgentRead(session_id) => "transcript loaded: " + session_id
+    CopyText(_, _) => "clipboard updated"
     AgentList => detail
     DecisionList(_) => detail
     DecisionRespond(_, _, _, _) => "decision answered"
@@ -248,6 +250,55 @@ async fn dispatch_project_diff(
 }
 
 ///|
+async fn copy_via_tool(program : String, args : Array[String], path : String) -> Bool {
+  let input = @process.redirect_from_file(path) catch { _ => return false }
+  let output = @process.redirect_to_file("/dev/null") catch { _ => return false }
+  let errors = @process.redirect_to_file("/dev/null") catch { _ => return false }
+  let result = @process.run(
+    program,
+    args,
+    stdin=input,
+    stdout=output,
+    stderr=errors,
+  ) catch {
+    _ => return false
+  }
+  result == 0
+}
+
+///|
+/// Best-effort native clipboard write without shell interpolation. The text is
+/// staged in a private temp directory and piped to the platform clipboard tool.
+async fn copy_to_system_clipboard(text : String) -> Bool {
+  let directory = @fs.tmpdir(prefix="monexus-clipboard") catch {
+    _ => return false
+  }
+  let path = directory + "/text"
+  let staged = @fs.write_file(path, text, permission=0o600) catch {
+    _ => {
+      ignore(@fs.rmdir(directory, recursive=true) catch {
+        _ => ()
+      })
+      return false
+    }
+  }
+  let _ = staged
+  let copied = if copy_via_tool("pbcopy", [], path) {
+    true
+  } else if copy_via_tool("wl-copy", [], path) {
+    true
+  } else if copy_via_tool("xsel", ["--clipboard", "--input"], path) {
+    true
+  } else {
+    copy_via_tool("xclip", ["-selection", "clipboard", "-i"], path)
+  }
+  ignore(@fs.rmdir(directory, recursive=true) catch {
+    _ => ()
+  })
+  copied
+}
+
+///|
 /// One command per connection. Commands are rare (user actions and one list
 /// refresh per reconnect), so reconnecting is simpler and more robust than
 /// keeping a second long-lived socket in sync with host restarts.
@@ -255,6 +306,14 @@ async fn execute_machine_command(
   state_dir : String,
   command : MachineCommand,
 ) -> Unit {
+  match command {
+    CopyText(label, text) => {
+      let ok = copy_to_system_clipboard(text)
+      dispatch(ClipboardCopied(ok, label))
+      return
+    }
+    _ => ()
+  }
   let info = match @client.read_host_info(state_dir) {
     Ok(value) => value
     Err(message) => {
@@ -270,6 +329,7 @@ async fn execute_machine_command(
     }
   }
   match command {
+    CopyText(_, _) => ()
     AddMachine(draft) => {
       let port = @string.parse_int(draft.port.trim().to_owned()) catch {
         _ => 0
@@ -628,6 +688,37 @@ async fn execute_machine_command(
             Err(message) => dispatch(AgentError(message))
           }
         Err(message) => dispatch(AgentError("agent.resume: " + message))
+      }
+    }
+    AgentRead(session_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_AGENT_READ,
+          @contracts.agent_read_params(id, session_id, 0L),
+        ) {
+        Ok(json) =>
+          match @contracts.agent_read_from_json(json) {
+            Some(read) => {
+              dispatch(
+                AgentStreamState(
+                  session_id,
+                  read.state,
+                  read.stop_reason,
+                  read.pending_decision,
+                ),
+              )
+              if read.text != "" {
+                dispatch(AgentStreamText(read.cursor, read.text))
+              }
+              if @contracts.agent_state_is_active(read.state) {
+                enqueue_agent_stream(session_id)
+              }
+            }
+            None => dispatch(AgentError("agent.read: malformed result"))
+          }
+        Err(message) => dispatch(AgentError("agent.read: " + message))
       }
     }
     AgentList => {
