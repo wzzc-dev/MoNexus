@@ -59,29 +59,35 @@ fn terminal_transcript_theme() -> @core.Theme {
 /// Transcript viewport. New output bumps `terminal_scroll_epoch`, which asks
 /// the scroll view to follow the tail; a fixed request id lets the user wheel
 /// back through history without every repaint yanking them to the bottom.
-fn terminal_transcript_view(model : Model) -> @moui.View[Msg] {
+fn terminal_transcript_view(
+  model : Model,
+  width~ : Double = terminal_transcript_width,
+  height~ : Double = terminal_transcript_height,
+  columns~ : Int32 = 104,
+  scroll_id_offset~ : Int32 = 0,
+) -> @moui.View[Msg] {
   let text = terminal_transcript_text(model.project.terminal_text)
-  let lines = match terminal_visual_line_count(text, 104) {
+  let lines = match terminal_visual_line_count(text, columns) {
     count if count < 20 => 20
     count => count
   }
   let content_height = lines.to_double() * terminal_line_height + 24.0
-  let offset_y = (content_height - terminal_transcript_height).max(0.0)
+  let offset_y = (content_height - height).max(0.0)
   let content = @views.text_area(
     text,
     on_input=fn(_value) { ProjectTerminalTranscriptEdited("") },
     variant=@style.TextFieldVariant::Filled,
     theme=terminal_transcript_theme(),
-    width=terminal_transcript_width,
+    width~,
     lines~,
     line_height=terminal_line_height,
   )
   @views.scroll_view(
     content,
-    width=terminal_transcript_width,
-    height=terminal_transcript_height,
+    width~,
+    height~,
     request=@core.ScrollRequest::new(
-      id=model.project.terminal_scroll_epoch,
+      id=model.project.terminal_scroll_epoch + scroll_id_offset,
       offset=@core.Point::new(x=0.0, y=offset_y),
     ),
     shows_indicator=true,

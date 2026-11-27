@@ -695,6 +695,10 @@ pub struct Model {
   draft : MachineDraft
   project : ProjectState
   agent : AgentState
+  /// Floating workspace overlay: a parallel note/Agent/terminal surface that
+  /// never replaces the current route. Geometry and tab state stay in-model
+  /// when the overlay is closed.
+  float : FloatWorkspace
   inbox : InboxState
   task : TaskState
   search : SearchState
@@ -842,6 +846,25 @@ pub fn Model::new_with_preferences(
       }
     None => ()
   }
+  let mut float = FloatWorkspace::new(language.language)
+  match @env.get_env_var("MONEXUS_SCENE_FLOAT") {
+    Some(value) => {
+      let scene = value.to_lower()
+      if scene != "" && scene != "off" && scene != "closed" {
+        float = { ..float, open: true }
+        if scene.contains("agent") {
+          float = float_new_kind_tab(float, FloatAgent)
+        }
+        if scene.contains("terminal") {
+          float = float_new_kind_tab(float, FloatTerminal)
+        }
+        if scene.contains("menu") {
+          float = { ..float, menu_open: true }
+        }
+      }
+    }
+    None => ()
+  }
   {
     page,
     manage_tab,
@@ -893,6 +916,7 @@ pub fn Model::new_with_preferences(
     draft: MachineDraft::new(),
     project: ProjectState::new(),
     agent: AgentState::new(),
+    float,
     inbox: InboxState::new(),
     task: TaskState::new(),
     search: SearchState::new(),
@@ -1187,6 +1211,24 @@ pub(all) enum Msg {
   SearchQuery(String)
   SearchSubmit
   SearchLoaded(Array[@contracts.SearchHit], String)
+  // Floating workspace overlay.
+  ToggleFloatWorkspace
+  CloseFloatWorkspace
+  FloatSelectTab(String)
+  FloatCloseTab(String)
+  FloatNewNote
+  FloatNewAgent
+  FloatNewTerminal
+  FloatMenu(Bool)
+  FloatNoteTitleDraft(String)
+  FloatNoteContentDraft(String)
+  FloatNoteStored(String, Int, Bool, String)
+  FloatWorkspaceRestored(FloatWorkspaceRestore)
+  FloatHeaderDrag(@core.DragGesturePhase, Double, Double)
+  FloatResizeDrag(@core.DragGesturePhase, Double, Double)
+  FloatOpenTerminal
+  FloatTerminalReconnect
+  FloatNoop
 }
 
 ///|
@@ -3334,7 +3376,7 @@ pub fn update_full(
       )
     }
     ChatPoll =>
-      if model.page != Workroom ||
+      if !(model.page == Workroom || float_agent_visible(model)) ||
         model.composing_new_chat ||
         model.selected_chat == "" ||
         model.chat_poll_in_flight ||
@@ -6227,6 +6269,379 @@ pub fn update_full(
       },
       none,
     )
+    ToggleFloatWorkspace => {
+      let closing_terminal = float_terminal_visible(model)
+      let float = {
+        ..model.float,
+        open: !model.float.open,
+        menu_open: false,
+        dragging: false,
+        resizing: false,
+      }
+      let project = if closing_terminal && model.page != Manage {
+        { ..model.project, terminal_focus: false }
+      } else {
+        model.project
+      }
+      ({ ..model, float: float_workspace_clamped(float), project }, none)
+    }
+    CloseFloatWorkspace => {
+      let closing_terminal = float_terminal_visible(model)
+      let project = if closing_terminal && model.page != Manage {
+        { ..model.project, terminal_focus: false }
+      } else {
+        model.project
+      }
+      (
+        {
+          ..model,
+          float: {
+            ..model.float,
+            open: false,
+            menu_open: false,
+            dragging: false,
+            resizing: false,
+          },
+          project,
+        },
+        none,
+      )
+    }
+    FloatSelectTab(tab_id) =>
+      match float_tab_by_id(model.float, tab_id) {
+        Some(tab) => {
+          let project = if tab.kind == FloatTerminal &&
+            model.project.workspace is Some(_) {
+            { ..model.project, terminal_focus: true }
+          } else {
+            model.project
+          }
+          (
+            {
+              ..model,
+              float: {
+                ..model.float,
+                active_tab: tab_id,
+                menu_open: false,
+              },
+              project,
+            },
+            none,
+          )
+        }
+        None => (model, none)
+      }
+    FloatCloseTab(tab_id) => {
+      let closing_terminal = match float_tab_by_id(model.float, tab_id) {
+        Some(tab) => tab.kind == FloatTerminal
+        None => false
+      }
+      let float = float_close_tab(model.float, tab_id)
+      let project = if closing_terminal && model.page != Manage {
+        { ..model.project, terminal_focus: false }
+      } else {
+        model.project
+      }
+      ({ ..model, float, project }, none)
+    }
+    FloatNewNote => (
+      { ..model, float: float_new_note(model.float, model.lang) },
+      none,
+    )
+    FloatNewAgent => (
+      { ..model, float: float_new_kind_tab(model.float, FloatAgent) },
+      none,
+    )
+    FloatNewTerminal => {
+      let float = float_new_kind_tab(model.float, FloatTerminal)
+      let commands : Array[MachineCommand] = []
+      let project = match model.project.workspace {
+        Some(record) => {
+          let should_open = model.project.terminal_id == "" &&
+            model.project.terminal_state == TerminalClosed
+          if should_open {
+            commands.push(ProjectOpenTerminal(record.id))
+          }
+          {
+            ..model.project,
+            terminal_focus: true,
+            terminal_state: if should_open {
+              TerminalOpening
+            } else {
+              model.project.terminal_state
+            },
+          }
+        }
+        None => model.project
+      }
+      let float = if model.project.workspace is None {
+        {
+          ..float,
+          message: tr(
+            model.lang,
+            "Open a project first, then open its terminal.",
+            "请先打开项目，然后打开其终端。",
+          ),
+        }
+      } else {
+        float
+      }
+      ({ ..model, float, project }, commands)
+    }
+    FloatMenu(open) => (
+      { ..model, float: { ..model.float, menu_open: open } },
+      none,
+    )
+    FloatNoteTitleDraft(value) =>
+      match float_active_note(model.float) {
+        Some(note) =>
+          match float_note_title_problem(value) {
+            Some(problem) => (
+              {
+                ..model,
+                float: { ..model.float, message: problem },
+              },
+              none,
+            )
+            None => {
+              let float = float_note_updated(
+                model.float,
+                note.id,
+                fn(current) {
+                  {
+                    ..current,
+                    title: value,
+                    state: FloatNoteSaving,
+                    revision: current.revision + 1,
+                  }
+                },
+              )
+              (
+                {
+                  ..model,
+                  float: { ..float, message: "" },
+                },
+                none,
+              )
+            }
+          }
+        None => (model, none)
+      }
+    FloatNoteContentDraft(value) =>
+      match float_active_note(model.float) {
+        Some(note) => {
+          let float = float_note_updated(
+            model.float,
+            note.id,
+            fn(current) {
+              {
+                ..current,
+                content: value,
+                state: FloatNoteSaving,
+                revision: current.revision + 1,
+              }
+            },
+          )
+          (
+            {
+              ..model,
+              float: { ..float, message: "" },
+            },
+            none,
+          )
+        }
+        None => (model, none)
+      }
+    FloatNoteStored(note_id, revision, ok, error) => {
+      let float = float_note_updated(
+        model.float,
+        note_id,
+        fn(current) {
+          if current.revision == revision {
+            {
+              ..current,
+              state: if ok {
+                FloatNoteSaved
+              } else {
+                FloatNoteFailed(error)
+              },
+            }
+          } else {
+            current
+          }
+        },
+      )
+      ({ ..model, float }, none)
+    }
+    FloatWorkspaceRestored(restore) => {
+      if model.float.loaded {
+        (model, none)
+      } else if restore.has_state {
+        let float = {
+          ..model.float,
+          x: restore.x,
+          y: restore.y,
+          width: restore.width,
+          height: restore.height,
+          active_tab: restore.active_tab,
+          tabs: restore.tabs,
+          notes: restore.notes,
+          next_id: restore.next_id,
+          loaded: true,
+          menu_open: false,
+          message: restore.message,
+        }
+        ({ ..model, float: float_workspace_clamped(float) }, none)
+      } else {
+        (
+          {
+            ..model,
+            float: {
+              ..model.float,
+              loaded: true,
+              message: restore.message,
+            },
+          },
+          none,
+        )
+      }
+    }
+    FloatHeaderDrag(phase, dx, dy) =>
+      match phase {
+        @core.DragGesturePhase::Started => (
+          {
+            ..model,
+            float: {
+              ..model.float,
+              dragging: true,
+              drag_origin_x: model.float.x,
+              drag_origin_y: model.float.y,
+            },
+          },
+          none,
+        )
+        @core.DragGesturePhase::Changed =>
+          if model.float.dragging {
+            let float = float_workspace_clamped({
+              ..model.float,
+              x: model.float.drag_origin_x + dx,
+              y: model.float.drag_origin_y + dy,
+            })
+            ({ ..model, float }, none)
+          } else {
+            (model, none)
+          }
+        @core.DragGesturePhase::Ended | @core.DragGesturePhase::Cancelled => (
+          { ..model, float: { ..model.float, dragging: false } },
+          none,
+        )
+        _ => (model, none)
+      }
+    FloatResizeDrag(phase, dx, dy) =>
+      match phase {
+        @core.DragGesturePhase::Started => (
+          {
+            ..model,
+            float: {
+              ..model.float,
+              resizing: true,
+              resize_origin_width: model.float.width,
+              resize_origin_height: model.float.height,
+            },
+          },
+          none,
+        )
+        @core.DragGesturePhase::Changed =>
+          if model.float.resizing {
+            let width = (model.float.resize_origin_width + dx).clamp(
+              min=float_min_width,
+              max=float_max_width,
+            )
+            let height = (model.float.resize_origin_height + dy).clamp(
+              min=float_min_height,
+              max=float_max_height,
+            )
+            let float = float_workspace_clamped({
+              ..model.float,
+              width,
+              height,
+            })
+            ({ ..model, float }, none)
+          } else {
+            (model, none)
+          }
+        @core.DragGesturePhase::Ended | @core.DragGesturePhase::Cancelled => (
+          { ..model, float: { ..model.float, resizing: false } },
+          none,
+        )
+        _ => (model, none)
+      }
+    FloatOpenTerminal => {
+      let commands : Array[MachineCommand] = []
+      let project = match model.project.workspace {
+        Some(record) => {
+          let should_open = model.project.terminal_id == "" &&
+            model.project.terminal_state == TerminalClosed
+          if should_open {
+            commands.push(ProjectOpenTerminal(record.id))
+          }
+          {
+            ..model.project,
+            terminal_focus: true,
+            terminal_state: if should_open {
+              TerminalOpening
+            } else {
+              model.project.terminal_state
+            },
+          }
+        }
+        None => model.project
+      }
+      let float = if model.project.workspace is None {
+        {
+          ..model.float,
+          message: tr(
+            model.lang,
+            "Open a project first, then open its terminal.",
+            "请先打开项目，然后打开其终端。",
+          ),
+        }
+      } else {
+        { ..model.float, message: "" }
+      }
+      ({ ..model, float, project }, commands)
+    }
+    FloatTerminalReconnect => {
+      let commands : Array[MachineCommand] = []
+      if model.project.terminal_id != "" {
+        commands.push(ProjectCloseTerminal(model.project.terminal_id))
+      }
+      match model.project.workspace {
+        Some(record) => {
+          commands.push(ProjectOpenTerminal(record.id))
+          (
+            {
+              ..model,
+              project: {
+                ..model.project,
+                terminal_id: "",
+                terminal_text: "",
+                terminal_cursor: 0L,
+                terminal_focus: true,
+                terminal_state: TerminalOpening,
+                terminal_eof: false,
+                terminal_error: "",
+                terminal_read_in_flight: false,
+                terminal_scroll_epoch: model.project.terminal_scroll_epoch + 1,
+              },
+            },
+            commands,
+          )
+        }
+        None => (model, commands)
+      }
+    }
+    FloatNoop => (model, none)
     SearchQuery(value) => (
       { ..model, search: { ..model.search, query: value } },
       none,

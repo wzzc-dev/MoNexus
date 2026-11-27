@@ -784,6 +784,7 @@ fn sidebar(model : Model) -> @moui.View[Msg] {
           nav_item(model, Tasks),
           nav_item(model, Manage),
           nav_item(model, Search),
+          float_sidebar_item(model),
         ], spacing=1.0),
       ], spacing=0.0).frame(width=184.0),
       top=10.0,
@@ -3327,11 +3328,12 @@ pub fn view(model : Model) -> @moui.View[Msg] {
     sidebar(model),
     main_island(model),
   ], spacing=ui_gap, align=@style.CrossAlign::Start)
-  container(
+  let framed = container(
     shell,
     width=ui_window_width,
     height=ui_window_height,
     background=ui_frame(),
     padding=ui_margin,
   ).theme(app_theme())
+  float_window_layer(model, framed)
 }

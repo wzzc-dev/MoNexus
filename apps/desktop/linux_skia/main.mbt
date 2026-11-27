@@ -89,6 +89,9 @@ async fn main {
   let chat_poll_task : async () -> Unit = async fn() {
     @app.chat_poll_loop()
   }
+  let float_notes_task : async () -> Unit = async fn() {
+    @app.float_notes_loop(@app.float_config_dir())
+  }
   @async.with_task_group(async fn(group) {
     group.spawn_bg(
       no_wait=true,
@@ -124,6 +127,11 @@ async fn main {
       no_wait=true,
       allow_failure=true,
       chat_poll_task,
+    )
+    group.spawn_bg(
+      no_wait=true,
+      allow_failure=true,
+      float_notes_task,
     )
     window_task()
   })
