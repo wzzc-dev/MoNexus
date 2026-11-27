@@ -1005,3 +1005,1210 @@ async test "Chat session start rejects suspended Bot and archived Chat" {
   assert_true(archived_error.message.contains("Conflict"))
   assert_true(archived_error.message.contains("Chat is archived"))
 }
+
+///|
+fn bots_host_error_kind(error : @contracts.RpcError) -> String {
+  let data = match error.data {
+    Some(value) => value
+    None => return ""
+  }
+  match @contracts.as_object(data) {
+    Some(object) => @contracts.string_field_or(object, "kind", "")
+    None => ""
+  }
+}
+
+///|
+fn bots_host_events_of_type(
+  state : HostState,
+  after : Int64,
+  event_type : String,
+) -> Array[@contracts.EventEnvelope] raise {
+  let events = match state.store.load_events_since(after, 500) {
+    Ok(value) => value
+    Err(message) => fail("load_events_since failed: " + message)
+  }
+  events.filter(fn(event) { event.event_type == event_type })
+}
+
+///|
+fn bots_host_string_array_field(
+  object : Map[String, @json.Json],
+  key : String,
+) -> Array[String] {
+  let out : Array[String] = []
+  match object.get(key) {
+    Some(@json.Json::Array(items)) =>
+      for item in items {
+        match item {
+          @json.Json::String(value) => out.push(value)
+          _ => ()
+        }
+      }
+    _ => ()
+  }
+  out
+}
+
+///|
+async fn bots_host_seed_runtime_chat(
+  state : HostState,
+  dir : String,
+  now : String,
+  seed : Int64,
+  command : String,
+  args : Array[String],
+) -> (
+  @contracts.BotRecord,
+  @contracts.AgentRecord,
+  @contracts.ChatRecord,
+  @contracts.WorkspaceRecord,
+) raise {
+  let root = dir + "/workspace-" + seed.to_string()
+  @fs.mkdir(root, permission=0o700, recursive=true, allow_exist=true) catch {
+    _ => fail("cannot create the workspace directory")
+  }
+  let workspace = bots_host_workspace("ws_host_" + seed.to_string(), root, now)
+  let bot = @contracts.BotRecord::new(
+    id=@contracts.new_bot_id(seed),
+    org_id=@contracts.ORG_LOCAL,
+    name="Host Runtime Bot " + seed.to_string(),
+    created_at=now,
+    memory_ref="bot/host-runtime/memory",
+    home=dir + "/bot-home-" + seed.to_string(),
+    permission_ceiling=["repo:read"],
+    create_policy=@contracts.BOT_CREATE_POLICY_AUTO,
+    agent_count_cap=2,
+    agent_concurrency_cap=2,
+    software_allowlist=["mock-acp"],
+  )
+  let agent = @contracts.AgentRecord::new(
+    id=@contracts.new_agent_id(seed + 1L),
+    org_id=bot.org_id,
+    bot_id=bot.id,
+    name="Host Runtime Worker " + seed.to_string(),
+    runtime_binding=@contracts.RuntimeBinding::new(
+      software_id="mock-acp",
+      adapter_id="acp",
+      launch_kind=@contracts.RUNTIME_LAUNCH_ACP,
+      command~,
+      args~,
+      model_profile="test",
+      hash="sha256:host-runtime-binding-" + seed.to_string(),
+    ),
+    created_at=now,
+    permission_scope=["repo:read"],
+    state=@contracts.AGENT_LIFECYCLE_ACTIVE,
+  )
+  let chat = @contracts.ChatRecord::new(
+    id=@contracts.new_chat_id(seed + 2L),
+    org_id=@contracts.ORG_LOCAL,
+    title="Host Runtime Chat " + seed.to_string(),
+    created_at=now,
+  )
+  state.mutex.acquire()
+  match
+    state.append_workspace_event(
+      @contracts.EVENT_WORKSPACE_OPENED,
+      "workspace/" + workspace.id,
+      @contracts.workspace_event_payload(workspace),
+      Some(workspace),
+      None,
+    ) {
+    Ok(_) => ()
+    Err(message) => {
+      state.mutex.release()
+      fail("cannot seed the workspace: " + message)
+    }
+  }
+  let created_bot = match state.store.create_bot(bot, "owner", "test", now) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("cannot create the Bot: " + message)
+    }
+  }
+  let created_agent = match
+    state.store.create_agent(agent, "", "owner", "test", now) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("cannot create the Agent: " + message)
+    }
+  }
+  let created_chat = match
+    state.store.create_chat(chat, [created_bot.id], "owner", "test", now) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("cannot create the Chat: " + message)
+    }
+  }
+  state.mutex.release()
+  (created_bot, created_agent, created_chat, workspace)
+}
+
+///|
+async fn bots_host_list_chat_sessions(
+  state : HostState,
+  chat_id : String,
+) -> Array[@contracts.AgentSession] raise {
+  state.mutex.acquire()
+  let result = state.store.list_chat_agent_sessions(chat_id)
+  state.mutex.release()
+  match result {
+    Ok(value) => value
+    Err(message) => fail("list_chat_agent_sessions failed: " + message)
+  }
+}
+
+///|
+async fn bots_host_runtime_count(state : HostState) -> Int {
+  state.mutex.acquire()
+  let count = state.agent_sessions.size()
+  state.mutex.release()
+  count
+}
+
+///|
+async fn bots_host_has_runtime(state : HostState, runtime_id : String) -> Bool {
+  state.mutex.acquire()
+  let present = state.agent_sessions.contains(runtime_id)
+  state.mutex.release()
+  present
+}
+
+///|
+async test "Bot update records the caller version and keeps the read-only guards" {
+  let state = host_test_state("/tmp/monexus-host-bots-update-test", false) catch {
+    error => fail(error.to_string())
+  }
+  let bot = bots_host_bot()
+  let create_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_bot_update_create",
+      @contracts.METHOD_BOT_CREATE,
+      @contracts.bot_create_params("cid_bot_update_create", bot),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let created = match
+    @contracts.bot_from_result(bots_host_result(create_text)) {
+    Ok(value) => value
+    Err(message) => fail("bot.create result: " + message)
+  }
+  let before = match state.store.last_seq() {
+    Ok(value) => value
+    Err(message) => fail("last_seq failed: " + message)
+  }
+  let renamed = { ..created, name: "Host Builder Renamed" }
+  let rename_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_bot_update_rename",
+      @contracts.METHOD_BOT_UPDATE,
+      @contracts.bot_update_params(
+        "cid_bot_update_rename",
+        renamed,
+        ["name"],
+        2,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let rename_result = match
+    @contracts.bot_from_result(bots_host_result(rename_text)) {
+    Ok(value) => value
+    Err(message) => fail("bot.update result: " + message)
+  }
+  assert_eq(rename_result.name, "Host Builder Renamed")
+  assert_true(rename_result.updated_at != "")
+  let stored = match state.store.get_bot(created.id) {
+    Ok(Some(value)) => value
+    Ok(None) => fail("bot.update did not persist the Bot")
+    Err(message) => fail("get_bot failed: " + message)
+  }
+  assert_eq(stored.name, "Host Builder Renamed")
+  let updated_events = bots_host_events_of_type(
+    state,
+    before,
+    @contracts.EVENT_BOT_UPDATED,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  assert_eq(updated_events.length(), 1)
+  let payload = match @contracts.as_object(updated_events[0].payload) {
+    Some(value) => value
+    None => fail("bot.updated payload is not an object")
+  }
+  assert_eq(@contracts.string_field_or(payload, "actor", ""), "owner")
+  assert_eq(@contracts.int_field_or(payload, "version", -1), 2)
+  let changed = bots_host_string_array_field(payload, "changed_fields")
+  assert_eq(changed.length(), 1)
+  assert_eq(changed[0], "name")
+  match @contracts.bot_updated_record(updated_events[0].payload) {
+    Some(record) => assert_eq(record.name, "Host Builder Renamed")
+    None => fail("bot.updated record did not decode")
+  }
+
+  // A stale caller version is currently accepted and echoed verbatim. This
+  // pins the existing behavior so a future optimistic-concurrency decision
+  // has to change this test deliberately.
+  let stale_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_bot_update_stale",
+      @contracts.METHOD_BOT_UPDATE,
+      @contracts.bot_update_params(
+        "cid_bot_update_stale",
+        { ..stored, name: "Host Builder Stale Version" },
+        ["name"],
+        2,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let stale = match
+    @contracts.bot_from_result(bots_host_result(stale_text)) {
+    Ok(value) => value
+    Err(message) => fail("stale bot.update result: " + message)
+  }
+  assert_eq(stale.name, "Host Builder Stale Version")
+
+  // Archived Bots are read-only.
+  let archive_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_bot_update_archive",
+      @contracts.METHOD_BOT_ARCHIVE,
+      @contracts.bot_archive_params(
+        "cid_bot_update_archive",
+        created.id,
+        "done",
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let archived = match
+    @contracts.bot_from_result(bots_host_result(archive_text)) {
+    Ok(value) => value
+    Err(message) => fail("bot.archive result: " + message)
+  }
+  assert_eq(archived.state, @contracts.BOT_STATE_ARCHIVED)
+  let archived_update_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_bot_update_archived",
+      @contracts.METHOD_BOT_UPDATE,
+      @contracts.bot_update_params(
+        "cid_bot_update_archived",
+        { ..archived, name: "Should Not Apply" },
+        ["name"],
+        3,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let archived_error = bots_host_error(archived_update_text)
+  assert_eq(bots_host_error_kind(archived_error), "conflict")
+  assert_true(archived_error.message.contains("read-only"))
+
+  // A second Bot exercises the immutable/policy/permission and empty-field
+  // guards, plus the fact that only archived (not suspended) is read-only.
+  let guard_bot = {
+    ..bots_host_bot(),
+    id: @contracts.new_bot_id(7_110L),
+    name: "Host Builder Guards",
+  }
+  let guard_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_bot_update_guard_create",
+      @contracts.METHOD_BOT_CREATE,
+      @contracts.bot_create_params("cid_bot_update_guard_create", guard_bot),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let guards = match
+    @contracts.bot_from_result(bots_host_result(guard_text)) {
+    Ok(value) => value
+    Err(message) => fail("guard bot.create result: " + message)
+  }
+  let immutable_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_bot_update_immutable",
+      @contracts.METHOD_BOT_UPDATE,
+      @contracts.bot_update_params(
+        "cid_bot_update_immutable",
+        { ..guards, state: @contracts.BOT_STATE_SUSPENDED },
+        ["state"],
+        2,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let immutable_error = bots_host_error(immutable_text)
+  assert_eq(bots_host_error_kind(immutable_error), "conflict")
+  assert_true(immutable_error.message.contains("immutable"))
+  let policy_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_bot_update_policy",
+      @contracts.METHOD_BOT_UPDATE,
+      @contracts.bot_update_params(
+        "cid_bot_update_policy",
+        { ..guards, agent_concurrency_cap: 3 },
+        ["agent_concurrency_cap"],
+        2,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  assert_true(
+    bots_host_error(policy_text).message.contains("update_bot_policy"),
+  )
+  let permission_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_bot_update_permission",
+      @contracts.METHOD_BOT_UPDATE,
+      @contracts.bot_update_params(
+        "cid_bot_update_permission",
+        { ..guards, permission_ceiling: ["repo:read", "repo:write"] },
+        ["permission_ceiling"],
+        2,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  assert_true(
+    bots_host_error(permission_text).message.contains("update_bot_permissions"),
+  )
+  let empty_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_bot_update_empty",
+      @contracts.METHOD_BOT_UPDATE,
+      @contracts.bot_update_params(
+        "cid_bot_update_empty",
+        guards,
+        [],
+        2,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let empty_error = bots_host_error(empty_text)
+  assert_eq(bots_host_error_kind(empty_error), "invalid")
+  assert_true(empty_error.message.contains("no changed fields"))
+
+  // Suspended is not read-only for bot.update in the current store.
+  let suspended = {
+    ..guards,
+    state: @contracts.BOT_STATE_SUSPENDED,
+    updated_at: "2026-11-27T06:10:00Z",
+  }
+  state.mutex.acquire()
+  match
+    state.store.append_bots_event(
+      @contracts.EVENT_BOT_UPDATED,
+      @contracts.bot_event_subject(guards.id),
+      @contracts.bot_updated_payload(suspended, ["state"], 3, "owner"),
+      "2026-11-27T06:10:00Z",
+      guards.org_id,
+    ) {
+    Ok(_) => ()
+    Err(message) => {
+      state.mutex.release()
+      fail("cannot persist the suspended Bot: " + message)
+    }
+  }
+  state.mutex.release()
+  let suspended_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_bot_update_suspended",
+      @contracts.METHOD_BOT_UPDATE,
+      @contracts.bot_update_params(
+        "cid_bot_update_suspended",
+        { ..suspended, name: "Host Builder Suspended Renamed" },
+        ["name"],
+        4,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let suspended_result = match
+    @contracts.bot_from_result(bots_host_result(suspended_text)) {
+    Ok(value) => value
+    Err(message) => fail("suspended bot.update result: " + message)
+  }
+  assert_eq(suspended_result.state, @contracts.BOT_STATE_SUSPENDED)
+  assert_eq(suspended_result.name, "Host Builder Suspended Renamed")
+}
+
+///|
+async test "Chat agent_session.end stops the runtime and repeats idempotently" {
+  let dir = @fs.tmpdir(prefix="monexus-bots-session-end-") catch {
+    _ => fail("cannot create a temp directory")
+  }
+  defer @async.protect_from_cancel(async fn() {
+    @fs.rmdir(dir, recursive=true) catch { _ => () }
+  })
+  let done : @aqueue.Queue[Unit] = @aqueue.Queue(kind=Unbounded)
+  let inner_group : Ref[@async.TaskGroup[Unit]?] = Ref(None)
+  let state_ref : Ref[HostState?] = Ref(None)
+  @async.with_task_group(async fn(outer) {
+    outer.spawn_bg(
+      no_wait=true,
+      allow_failure=true,
+      async fn() {
+        done.get()
+        match inner_group.val {
+          Some(inner) => inner.return_immediately(())
+          None => ()
+        }
+      },
+    )
+    @async.with_task_group(async fn(group) {
+      let state = host_test_state(dir + "/state", false) catch {
+        error => fail(error.to_string())
+      }
+      state_ref.val = Some(state)
+      state.group.val = Some(group)
+      inner_group.val = Some(group)
+      let script = bots_host_repo_file("tests/agent/mock_acp_agent.mjs") catch {
+        error => fail(error.to_string())
+      }
+      let (_, agent, chat, workspace) = bots_host_seed_runtime_chat(
+        state,
+        dir,
+        "2026-11-27T06:20:00Z",
+        7_400L,
+        "node",
+        [script],
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let start_text = bots_host_call(
+        state,
+        @contracts.RpcRequest::new(
+          "req_session_end_start",
+          @contracts.METHOD_CHAT_AGENT_SESSION_START,
+          @contracts.chat_agent_session_start_params(
+            "cid_session_end_start",
+            chat.id,
+            agent.id,
+            workspace.id,
+            workspace.root,
+          ),
+        ),
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let session = match
+        @contracts.chat_agent_session_from_result(
+          bots_host_result(start_text),
+        ) {
+        Ok(value) => value
+        Err(message) => fail("chat.agent_session.start result: " + message)
+      }
+      assert_eq(session.state, @contracts.AGENT_SESSION_STATE_ACTIVE)
+      assert_true(session.runtime_session_id != "")
+      let runtime_id = session.runtime_session_id
+      assert_true(bots_host_has_runtime(state, runtime_id))
+      assert_eq(bots_host_runtime_count(state), 1)
+      let before_end = match state.store.last_seq() {
+        Ok(value) => value
+        Err(message) => fail("last_seq failed: " + message)
+      }
+      let end_text = bots_host_call(
+        state,
+        @contracts.RpcRequest::new(
+          "req_session_end",
+          @contracts.METHOD_CHAT_AGENT_SESSION_END,
+          @contracts.chat_agent_session_end_params(
+            "cid_session_end",
+            session.id,
+            @contracts.AGENT_SESSION_END_REASON_TURN_END,
+          ),
+        ),
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let ended = match
+        @contracts.chat_agent_session_from_result(bots_host_result(end_text)) {
+        Ok(value) => value
+        Err(message) => fail("chat.agent_session.end result: " + message)
+      }
+      assert_eq(ended.id, session.id)
+      assert_eq(ended.state, @contracts.AGENT_SESSION_STATE_ENDED)
+      assert_eq(
+        ended.end_reason,
+        @contracts.AGENT_SESSION_END_REASON_TURN_END,
+      )
+      assert_true(!bots_host_has_runtime(state, runtime_id))
+      assert_eq(bots_host_runtime_count(state), 0)
+
+      // Active -> ending -> ended is the store event trail; no second active
+      // record exists and the terminal event is written exactly once.
+      let updated_events = bots_host_events_of_type(
+        state,
+        before_end,
+        @contracts.EVENT_CHAT_AGENT_SESSION_UPDATED,
+      ) catch {
+        error => fail(error.to_string())
+      }
+      assert_eq(updated_events.length(), 1)
+      let ending = match
+        @contracts.chat_agent_session_updated_record(
+          updated_events[0].payload,
+        ) {
+        Some(value) => value
+        None => fail("chat.agent_session.updated record did not decode")
+      }
+      assert_eq(ending.state, @contracts.AGENT_SESSION_STATE_ENDING)
+      let ended_events = bots_host_events_of_type(
+        state,
+        before_end,
+        @contracts.EVENT_CHAT_AGENT_SESSION_ENDED,
+      ) catch {
+        error => fail(error.to_string())
+      }
+      assert_eq(ended_events.length(), 1)
+      let ended_record = match
+        @contracts.chat_agent_session_ended_record(ended_events[0].payload) {
+        Some(value) => value
+        None => fail("chat.agent_session.ended record did not decode")
+      }
+      assert_eq(ended_record.id, session.id)
+      assert_eq(ended_record.state, @contracts.AGENT_SESSION_STATE_ENDED)
+      let sessions = bots_host_list_chat_sessions(state, chat.id) catch {
+        error => fail(error.to_string())
+      }
+      assert_eq(sessions.length(), 1)
+      assert_eq(sessions[0].id, session.id)
+      assert_eq(sessions[0].state, @contracts.AGENT_SESSION_STATE_ENDED)
+      let get_text = bots_host_call(
+        state,
+        @contracts.RpcRequest::new(
+          "req_session_end_get",
+          @contracts.METHOD_CHAT_GET,
+          @contracts.chat_get_params("cid_session_end_get", chat.id),
+        ),
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let detail = match
+        @contracts.chat_from_result(bots_host_result(get_text)) {
+        Ok(value) => value
+        Err(message) => fail("chat.get after end: " + message)
+      }
+      match detail.active_agent_session {
+        Some(_) => fail("ended AgentSession is still returned as active")
+        None => ()
+      }
+
+      // A repeated end on a terminal session returns the same terminal record
+      // and appends no second terminal event.
+      let before_repeat = match state.store.last_seq() {
+        Ok(value) => value
+        Err(message) => fail("last_seq failed: " + message)
+      }
+      let repeat_text = bots_host_call(
+        state,
+        @contracts.RpcRequest::new(
+          "req_session_end_repeat",
+          @contracts.METHOD_CHAT_AGENT_SESSION_END,
+          @contracts.chat_agent_session_end_params(
+            "cid_session_end_repeat",
+            session.id,
+            @contracts.AGENT_SESSION_END_REASON_CANCELLED,
+          ),
+        ),
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let repeated = match
+        @contracts.chat_agent_session_from_result(
+          bots_host_result(repeat_text),
+        ) {
+        Ok(value) => value
+        Err(message) => fail("repeated chat.agent_session.end: " + message)
+      }
+      assert_eq(repeated.id, session.id)
+      assert_eq(repeated.state, @contracts.AGENT_SESSION_STATE_ENDED)
+      assert_eq(
+        repeated.end_reason,
+        @contracts.AGENT_SESSION_END_REASON_TURN_END,
+      )
+      let repeat_events = bots_host_events_of_type(
+        state,
+        before_repeat,
+        @contracts.EVENT_CHAT_AGENT_SESSION_ENDED,
+      ) catch {
+        error => fail(error.to_string())
+      }
+      assert_eq(repeat_events.length(), 0)
+      assert_eq(bots_host_runtime_count(state), 0)
+
+      // chat.stop on the terminal session is also idempotent: it reports
+      // stopped=false, returns the same terminal record and writes nothing.
+      let before_stop_repeat = match state.store.last_seq() {
+        Ok(value) => value
+        Err(message) => fail("last_seq failed: " + message)
+      }
+      let stop_repeat_text = bots_host_call(
+        state,
+        @contracts.RpcRequest::new(
+          "req_session_stop_repeat",
+          @contracts.METHOD_CHAT_STOP,
+          @contracts.chat_stop_params(
+            "cid_session_stop_repeat",
+            chat.id,
+            end_reason=@contracts.AGENT_SESSION_END_REASON_CANCELLED,
+            session_id=session.id,
+          ),
+        ),
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let stop_repeat = match
+        @contracts.chat_stop_result_from_json(
+          bots_host_result(stop_repeat_text),
+        ) {
+        Some(value) => value
+        None => fail("repeated chat.stop result did not decode")
+      }
+      assert_true(!stop_repeat.stopped)
+      assert_eq(stop_repeat.session.id, session.id)
+      assert_eq(
+        stop_repeat.session.state,
+        @contracts.AGENT_SESSION_STATE_ENDED,
+      )
+      assert_eq(
+        stop_repeat.session.end_reason,
+        @contracts.AGENT_SESSION_END_REASON_TURN_END,
+      )
+      let stop_repeat_events = bots_host_events_of_type(
+        state,
+        before_stop_repeat,
+        @contracts.EVENT_CHAT_AGENT_SESSION_ENDED,
+      ) catch {
+        error => fail(error.to_string())
+      }
+      assert_eq(stop_repeat_events.length(), 0)
+      done.put(())
+    })
+  })
+  match state_ref.val {
+    Some(state) => state.store.close()
+    None => ()
+  }
+}
+
+///|
+async test "Concurrent Chat agent_session.start yields one active session and one conflict" {
+  let dir = @fs.tmpdir(prefix="monexus-bots-session-start-race-") catch {
+    _ => fail("cannot create a temp directory")
+  }
+  defer @async.protect_from_cancel(async fn() {
+    @fs.rmdir(dir, recursive=true) catch { _ => () }
+  })
+  let done : @aqueue.Queue[Unit] = @aqueue.Queue(kind=Unbounded)
+  let inner_group : Ref[@async.TaskGroup[Unit]?] = Ref(None)
+  let state_ref : Ref[HostState?] = Ref(None)
+  @async.with_task_group(async fn(outer) {
+    outer.spawn_bg(
+      no_wait=true,
+      allow_failure=true,
+      async fn() {
+        done.get()
+        match inner_group.val {
+          Some(inner) => inner.return_immediately(())
+          None => ()
+        }
+      },
+    )
+    @async.with_task_group(async fn(group) {
+      let state = host_test_state(dir + "/state", false) catch {
+        error => fail(error.to_string())
+      }
+      state_ref.val = Some(state)
+      state.group.val = Some(group)
+      inner_group.val = Some(group)
+      let script = bots_host_repo_file("tests/agent/mock_acp_agent.mjs") catch {
+        error => fail(error.to_string())
+      }
+      let (_, agent, chat, workspace) = bots_host_seed_runtime_chat(
+        state,
+        dir,
+        "2026-11-27T06:40:00Z",
+        7_500L,
+        "node",
+        [script],
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let start_params = fn(client_request_id : String) {
+        @contracts.chat_agent_session_start_params(
+          client_request_id,
+          chat.id,
+          agent.id,
+          workspace.id,
+          workspace.root,
+        )
+      }
+      let request_one = @contracts.RpcRequest::new(
+        "req_concurrent_start_one",
+        @contracts.METHOD_CHAT_AGENT_SESSION_START,
+        start_params("cid_concurrent_start_one"),
+      )
+      let request_two = @contracts.RpcRequest::new(
+        "req_concurrent_start_two",
+        @contracts.METHOD_CHAT_AGENT_SESSION_START,
+        start_params("cid_concurrent_start_two"),
+      )
+      let results : @aqueue.Queue[String] = @aqueue.Queue(kind=Unbounded)
+      let finished : Ref[Bool] = Ref(false)
+      let max_runtimes : Ref[Int] = Ref(0)
+      // Sample the live runtime map while both starts are in flight so a
+      // second runtime from a leaked loser would be observed directly.
+      group.spawn_bg(
+        no_wait=true,
+        allow_failure=true,
+        async fn() {
+          while true {
+            let count = bots_host_runtime_count(state)
+            if count > max_runtimes.val {
+              max_runtimes.val = count
+            }
+            if finished.val {
+              break
+            }
+            @async.sleep(1)
+          }
+        },
+      )
+      group.spawn_bg(
+        no_wait=true,
+        allow_failure=true,
+        async fn() {
+          let sink = host_test_sink()
+          handle_request(state, sink, request_one)
+          let text = sink.queue.get() catch { _ => "" }
+          results.put(text)
+        },
+      )
+      group.spawn_bg(
+        no_wait=true,
+        allow_failure=true,
+        async fn() {
+          let sink = host_test_sink()
+          handle_request(state, sink, request_two)
+          let text = sink.queue.get() catch { _ => "" }
+          results.put(text)
+        },
+      )
+      let text_one = results.get() catch { _ => fail("no response for start one") }
+      let text_two = results.get() catch { _ => fail("no response for start two") }
+      finished.val = true
+      @async.sleep(20)
+      let response_one = bots_host_response(text_one) catch {
+        error => fail(error.to_string())
+      }
+      let response_two = bots_host_response(text_two) catch {
+        error => fail(error.to_string())
+      }
+      let mut winner_text = ""
+      let mut loser_text = ""
+      match (response_one.error, response_two.error) {
+        (None, Some(_)) => {
+          winner_text = text_one
+          loser_text = text_two
+        }
+        (Some(_), None) => {
+          winner_text = text_two
+          loser_text = text_one
+        }
+        _ => fail("expected exactly one successful concurrent start")
+      }
+      let loser_error = bots_host_error(loser_text)
+      assert_eq(bots_host_error_kind(loser_error), "conflict")
+      assert_true(loser_error.message.contains("at most one"))
+      let winner = match
+        @contracts.chat_agent_session_from_result(
+          bots_host_result(winner_text),
+        ) {
+        Ok(value) => value
+        Err(message) => fail("winning chat.agent_session.start: " + message)
+      }
+      assert_eq(winner.state, @contracts.AGENT_SESSION_STATE_ACTIVE)
+      let sessions = bots_host_list_chat_sessions(state, chat.id) catch {
+        error => fail(error.to_string())
+      }
+      assert_eq(sessions.length(), 1)
+      assert_eq(sessions[0].id, winner.id)
+      assert_eq(sessions[0].state, @contracts.AGENT_SESSION_STATE_ACTIVE)
+      assert_true(bots_host_has_runtime(state, winner.runtime_session_id))
+      assert_eq(bots_host_runtime_count(state), 1)
+      assert_true(max_runtimes.val >= 1)
+      assert_true(max_runtimes.val <= 1)
+      // End the winner so the fixture leaves no runtime behind.
+      let end_text = bots_host_call(
+        state,
+        @contracts.RpcRequest::new(
+          "req_concurrent_start_end",
+          @contracts.METHOD_CHAT_AGENT_SESSION_END,
+          @contracts.chat_agent_session_end_params(
+            "cid_concurrent_start_end",
+            winner.id,
+            @contracts.AGENT_SESSION_END_REASON_TURN_END,
+          ),
+        ),
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let ended = match
+        @contracts.chat_agent_session_from_result(bots_host_result(end_text)) {
+        Ok(value) => value
+        Err(message) => fail("winner chat.agent_session.end: " + message)
+      }
+      assert_eq(ended.state, @contracts.AGENT_SESSION_STATE_ENDED)
+      assert_eq(bots_host_runtime_count(state), 0)
+      done.put(())
+    })
+  })
+  match state_ref.val {
+    Some(state) => state.store.close()
+    None => ()
+  }
+}
+
+///|
+async test "Chat agent_session.end during start fails the session and stops the runtime" {
+  let dir = @fs.tmpdir(prefix="monexus-bots-session-start-end-race-") catch {
+    _ => fail("cannot create a temp directory")
+  }
+  defer @async.protect_from_cancel(async fn() {
+    @fs.rmdir(dir, recursive=true) catch { _ => () }
+  })
+  let done : @aqueue.Queue[Unit] = @aqueue.Queue(kind=Unbounded)
+  let inner_group : Ref[@async.TaskGroup[Unit]?] = Ref(None)
+  let state_ref : Ref[HostState?] = Ref(None)
+  @async.with_task_group(async fn(outer) {
+    outer.spawn_bg(
+      no_wait=true,
+      allow_failure=true,
+      async fn() {
+        done.get()
+        match inner_group.val {
+          Some(inner) => inner.return_immediately(())
+          None => ()
+        }
+      },
+    )
+    @async.with_task_group(async fn(group) {
+      let state = host_test_state(dir + "/state", false) catch {
+        error => fail(error.to_string())
+      }
+      state_ref.val = Some(state)
+      state.group.val = Some(group)
+      inner_group.val = Some(group)
+      let now = "2026-11-27T06:55:00Z"
+      let script = bots_host_repo_file("tests/agent/mock_acp_agent.mjs") catch {
+        error => fail(error.to_string())
+      }
+      // Delay the ACP handshake so the Bot session remains `starting` while
+      // the end request runs; the runtime launch itself happens outside the
+      // host mutex.
+      let (_, agent, chat, workspace) = bots_host_seed_runtime_chat(
+        state,
+        dir,
+        now,
+        7_550L,
+        "sh",
+        ["-c", "sleep 1; exec node " + script],
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let start_queue : @aqueue.Queue[String] = @aqueue.Queue(kind=Unbounded)
+      group.spawn_bg(
+        no_wait=true,
+        allow_failure=true,
+        async fn() {
+          let sink = host_test_sink()
+          handle_request(
+            state,
+            sink,
+            @contracts.RpcRequest::new(
+              "req_session_start_end_race",
+              @contracts.METHOD_CHAT_AGENT_SESSION_START,
+              @contracts.chat_agent_session_start_params(
+                "cid_session_start_end_race",
+                chat.id,
+                agent.id,
+                workspace.id,
+                workspace.root,
+              ),
+            ),
+          )
+          let text = sink.queue.get() catch { _ => "" }
+          start_queue.put(text)
+        },
+      )
+      let starting_deadline = @async.now() + 10_000L
+      let mut starting : @contracts.AgentSession? = None
+      while @async.now() < starting_deadline {
+        let sessions = bots_host_list_chat_sessions(state, chat.id) catch {
+          error => fail(error.to_string())
+        }
+        if sessions.length() == 1 &&
+          sessions[0].state == @contracts.AGENT_SESSION_STATE_STARTING {
+          starting = Some(sessions[0])
+          break
+        }
+        @async.sleep(5)
+      }
+      let target = match starting {
+        Some(value) => value
+        None => fail("start never exposed a starting AgentSession")
+      }
+      let end_text = bots_host_call(
+        state,
+        @contracts.RpcRequest::new(
+          "req_session_start_end_race_end",
+          @contracts.METHOD_CHAT_AGENT_SESSION_END,
+          @contracts.chat_agent_session_end_params(
+            "cid_session_start_end_race_end",
+            target.id,
+            @contracts.AGENT_SESSION_END_REASON_TURN_END,
+          ),
+        ),
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let ended = match
+        @contracts.chat_agent_session_from_result(bots_host_result(end_text)) {
+        Ok(value) => value
+        Err(message) => fail("chat.agent_session.end during start: " + message)
+      }
+      assert_eq(ended.id, target.id)
+      assert_eq(ended.state, @contracts.AGENT_SESSION_STATE_FAILED)
+      let start_response = match
+        @async.with_timeout_opt(15_000, async fn() { start_queue.get() }) {
+        Some(value) => value
+        None => fail("start did not respond after the end won")
+      }
+      let start_error = bots_host_error(start_response)
+      assert_true(start_error.message.contains("transition"))
+      assert_eq(bots_host_runtime_count(state), 0)
+      let sessions = bots_host_list_chat_sessions(state, chat.id) catch {
+        error => fail(error.to_string())
+      }
+      assert_eq(sessions.length(), 1)
+      assert_eq(sessions[0].id, target.id)
+      assert_eq(sessions[0].state, @contracts.AGENT_SESSION_STATE_FAILED)
+      let get_text = bots_host_call(
+        state,
+        @contracts.RpcRequest::new(
+          "req_session_start_end_race_get",
+          @contracts.METHOD_CHAT_GET,
+          @contracts.chat_get_params("cid_session_start_end_race_get", chat.id),
+        ),
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let detail = match
+        @contracts.chat_from_result(bots_host_result(get_text)) {
+        Ok(value) => value
+        Err(message) => fail("chat.get after start/end race: " + message)
+      }
+      match detail.active_agent_session {
+        Some(_) => fail("failed AgentSession is still returned as active")
+        None => ()
+      }
+      done.put(())
+    })
+  })
+  match state_ref.val {
+    Some(state) => state.store.close()
+    None => ()
+  }
+}
+
+///|
+async test "Chat agent_session.start failure records a failed session and no runtime" {
+  let dir = @fs.tmpdir(prefix="monexus-bots-session-start-fail-") catch {
+    _ => fail("cannot create a temp directory")
+  }
+  defer @async.protect_from_cancel(async fn() {
+    @fs.rmdir(dir, recursive=true) catch { _ => () }
+  })
+  let done : @aqueue.Queue[Unit] = @aqueue.Queue(kind=Unbounded)
+  let inner_group : Ref[@async.TaskGroup[Unit]?] = Ref(None)
+  let state_ref : Ref[HostState?] = Ref(None)
+  @async.with_task_group(async fn(outer) {
+    outer.spawn_bg(
+      no_wait=true,
+      allow_failure=true,
+      async fn() {
+        done.get()
+        match inner_group.val {
+          Some(inner) => inner.return_immediately(())
+          None => ()
+        }
+      },
+    )
+    @async.with_task_group(async fn(group) {
+      let state = host_test_state(dir + "/state", false) catch {
+        error => fail(error.to_string())
+      }
+      state_ref.val = Some(state)
+      state.group.val = Some(group)
+      inner_group.val = Some(group)
+      let now = "2026-11-27T07:00:00Z"
+      let (bot, failing_agent, chat, workspace) = bots_host_seed_runtime_chat(
+        state,
+        dir,
+        now,
+        7_600L,
+        "node",
+        ["-e", "process.exit(1)"],
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let start_text = bots_host_call(
+        state,
+        @contracts.RpcRequest::new(
+          "req_session_start_fail",
+          @contracts.METHOD_CHAT_AGENT_SESSION_START,
+          @contracts.chat_agent_session_start_params(
+            "cid_session_start_fail",
+            chat.id,
+            failing_agent.id,
+            workspace.id,
+            workspace.root,
+          ),
+        ),
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let start_error = bots_host_error(start_text)
+      assert_true(start_error.message.contains("runtime start failed"))
+      let sessions = bots_host_list_chat_sessions(state, chat.id) catch {
+        error => fail(error.to_string())
+      }
+      assert_eq(sessions.length(), 1)
+      assert_eq(sessions[0].state, @contracts.AGENT_SESSION_STATE_FAILED)
+      assert_eq(
+        sessions[0].end_reason,
+        @contracts.AGENT_SESSION_END_REASON_ERROR,
+      )
+      assert_eq(sessions[0].runtime_session_id, "")
+      assert_eq(bots_host_runtime_count(state), 0)
+
+      // The failed session is terminal, so a later start on a healthy Agent
+      // in the same Chat is allowed.
+      let script = bots_host_repo_file("tests/agent/mock_acp_agent.mjs") catch {
+        error => fail(error.to_string())
+      }
+      let healthy_agent = @contracts.AgentRecord::new(
+        id=@contracts.new_agent_id(7_603L),
+        org_id=bot.org_id,
+        bot_id=bot.id,
+        name="Host Runtime Healthy Worker",
+        runtime_binding=bots_host_binding([script]),
+        created_at=now,
+        permission_scope=["repo:read"],
+        state=@contracts.AGENT_LIFECYCLE_ACTIVE,
+      )
+      state.mutex.acquire()
+      match
+        state.store.create_agent(healthy_agent, "", "owner", "test", now) {
+      Ok(_) => ()
+      Err(message) => {
+        state.mutex.release()
+        fail("cannot create the healthy Agent: " + message)
+      }
+      }
+      state.mutex.release()
+      let retry_text = bots_host_call(
+        state,
+        @contracts.RpcRequest::new(
+          "req_session_start_retry",
+          @contracts.METHOD_CHAT_AGENT_SESSION_START,
+          @contracts.chat_agent_session_start_params(
+            "cid_session_start_retry",
+            chat.id,
+            healthy_agent.id,
+            workspace.id,
+            workspace.root,
+          ),
+        ),
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let retried = match
+        @contracts.chat_agent_session_from_result(
+          bots_host_result(retry_text),
+        ) {
+        Ok(value) => value
+        Err(message) => fail("retry chat.agent_session.start: " + message)
+      }
+      assert_eq(retried.state, @contracts.AGENT_SESSION_STATE_ACTIVE)
+      assert_eq(bots_host_runtime_count(state), 1)
+      let retry_sessions = bots_host_list_chat_sessions(state, chat.id) catch {
+        error => fail(error.to_string())
+      }
+      assert_eq(retry_sessions.length(), 2)
+      assert_eq(
+        retry_sessions[0].state,
+        @contracts.AGENT_SESSION_STATE_FAILED,
+      )
+      assert_eq(
+        retry_sessions[1].state,
+        @contracts.AGENT_SESSION_STATE_ACTIVE,
+      )
+      let end_text = bots_host_call(
+        state,
+        @contracts.RpcRequest::new(
+          "req_session_start_retry_end",
+          @contracts.METHOD_CHAT_AGENT_SESSION_END,
+          @contracts.chat_agent_session_end_params(
+            "cid_session_start_retry_end",
+            retried.id,
+            @contracts.AGENT_SESSION_END_REASON_TURN_END,
+          ),
+        ),
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let ended = match
+        @contracts.chat_agent_session_from_result(bots_host_result(end_text)) {
+        Ok(value) => value
+        Err(message) => fail("retry chat.agent_session.end: " + message)
+      }
+      assert_eq(ended.state, @contracts.AGENT_SESSION_STATE_ENDED)
+      assert_eq(bots_host_runtime_count(state), 0)
+      done.put(())
+    })
+  })
+  match state_ref.val {
+    Some(state) => state.store.close()
+    None => ()
+  }
+}
