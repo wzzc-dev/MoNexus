@@ -12,8 +12,8 @@ let chat_poll_dispatch : Ref[((Msg) -> Unit)?] = Ref(None)
 let chat_poll_generation : Ref[Int32] = Ref(0)
 
 ///|
-fn chat_should_poll(model : Model) -> Bool {
-  model.page == Workroom &&
+pub fn chat_should_poll(model : Model) -> Bool {
+  (model.page == Workroom || float_agent_visible(model)) &&
   !model.composing_new_chat &&
   model.selected_chat != "" &&
   model.chat_messages_chat == model.selected_chat &&

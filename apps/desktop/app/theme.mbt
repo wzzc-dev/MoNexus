@@ -85,6 +85,9 @@ priv struct Palette {
   danger : @core.Color
   info : @core.Color
   code_bg : @core.Color
+  /// The one elevation shadow used by floating layers. Kept in the palette so
+  /// light and dark resolve to the same structure without a glow.
+  shadow : @core.Color
   is_dark : Bool
 }
 
@@ -118,6 +121,7 @@ fn palette_for(mode : ThemeMode) -> Palette {
         danger: rgb8(193, 120, 107),
         info: rgb8(128, 153, 170),
         code_bg: rgb8(20, 19, 15),
+        shadow: rgb8(0, 0, 0).multiply_alpha(0.52),
         is_dark: true,
       }
     }
@@ -148,6 +152,7 @@ fn palette_for(mode : ThemeMode) -> Palette {
         danger: rgb8(154, 71, 60),
         info: rgb8(90, 113, 131),
         code_bg: rgb8(247, 244, 238),
+        shadow: rgb8(0, 0, 0).multiply_alpha(0.16),
         is_dark: false,
       }
     }
@@ -278,6 +283,11 @@ fn ui_info() -> @core.Color {
 ///|
 fn ui_code_bg() -> @core.Color {
   palette_state.val.code_bg
+}
+
+///|
+fn ui_shadow() -> @core.Color {
+  palette_state.val.shadow
 }
 
 ///|

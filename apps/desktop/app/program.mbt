@@ -37,12 +37,20 @@ pub fn program_with_preferences(
     init=() => {
       (
         Model::new_with_preferences(startup, language),
-        @moui.Effect::run(
-          key="host-link-dispatch",
-          kind="host-link",
-          label="Capture UI dispatch for the host link",
-          run=dispatch => dispatch_cell.val = Some(dispatch),
-        ),
+        @moui.Effect::batch([
+          @moui.Effect::run(
+            key="host-link-dispatch",
+            kind="host-link",
+            label="Capture UI dispatch for the host link",
+            run=dispatch => dispatch_cell.val = Some(dispatch),
+          ),
+          @moui.Effect::run(
+            key="float-workspace-restore",
+            kind="float-workspace",
+            label="Restore the floating workspace notes",
+            run=dispatch => float_capture_dispatch(dispatch),
+          ),
+        ]),
       )
     },
     update=(model, msg) => {
@@ -81,6 +89,30 @@ pub fn program_with_preferences(
               run= _dispatch => enqueue_language_choice(lang),
             ),
           )
+        FloatNoteContentDraft(_) | FloatNoteTitleDraft(_) | FloatNewNote |
+        ToggleFloatWorkspace | CloseFloatWorkspace | FloatSelectTab(_) |
+        FloatCloseTab(_) | FloatNewAgent | FloatNewTerminal | FloatMenu(_) |
+        FloatHeaderDrag(_, _, _) | FloatResizeDrag(_, _, _) => {
+          let requests = float_persist_requests(next.float, msg)
+          if !requests.is_empty() {
+            effects.push(
+              @moui.Effect::run(
+                key="float-workspace-persist",
+                kind="float-workspace",
+                label="Persist floating workspace state",
+                run= _dispatch => {
+                  for request in requests {
+                    match request {
+                      FloatNoteRequest(write) => enqueue_float_note(write)
+                      FloatStateRequest(text) => enqueue_float_state(text)
+                      FloatRestoreRequest => enqueue_float_restore()
+                    }
+                  }
+                },
+              ),
+            )
+          }
+        }
         _ => ()
       }
       let effect = if effects.is_empty() {

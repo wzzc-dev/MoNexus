@@ -33,8 +33,8 @@ Lucide subset. No MoUI source is modified.
 The interaction reference is the owner's workroom island mockup. Presentation
 annotations from that file (audit lists, palette captions) are not part of the
 app. The Bot page follows the owner's Bot ledger reference (screen 01); the
-floating workspace (screen 02) is a separate follow-up and is not in this
-shell.
+floating workspace (screen 02) is implemented here as a lightweight overlay,
+not as a new route or information architecture.
 
 ## Palette
 
@@ -159,7 +159,8 @@ The window is fixed at 1280×800; nothing horizontally scrolls or clips.
    another Bot opens that Bot's latest known Chat, falling back to its Bot page
    when no Chat projection exists. The active row stays visible when it is
    older than the three most recent rows.
-5. Secondary `工具` group: Inbox, Tasks, Manage, Search.
+5. Secondary `工具` group: Inbox, Tasks, Manage, Search, and the quiet
+   `Workspace / 浮岛工作区` toggle for the floating workspace.
 6. Host status and Settings at the bottom.
 
 Chat, Bot, Inbox, Tasks, Manage, Search and Settings are the routes. There is
@@ -230,6 +231,57 @@ cards.
 The same paper/ink/stone tokens and hairline/row system are used throughout.
 The left work-item pane is 430pt and the right detail pane 601pt inside the
 main island; both scroll independently.
+
+## Floating workspace
+
+The floating workspace is a parallel small workspace opened from the sidebar
+Tools row. Closing it does not navigate away from Chat or any other current
+route; the overlay state stays in the model, so active tab, notes, open tabs,
+size and position are retained. There is one overlay instance and no
+top-level navigation entry.
+
+- Default geometry is 904×620 at `(248, 64)` in the fixed 1280×800 window.
+  Dragging is clamped to `x ≥ 240`, `y ≥ 56`; resizing is clamped to 480–1024
+  wide and 340–736 high, with the bottom-right edge kept inside the window.
+  The closed overlay never covers the sidebar's Chat rows.
+- Tabs are typed kinds: Note, Agent, Terminal. Note tabs can be multiple and
+  created from the `+` menu; Agent and Terminal each reuse a single existing
+  tab when opened again. Every tab has an explicit close control. Closing the
+  last tab leaves an honest empty state with note, Agent and terminal actions,
+  rather than inventing a page or tab.
+- The Agent tab paints the selected P1 Chat's `chat.messages`, live
+  `chat.read` tail and the current Bot identity through the existing
+  composer. It sends with `chat.send` via `ComposerSend`, starts with
+  `ChatStartSession` and stops with `AgentStopSession`; Chat polling runs only
+  while the tab is visible. With no selected Chat it falls back to the
+  existing Agent session path and offers Start Chat. It does not create a
+  second chat protocol, Bot identity or group-chat surface.
+- The Terminal tab paints the selected project's existing focused PTY
+  transcript and controls. It opens or reconnects through the existing
+  terminal commands and shows the existing no-project/closed states; no new
+  terminal backend is introduced.
+- The `+` menu offers new note, new Agent conversation, new terminal, and a
+  disabled `浏览器 · 即将支持 / Later` Browser row. The Browser row has no
+  message, cannot open or create a tab, and is explicitly marked later-only
+  for this slice.
+- Notes are plain text/Markdown with a visible title and local path. Edits
+  autosave through a 300ms debounce and show `Saving… / Saved / Save failed`.
+  One file per note lives at `<config>/floating/notes/note-<safe-id>.md`;
+  the small tab/geometry index is `<config>/floating/workspace.json`. The
+  config root follows the existing preference convention:
+  `$MONEXUS_CONFIG_DIR`, else `$XDG_CONFIG_HOME/monexus`, else
+  `$HOME/.config/monexus`. Writes are atomic temporary-file-plus-rename with
+  mode 0600; the notes directory is created 0700. File names are stable,
+  restricted to safe characters, and titles/paths are validated so a note
+  cannot escape the notes directory. Notes contain only user-entered local
+  text; the app never copies credentials, tokens, ids or diagnostics into
+  note files.
+- The overlay uses the same paper/ink/stone tokens, 1px hairlines, 8pt
+  spacing, 3–6px control radii (10px for the overlay shell), and one
+  restrained elevation shadow. It does not use glass, glow, gradients,
+  oversized cards, chat bubbles or emoji decoration. Focus, labels,
+  selected-tab semantics and keyboard activation are kept on tabs, close
+  controls, menu rows and the note editor.
 
 ## Secondary tools
 
