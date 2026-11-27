@@ -474,3 +474,246 @@ test "ADR-0017 event payloads replay the complete post-change record" {
     None => fail("project.member.added record did not decode")
   }
 }
+
+///|
+fn bots_rpc_test_bot() -> BotRecord {
+  BotRecord::new(
+    id=new_bot_id(9_001L),
+    org_id=ORG_LOCAL,
+    name="RPC Builder",
+    created_at="2026-11-27T03:00:00Z",
+    persona_ref="persona/builder",
+    instructions_ref="instructions/builder",
+    memory_ref="bot/rpc/memory",
+    home="/tmp/rpc-bot-home",
+    permission_ceiling=["repo:read", "tool:shell"],
+    create_policy=BOT_CREATE_POLICY_AUTO,
+    agent_count_cap=4,
+    agent_concurrency_cap=1,
+    software_allowlist=["mock-acp"],
+  )
+}
+
+///|
+fn bots_rpc_test_agent(bot : BotRecord) -> AgentRecord {
+  AgentRecord::new(
+    id=new_agent_id(9_002L),
+    org_id=bot.org_id,
+    bot_id=bot.id,
+    name="RPC Worker",
+    runtime_binding=RuntimeBinding::new(
+      software_id="mock-acp",
+      adapter_id="acp",
+      launch_kind=RUNTIME_LAUNCH_ACP,
+      command="node",
+      args=["mock.mjs"],
+      model_profile="test",
+      hash="sha256:rpc-binding",
+    ),
+    created_at="2026-11-27T03:00:01Z",
+    specialty="test",
+    tags=["p0.3"],
+    permission_scope=["repo:read"],
+    state=AGENT_LIFECYCLE_ACTIVE,
+  )
+}
+
+///|
+fn bots_rpc_test_chat() -> ChatRecord {
+  ChatRecord::new(
+    id=new_chat_id(9_003L),
+    org_id=ORG_LOCAL,
+    title="RPC Chat",
+    created_at="2026-11-27T03:00:02Z",
+  )
+}
+
+///|
+fn bots_rpc_test_session(
+  chat : ChatRecord,
+  agent : AgentRecord,
+) -> AgentSession {
+  AgentSession::new(
+    id=new_agent_session_id(9_004L),
+    chat_id=chat.id,
+    agent_id=agent.id,
+    permission_snapshot_hash="sha256:rpc-permission",
+    started_at="2026-11-27T03:00:03Z",
+    runtime_session_id="agt_rpc_runtime",
+    state=AGENT_SESSION_STATE_ACTIVE,
+  )
+}
+
+///|
+fn bots_rpc_test_message(
+  chat : ChatRecord,
+  session_id : String,
+) -> ChatMessage {
+  ChatMessage::new(
+    id=new_id("msg", 9_005L),
+    chat_id=chat.id,
+    role=CHAT_MESSAGE_ROLE_ASSISTANT,
+    agent_session_id=session_id,
+    body_ref="",
+    body="hello from the mock agent",
+    digest=chat_message_digest("hello from the mock agent", ""),
+    created_at="2026-11-27T03:00:04Z",
+  )
+}
+
+///|
+test "ADR-0017 P0.3 RPC result records round-trip" {
+  let bot = bots_rpc_test_bot()
+  let agent = bots_rpc_test_agent(bot)
+  let chat = bots_rpc_test_chat()
+  let session = bots_rpc_test_session(chat, agent)
+  let message = bots_rpc_test_message(chat, session.id)
+  let participant = ChatParticipant::new(
+    chat_id=chat.id,
+    bot_id=bot.id,
+    added_at="2026-11-27T03:00:02Z",
+  )
+  match
+    bots_from_result(round_trip_json(bots_list_result([bot]))) {
+    Ok(values) => assert_eq(values[0].id, bot.id)
+    Err(reason) => fail("bots.list result did not decode: " + reason)
+  }
+  match bot_from_result(round_trip_json(bot_result(bot))) {
+    Ok(value) => assert_eq(value.name, bot.name)
+    Err(reason) => fail("bot result did not decode: " + reason)
+  }
+  match
+    agents_from_result(round_trip_json(agents_list_result([agent]))) {
+    Ok(values) => assert_eq(values[0].runtime_binding.hash, "sha256:rpc-binding")
+    Err(reason) => fail("bot.agent.list result did not decode: " + reason)
+  }
+  match agent_from_result(round_trip_json(agent_result(agent))) {
+    Ok(value) => assert_eq(value.bot_id, bot.id)
+    Err(reason) => fail("bot.agent result did not decode: " + reason)
+  }
+  let detail = ChatDetail::new(
+    chat~,
+    participants=[participant],
+    active_agent_session=Some(session),
+    agent=Some(agent),
+  )
+  match chat_from_result(round_trip_json(chat_result(detail))) {
+    Ok(value) => {
+      assert_eq(value.chat.id, chat.id)
+      assert_eq(value.participants.length(), 1)
+      assert_eq(value.participants[0].bot_id, bot.id)
+      match value.active_agent_session {
+        Some(active) => assert_eq(active.runtime_session_id, "agt_rpc_runtime")
+        None => fail("chat.get lost the active AgentSession")
+      }
+      match value.agent {
+        Some(bound) => assert_eq(bound.id, agent.id)
+        None => fail("chat.get lost the bound Agent")
+      }
+    }
+    Err(reason) => fail("chat.get result did not decode: " + reason)
+  }
+  match
+    chats_from_result(round_trip_json(chats_list_result([detail]))) {
+    Ok(values) => assert_eq(values[0].chat.id, chat.id)
+    Err(reason) => fail("chat.list result did not decode: " + reason)
+  }
+  match
+    chat_agent_session_from_result(
+      round_trip_json(chat_agent_session_result(session)),
+    ) {
+    Ok(value) => assert_eq(value.id, session.id)
+    Err(reason) => fail("AgentSession result did not decode: " + reason)
+  }
+  match
+    chat_messages_from_result(
+      round_trip_json(chat_messages_result([message])),
+    ) {
+    Ok(values) => {
+      assert_eq(values[0].role, CHAT_MESSAGE_ROLE_ASSISTANT)
+      assert_eq(values[0].body, "hello from the mock agent")
+    }
+    Err(reason) => fail("chat.messages result did not decode: " + reason)
+  }
+  match
+    chat_send_result_from_json(
+      round_trip_json(chat_send_result(message, session)),
+    ) {
+    Some(value) => {
+      assert_eq(value.message.id, message.id)
+      assert_eq(value.session.id, session.id)
+    }
+    None => fail("chat.send result did not decode")
+  }
+  match
+    chat_stop_result_from_json(
+      round_trip_json(chat_stop_result(session, true)),
+    ) {
+    Some(value) => assert_true(value.stopped)
+    None => fail("chat.stop result did not decode")
+  }
+  match
+    chat_read_result_from_json(
+      round_trip_json(chat_read_result(session, 42L, "delta", "dec_1")),
+    ) {
+    Some(value) => {
+      assert_eq(value.session_id, session.id)
+      assert_eq(value.runtime_session_id, "agt_rpc_runtime")
+      assert_eq(value.cursor, 42L)
+      assert_eq(value.text, "delta")
+      assert_eq(value.pending_decision, "dec_1")
+    }
+    None => fail("chat.read result did not decode")
+  }
+}
+
+///|
+test "ADR-0017 P0.3 RPC params validate and map errors" {
+  let bot = bots_rpc_test_bot()
+  let agent = bots_rpc_test_agent(bot)
+  let chat = bots_rpc_test_chat()
+  match bot_record_param(bot_create_params("cid_bot", bot)) {
+    Ok(value) => assert_eq(value.id, bot.id)
+    Err(reason) => fail("bot.create params did not decode: " + reason)
+  }
+  match
+    agent_record_param(
+      bot_agent_create_params("cid_agent", bot.id, agent, source="manual"),
+    ) {
+    Ok(value) => assert_eq(value.id, agent.id)
+    Err(reason) => fail("bot.agent.create params did not decode: " + reason)
+  }
+  match chat_record_param(chat_create_params("cid_chat", chat, bot.id)) {
+    Ok(value) => assert_eq(value.title, "RPC Chat")
+    Err(reason) => fail("chat.create params did not decode: " + reason)
+  }
+  let start_params = chat_agent_session_start_params(
+    "cid_start",
+    chat.id,
+    agent.id,
+    "ws_test",
+    "/tmp/ws",
+  )
+  assert_eq(chat_filter_runtime(start_params), agent.id)
+  assert_eq(chat_scope_param(start_params), "ws_test")
+  assert_eq(chat_workspace_root_param(start_params), "/tmp/ws")
+  assert_eq(chat_cursor_param(Map([("cursor", json_int64(-5L))])), 0L)
+  assert_eq(chat_limit_param(Map([("limit", json_int(0))])), 1)
+  assert_eq(chat_limit_param(Map([("limit", json_int(1_000))])), 200)
+  match chat_text_param(Map([("text", json_string("   "))])) {
+    Ok(_) => fail("blank Chat text was accepted")
+    Err(reason) => assert_true(reason.contains("missing text"))
+  }
+  assert_eq(
+    chat_end_reason_param(chat_stop_params("cid_stop", chat.id)),
+    AGENT_SESSION_END_REASON_CANCELLED,
+  )
+  let not_found = bots_error_from_message("Bot not found: bot_1")
+  assert_true(not_found.message.contains("NotFound"))
+  let unauthorized = bots_error_from_message("project membership is required")
+  assert_true(unauthorized.message.contains("Unauthorized"))
+  let conflict = bots_error_from_message("Bot Agent concurrency cap reached")
+  assert_true(conflict.message.contains("Conflict"))
+  let invalid = bots_error_from_message("bot_id is required")
+  assert_true(invalid.message.contains("InvalidRequest"))
+}

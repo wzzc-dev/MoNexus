@@ -435,8 +435,10 @@ pub fn chat_message_appended_payload(
     ("role", json_string(message.role)),
     ("agent_session_id", json_string(message.agent_session_id)),
     ("body_ref", json_string(message.body_ref)),
+    ("body", json_string(message.body)),
     ("digest", json_string(message.digest)),
     ("actor", json_string(message.actor)),
+    ("record", message.to_json()),
   ])
 }
 
@@ -738,6 +740,14 @@ pub fn chat_agent_switched_record(payload : @json.Json) -> ChatRecord? {
 pub fn chat_agent_selected_record(payload : @json.Json) -> AgentRecord? {
   match payload_record(payload) {
     Some(value) => agent_from_json(value)
+    None => None
+  }
+}
+
+///|
+pub fn chat_message_appended_record(payload : @json.Json) -> ChatMessage? {
+  match payload_record(payload) {
+    Some(value) => chat_message_from_json(value)
     None => None
   }
 }

@@ -247,6 +247,9 @@ pub struct AgentSessionRuntime {
   pending : Map[String, PendingPermission]
   active_prompts : Map[String, Int32]
   turn_text : Ref[String]
+  /// Assistant-visible ACP text for the current turn; thought chunks and
+  /// raw stdout never enter it.
+  chat_text : Ref[String]
   home : String
   memory_before : String
   /// Capability token for this session's stdio skill gateway ("" when skills

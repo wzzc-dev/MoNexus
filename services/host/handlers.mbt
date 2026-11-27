@@ -437,6 +437,27 @@ async fn handle_request(
       state.mutex.release()
       handle_trigger_rpc(state, sink, request, client_request_id)
     }
+    @contracts.METHOD_BOT_LIST
+    | @contracts.METHOD_BOT_GET
+    | @contracts.METHOD_BOT_CREATE
+    | @contracts.METHOD_BOT_UPDATE
+    | @contracts.METHOD_BOT_ARCHIVE
+    | @contracts.METHOD_BOT_AGENT_LIST
+    | @contracts.METHOD_BOT_AGENT_CREATE
+    | @contracts.METHOD_BOT_AGENT_SUSPEND
+    | @contracts.METHOD_BOT_AGENT_RETIRE
+    | @contracts.METHOD_CHAT_LIST
+    | @contracts.METHOD_CHAT_GET
+    | @contracts.METHOD_CHAT_CREATE
+    | @contracts.METHOD_CHAT_AGENT_SESSION_START
+    | @contracts.METHOD_CHAT_AGENT_SESSION_END
+    | @contracts.METHOD_CHAT_SEND
+    | @contracts.METHOD_CHAT_READ
+    | @contracts.METHOD_CHAT_STOP
+    | @contracts.METHOD_CHAT_MESSAGES => {
+      state.mutex.release()
+      handle_bots_rpc(state, sink, request, client_request_id)
+    }
     @contracts.METHOD_RUNTIME_PAIRING_CREATE => {
       state.mutex.release()
       handle_runtime_pairing_create(state, sink, request, client_request_id)

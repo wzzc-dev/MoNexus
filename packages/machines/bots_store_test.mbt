@@ -127,7 +127,8 @@ fn bots_test_reset_file(path : String) -> Unit raise {
       "trigger_fires", "triggers", "leases", "decisions", "artifacts",
       "evidence", "runs", "tasks", "projects", "worktrees", "workspaces",
       "legacy_aliases", "project_memberships", "chat_participants", "chats",
-      "agents", "bots", "agent_sessions", "machines", "events", "meta",
+      "chat_messages", "agents", "bots", "agent_sessions", "machines", "events",
+      "meta",
     ] {
       let stmt = conn.prepare("DROP TABLE IF EXISTS " + table)
       let _ = stmt.step()
@@ -1277,5 +1278,282 @@ test "project change and participant removal replay generic records" {
   }
   assert_eq(replayed_participant.state, @contracts.PARTICIPANT_STATE_REMOVED)
   assert_eq(replayed_participant.removed_at, now)
+  store.close()
+}
+
+///|
+fn bots_test_message(
+  chat : @contracts.ChatRecord,
+  session_id : String,
+  role : String,
+  body : String,
+  now : String,
+) -> @contracts.ChatMessage {
+  let seed = if role == @contracts.CHAT_MESSAGE_ROLE_USER {
+    2_001L
+  } else {
+    2_002L
+  }
+  @contracts.ChatMessage::new(
+    id=@contracts.new_id("msg", seed),
+    chat_id=chat.id,
+    role~,
+    body_ref="",
+    body~,
+    digest=@contracts.chat_message_digest(body, ""),
+    agent_session_id=session_id,
+    created_at=now,
+  )
+}
+
+///|
+test "chat messages project, paginate and replay from full record snapshots" {
+  let store = bots_test_open()
+  let now = "2026-11-27T02:20:00Z"
+  let (_bot, agent, chat) = bots_test_seed(store, now)
+  let session = match
+    store.start_chat_agent_session(
+      bots_test_session(chat, agent, now),
+      "owner",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("start_chat_agent_session failed: " + message)
+  }
+  let active = match
+    store.update_chat_agent_session(
+      session.id,
+      @contracts.AGENT_SESSION_STATE_ACTIVE,
+      "rt_msg",
+      "",
+      0,
+      0,
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("update_chat_agent_session failed: " + message)
+  }
+  assert_eq(active.runtime_session_id, "rt_msg")
+  let user = match
+    store.append_chat_message(
+      bots_test_message(chat, "", @contracts.CHAT_MESSAGE_ROLE_USER, "hello", now),
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("append user message failed: " + message)
+  }
+  let assistant = match
+    store.append_chat_message(
+      bots_test_message(
+        chat,
+        session.id,
+        @contracts.CHAT_MESSAGE_ROLE_ASSISTANT,
+        "hi there",
+        now,
+      ),
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("append assistant message failed: " + message)
+  }
+  assert_true(user.digest != "")
+  assert_true(assistant.digest != "")
+  let all = match store.list_chat_messages(chat.id, "", 10) {
+    Ok(value) => value
+    Err(message) => fail("list_chat_messages failed: " + message)
+  }
+  assert_eq(all.length(), 2)
+  assert_eq(all[0].id, user.id)
+  assert_eq(all[1].id, assistant.id)
+  assert_eq(all[1].agent_session_id, session.id)
+  let after_user = match store.list_chat_messages(chat.id, user.id, 10) {
+    Ok(value) => value
+    Err(message) => fail("paged list_chat_messages failed: " + message)
+  }
+  assert_eq(after_user.length(), 1)
+  assert_eq(after_user[0].id, assistant.id)
+  match store.append_chat_message(user, now) {
+    Ok(_) => fail("duplicate ChatMessage was appended")
+    Err(message) => assert_true(message.contains("already exists"))
+  }
+  // The payload carries the full record, so replay reconstructs the projection.
+  match store.reconcile_bots_projection() {
+    Ok(_) => ()
+    Err(message) => fail("reconcile failed: " + message)
+  }
+  let replayed = match store.list_chat_messages(chat.id, "", 10) {
+    Ok(value) => value
+    Err(message) => fail("replayed list_chat_messages failed: " + message)
+  }
+  assert_eq(replayed.length(), 2)
+  assert_eq(replayed[0].body, "hello")
+  assert_eq(replayed[1].body, "hi there")
+  match store.get_chat_message(assistant.id) {
+    Ok(Some(value)) => assert_eq(value.agent_session_id, session.id)
+    Ok(None) => fail("assistant message missing after replay")
+    Err(message) => fail("get_chat_message failed: " + message)
+  }
+  store.close()
+}
+
+///|
+test "invalid runtime binding cannot start a Chat AgentSession" {
+  let store = bots_test_open()
+  let now = "2026-11-27T02:30:00Z"
+  let bot = match
+    store.create_bot(bots_test_bot("Builder", now), "owner", "test", now) {
+    Ok(value) => value
+    Err(message) => fail("create_bot failed: " + message)
+  }
+  // A binding with a hash but no canonical launch details passes Agent
+  // creation and must still be rejected when a session tries to run it.
+  let invalid_binding = @contracts.RuntimeBinding::new(
+    software_id="claude-code",
+    adapter_id="acp",
+    launch_kind=@contracts.RUNTIME_LAUNCH_COMMAND,
+    command="",
+    args=[],
+    model_profile="balanced",
+    hash="sha256:invalid-binding",
+  )
+  let agent = match
+    store.create_agent(
+      @contracts.AgentRecord::new(
+        id=@contracts.new_agent_id(2_101L),
+        org_id=bot.org_id,
+        bot_id=bot.id,
+        name="Broken worker",
+        runtime_binding=invalid_binding,
+        created_at=now,
+        permission_scope=["repo:read"],
+        state=@contracts.AGENT_LIFECYCLE_ACTIVE,
+      ),
+      "",
+      "owner",
+      "test",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("create_agent failed: " + message)
+  }
+  let chat = match
+    store.create_chat(
+      @contracts.ChatRecord::new(
+        id=@contracts.new_chat_id(2_102L),
+        org_id=bot.org_id,
+        title="Broken runtime",
+        created_at=now,
+      ),
+      [bot.id],
+      "owner",
+      "test",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("create_chat failed: " + message)
+  }
+  match
+    store.start_chat_agent_session(
+      bots_test_session(chat, agent, now),
+      "owner",
+      now,
+    ) {
+    Ok(_) => fail("invalid runtime binding started an AgentSession")
+    Err(message) => assert_true(message.contains("runtime binding is invalid"))
+  }
+  store.close()
+}
+
+///|
+test "suspended Bot cannot start a Chat AgentSession" {
+  let store = bots_test_open()
+  let now = "2026-11-27T02:40:00Z"
+  let (bot, agent, chat) = bots_test_seed(store, now)
+  let suspended = {
+    ..bot,
+    state: @contracts.BOT_STATE_SUSPENDED,
+    updated_at: now,
+  }
+  let payload = @contracts.bot_updated_payload(
+    suspended,
+    ["state"],
+    2,
+    "owner",
+  )
+  match
+    store.append_bots_event(
+      @contracts.EVENT_BOT_UPDATED,
+      @contracts.bot_event_subject(bot.id),
+      payload,
+      now,
+      bot.org_id,
+    ) {
+    Ok(_) => ()
+    Err(message) => fail("cannot persist suspended Bot: " + message)
+  }
+  let stored = match store.get_bot(bot.id) {
+    Ok(Some(value)) => value
+    Ok(None) => fail("suspended Bot disappeared")
+    Err(message) => fail("get_bot failed: " + message)
+  }
+  assert_eq(stored.state, @contracts.BOT_STATE_SUSPENDED)
+  match
+    store.start_chat_agent_session(
+      bots_test_session(chat, agent, now),
+      "owner",
+      now,
+    ) {
+    Ok(_) => fail("suspended Bot started an AgentSession")
+    Err(message) => assert_true(message.contains("Bot is not active"))
+  }
+  store.close()
+}
+
+///|
+test "archived Chat rejects sessions and new messages" {
+  let store = bots_test_open()
+  let now = "2026-11-27T02:50:00Z"
+  let (bot, agent, chat) = bots_test_seed(store, now)
+  let archived = { ..chat, state: @contracts.CHAT_STATE_ARCHIVED, updated_at: now }
+  let payload = @contracts.chat_project_changed_payload(
+    archived,
+    "",
+    "owner archive",
+    "owner",
+  )
+  match
+    store.append_bots_event(
+      @contracts.EVENT_CHAT_PROJECT_CHANGED,
+      @contracts.chat_event_subject(chat.id),
+      payload,
+      now,
+      chat.org_id,
+    ) {
+    Ok(_) => ()
+    Err(message) => fail("cannot persist archived Chat: " + message)
+  }
+  let stored = match store.get_chat(chat.id) {
+    Ok(Some(value)) => value
+    Ok(None) => fail("archived Chat disappeared")
+    Err(message) => fail("get_chat failed: " + message)
+  }
+  assert_eq(stored.state, @contracts.CHAT_STATE_ARCHIVED)
+  match
+    store.start_chat_agent_session(
+      bots_test_session(chat, agent, now),
+      "owner",
+      now,
+    ) {
+    Ok(_) => fail("archived Chat started an AgentSession")
+    Err(message) => assert_true(message.contains("archived Chat is read-only"))
+  }
+  match
+    store.append_chat_message(
+      bots_test_message(chat, "", @contracts.CHAT_MESSAGE_ROLE_USER, "hello", now),
+      now,
+    ) {
+    Ok(_) => fail("archived Chat accepted a new message")
+    Err(message) => assert_true(message.contains("archived Chat is read-only"))
+  }
   store.close()
 }

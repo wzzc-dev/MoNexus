@@ -129,6 +129,11 @@ pub const CHAT_MESSAGE_ROLE_ASSISTANT : String = "assistant"
 pub const CHAT_MESSAGE_ROLE_SYSTEM : String = "system"
 
 ///|
+/// Maximum inline Chat transcript body. Runtime stdout and hidden prompts are
+/// never copied into a Chat message; only bounded user-visible text is stored.
+pub const CHAT_MESSAGE_BODY_CAP : Int = 16_384
+
+///|
 pub const RUNTIME_LAUNCH_COMMAND : String = "command"
 
 ///|
@@ -259,6 +264,23 @@ pub fn bots_permission_set_hash(values : Array[String]) -> String {
     }
   }
   bots_canonical_hash(json_string_array(unique))
+}
+
+///|
+/// Bound an inline Chat transcript body to `CHAT_MESSAGE_BODY_CAP`.
+pub fn chat_message_body_bounded(text : String) -> String {
+  if text.length() > CHAT_MESSAGE_BODY_CAP {
+    text.substring(start=0, end=CHAT_MESSAGE_BODY_CAP)
+  } else {
+    text
+  }
+}
+
+///|
+/// Canonical digest for a Chat message. The inline body wins when present;
+/// otherwise the body reference is the stable content address.
+pub fn chat_message_digest(body : String, body_ref : String) -> String {
+  bots_canonical_hash(json_string(if body != "" { body } else { body_ref }))
 }
 
 // ---------------------------------------------------------------------------
@@ -637,6 +659,7 @@ pub(all) struct ChatMessage {
   role : String
   agent_session_id : String
   body_ref : String
+  body : String
   digest : String
   actor : String
   created_at : String
@@ -651,6 +674,7 @@ pub fn ChatMessage::new(
   digest~ : String,
   created_at~ : String,
   agent_session_id~ : String = "",
+  body~ : String = "",
   actor~ : String = "",
 ) -> ChatMessage {
   {
@@ -659,6 +683,7 @@ pub fn ChatMessage::new(
     role,
     agent_session_id,
     body_ref,
+    body,
     digest,
     actor,
     created_at,
@@ -673,6 +698,7 @@ pub fn ChatMessage::to_json(self : ChatMessage) -> @json.Json {
     ("role", json_string(self.role)),
     ("agent_session_id", json_string(self.agent_session_id)),
     ("body_ref", json_string(self.body_ref)),
+    ("body", json_string(self.body)),
     ("digest", json_string(self.digest)),
     ("actor", json_string(self.actor)),
     ("created_at", json_string(self.created_at)),
@@ -699,6 +725,7 @@ pub fn chat_message_from_json(json : @json.Json) -> ChatMessage? {
     role: string_field_or(object, "role", CHAT_MESSAGE_ROLE_USER),
     agent_session_id: string_field_or(object, "agent_session_id", ""),
     body_ref: string_field_or(object, "body_ref", ""),
+    body: string_field_or(object, "body", ""),
     digest: string_field_or(object, "digest", ""),
     actor: string_field_or(object, "actor", ""),
     created_at: string_field_or(object, "created_at", ""),
