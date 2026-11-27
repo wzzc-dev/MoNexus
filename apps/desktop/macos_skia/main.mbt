@@ -68,6 +68,9 @@ async fn main {
   let language_task : async () -> Unit = async fn() {
     @app.language_choice_loop()
   }
+  let terminal_poll_task : async () -> Unit = async fn() {
+    @app.terminal_poll_loop()
+  }
   @async.with_task_group(async fn(group) {
     group.spawn_bg(
       no_wait=true,
@@ -93,6 +96,11 @@ async fn main {
       no_wait=true,
       allow_failure=true,
       language_task,
+    )
+    group.spawn_bg(
+      no_wait=true,
+      allow_failure=true,
+      terminal_poll_task,
     )
     window_task()
   })

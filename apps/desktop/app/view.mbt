@@ -726,26 +726,40 @@ fn workspace_row(
     Some(current) => current.id == record.id
     None => false
   }
-  let child = column([
-    row([
-      column([
-        ui_row_title(record.name),
-        ui_mono(record.root, 11.0),
-      ], spacing=3.0, align=@style.CrossAlign::Start),
-      spacer(weight=1.0),
-      ui_tag(
-        if record.is_git {
-          "git"
-        } else {
-          tr(model.lang, "exclusive", "独占")
-        },
-      ),
-      ui_mono(record.id, 10.5),
+  let actions : Array[@moui.View[Msg]] = [
+    column([
+      ui_row_title(record.name),
+      ui_mono(record.root, 11.0),
+    ], spacing=3.0, align=@style.CrossAlign::Start),
+    spacer(weight=1.0),
+    ui_tag(
+      if record.is_git {
+        "git"
+      } else {
+        tr(model.lang, "exclusive", "独占")
+      },
+    ),
+  ]
+  if selected {
+    actions.push(
       ui_ghost_small(
-        tr(model.lang, "restore", "恢复"),
-        ProjectSelectWorkspace(record.id),
+        tr(model.lang, "terminal", "终端"),
+        ProjectTerminalFocus,
       ),
-    ], spacing=12.0, align=@style.CrossAlign::Center).frame(width=964.0),
+    )
+  }
+  actions.push(
+    ui_ghost_small(
+      tr(model.lang, "restore", "恢复"),
+      ProjectSelectWorkspace(record.id),
+    ),
+  )
+  let child = column([
+    row(
+      actions,
+      spacing=12.0,
+      align=@style.CrossAlign::Center,
+    ).frame(width=964.0),
   ], spacing=6.0).frame(width=964.0)
   container(
     padding(child, 14.0),
@@ -771,6 +785,33 @@ fn project_detail(model : Model) -> Array[@moui.View[Msg]] {
   let detail : Array[@moui.View[Msg]] = []
   match project.workspace {
     Some(record) => {
+      let terminal : Array[@moui.View[Msg]] = [
+        ui_section(tr(model.lang, "Terminal", "终端")),
+        ui_mono_wrapped(
+          record.name + " · " + record.root,
+          10.5,
+          960.0,
+          ui_dim(),
+        ),
+        row([
+          ui_primary(
+            tr(model.lang, "Open terminal", "打开终端"),
+            ProjectTerminalFocus,
+          ),
+          ui_meta(
+            tr(model.lang, "state ", "状态 ") +
+            terminal_state_label(project.terminal_state, model.lang) +
+            (if project.terminal_id == "" {
+              ""
+            } else {
+              tr(model.lang, " · session ", " · 会话 ") +
+              terminal_session_label(project.terminal_id)
+            }),
+          ),
+          spacer(weight=1.0),
+        ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
+      ]
+      detail.push(ui_card(terminal, width=992.0))
       let files : Array[@moui.View[Msg]] = [
         ui_section(tr(model.lang, "Files", "文件")),
         ui_mono_wrapped(
@@ -851,32 +892,6 @@ fn project_detail(model : Model) -> Array[@moui.View[Msg]] {
         ),
       ]
       detail.push(ui_card(git, width=992.0))
-      let terminal : Array[@moui.View[Msg]] = [
-        ui_section(tr(model.lang, "Terminal", "终端")),
-        ui_code_block(
-          if project.terminal_text == "" {
-            tr(
-              model.lang,
-              "(send a command to start a local PTY or remote ssh -tt + tmux session)",
-              "（发送命令以启动本地 PTY 或远程 ssh -tt + tmux 会话）",
-            )
-          } else {
-            project.terminal_text
-          },
-          960.0,
-        ),
-        row([
-          ui_field(
-            tr(model.lang, "Command", "命令"),
-            project.terminal_input,
-            fn(value) { ProjectTerminalInput(value) },
-            tr(model.lang, "shell command", "shell 命令"),
-            800.0,
-          ),
-          ui_primary(tr(model.lang, "Send", "发送"), ProjectTerminalSend),
-        ], spacing=12.0, align=@style.CrossAlign::End),
-      ]
-      detail.push(ui_card(terminal, width=992.0))
       let worktree : Array[@moui.View[Msg]] = [
         ui_section(tr(model.lang, "Worktree", "工作树")),
         row([
@@ -2371,7 +2386,12 @@ fn page_body(model : Model) -> @moui.View[Msg] {
   match model.page {
     Home => home_page(model)
     Machines => machines_page(model)
-    Projects => projects_page(model)
+    Projects =>
+      if terminal_focus_active(model) {
+        terminal_page(model)
+      } else {
+        projects_page(model)
+      }
     Agents => agents_page(model)
     Inbox => inbox_page(model)
     Tasks => tasks_page(model)
@@ -2382,22 +2402,34 @@ fn page_body(model : Model) -> @moui.View[Msg] {
 
 ///|
 fn main_island(model : Model) -> @moui.View[Msg] {
-  let body = scroll_view(
+  let body = if terminal_focus_active(model) {
+    // The focused terminal owns its only scroll viewport; wrapping it in the
+    // page scroll would nest two vertical scrollers.
     padding_edges(
-      page_body(model).frame(width=ui_body_width),
+      page_body(model),
       top=ui_body_padding,
       right=ui_body_padding,
       bottom=ui_body_padding,
       left=ui_body_padding,
-    ),
-    width=ui_main_width,
-    height=ui_scroll_height,
-    request=@core.ScrollRequest::new(
-      id=model.scroll_epoch,
-      offset=@core.Point::new(x=0.0, y=0.0),
-    ),
-    shows_indicator=true,
-  )
+    )
+  } else {
+    scroll_view(
+      padding_edges(
+        page_body(model).frame(width=ui_body_width),
+        top=ui_body_padding,
+        right=ui_body_padding,
+        bottom=ui_body_padding,
+        left=ui_body_padding,
+      ),
+      width=ui_main_width,
+      height=ui_scroll_height,
+      request=@core.ScrollRequest::new(
+        id=model.scroll_epoch,
+        offset=@core.Point::new(x=0.0, y=0.0),
+      ),
+      shows_indicator=true,
+    )
+  }
   let content = column([
     top_bar(model),
     ui_divider(),

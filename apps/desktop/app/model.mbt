@@ -163,6 +163,13 @@ pub(all) struct ProjectState {
   terminal_text : String
   terminal_input : String
   terminal_cursor : Int64
+  terminal_focus : Bool
+  terminal_state : TerminalState
+  terminal_eof : Bool
+  terminal_error : String
+  terminal_read_in_flight : Bool
+  terminal_history : Array[String]
+  terminal_scroll_epoch : Int32
   worktree_branch : String
   worktree_path : String
   worktree_message : String
@@ -190,6 +197,13 @@ pub fn ProjectState::new() -> ProjectState {
     terminal_text: "",
     terminal_input: "",
     terminal_cursor: 0L,
+    terminal_focus: false,
+    terminal_state: TerminalClosed,
+    terminal_eof: false,
+    terminal_error: "",
+    terminal_read_in_flight: false,
+    terminal_history: [],
+    terminal_scroll_epoch: 0,
     worktree_branch: "",
     worktree_path: "",
     worktree_message: "",
@@ -605,8 +619,18 @@ pub(all) enum Msg {
   ProjectRefresh
   ProjectRefreshDiff
   ProjectTerminalInput(String)
-  ProjectTerminalOpened(String)
-  ProjectTerminalOutput(Int64, String)
+  ProjectTerminalOpened(String, String, Int64, Bool)
+  ProjectTerminalOutput(String, Int64, String, Bool)
+  ProjectTerminalFailed(String, String)
+  ProjectTerminalPoll
+  ProjectTerminalFocus
+  ProjectTerminalBack
+  ProjectTerminalReconnect
+  ProjectTerminalClear
+  ProjectTerminalClose
+  ProjectTerminalStop
+  ProjectTerminalHistory(String)
+  ProjectTerminalTranscriptEdited(String)
   ProjectTerminalSend
   ProjectWorktreeBranch(String)
   ProjectWorktreePath(String)
@@ -705,8 +729,8 @@ pub(all) enum MachineCommand {
   ProjectGitStatus(String)
   ProjectGitDiff(String, String)
   ProjectOpenTerminal(String)
-  ProjectTerminalWrite(String, String, Int64)
-  ProjectTerminalRead(String)
+  ProjectTerminalWrite(String, String)
+  ProjectTerminalRead(String, Int64)
   ProjectCloseTerminal(String)
   ProjectListWorktrees(String)
   ProjectCreateWorktree(String, String, String)
@@ -1439,6 +1463,10 @@ pub fn update_full(
       none,
     )
     ProjectOpened(record) => {
+      let same_workspace = match model.project.workspace {
+        Some(current) => current.id == record.id
+        None => false
+      }
       let workspaces : Array[@contracts.WorkspaceRecord] = []
       let mut replaced = false
       for existing in model.project.workspaces {
@@ -1451,6 +1479,12 @@ pub fn update_full(
       }
       if !replaced {
         workspaces.push(record)
+      }
+      let commands : Array[MachineCommand] = if !same_workspace &&
+        model.project.terminal_id != "" {
+        [ProjectCloseTerminal(model.project.terminal_id)]
+      } else {
+        none
       }
       let opened = {
         ..model,
@@ -1465,14 +1499,61 @@ pub fn update_full(
           dirty: false,
           status_text: "",
           diff_text: "",
-          terminal_id: "",
-          terminal_text: "",
-          terminal_cursor: 0L,
+          terminal_id: if same_workspace {
+            model.project.terminal_id
+          } else {
+            ""
+          },
+          terminal_text: if same_workspace {
+            model.project.terminal_text
+          } else {
+            ""
+          },
+          terminal_input: if same_workspace {
+            model.project.terminal_input
+          } else {
+            ""
+          },
+          terminal_cursor: if same_workspace {
+            model.project.terminal_cursor
+          } else {
+            0L
+          },
+          terminal_focus: if same_workspace {
+            model.project.terminal_focus
+          } else {
+            false
+          },
+          terminal_state: if same_workspace {
+            model.project.terminal_state
+          } else {
+            TerminalClosed
+          },
+          terminal_eof: if same_workspace {
+            model.project.terminal_eof
+          } else {
+            false
+          },
+          terminal_error: if same_workspace {
+            model.project.terminal_error
+          } else {
+            ""
+          },
+          terminal_read_in_flight: if same_workspace {
+            model.project.terminal_read_in_flight
+          } else {
+            false
+          },
+          terminal_history: if same_workspace {
+            model.project.terminal_history
+          } else {
+            []
+          },
           busy: false,
           message: tr(model.lang, "opened ", "已打开 ") + record.root,
         },
       }
-      (apply_workspace_defaults(opened, opened.project.workspaces), none)
+      (apply_workspace_defaults(opened, opened.project.workspaces), commands)
     }
     ProjectWorkspaces(records) => {
       let sorted = sort_workspaces(records)
@@ -1717,56 +1798,39 @@ pub fn update_full(
       { ..model, project: { ..model.project, terminal_input: value } },
       none,
     )
-    ProjectTerminalOpened(terminal_id) => (
-      {
-        ..model,
-        project: {
-          ..model.project,
-          terminal_id,
-          terminal_text: model.project.terminal_text +
-          tr(model.lang, "$ terminal ready\n", "$ 终端已就绪\n"),
-          busy: false,
-        },
-      },
-      none,
-    )
-    ProjectTerminalOutput(cursor, text) => (
-      {
-        ..model,
-        project: {
-          ..model.project,
-          terminal_cursor: cursor,
-          terminal_text: model.project.terminal_text + text,
-        },
-      },
-      none,
-    )
-    ProjectTerminalSend => {
-      let line = model.project.terminal_input
-      if model.project.terminal_id != "" {
-        (
-          {
-            ..model,
-            project: { ..model.project, terminal_input: "", busy: true },
-          },
-          [
-            ProjectTerminalWrite(
-              model.project.terminal_id,
-              line,
-              model.project.terminal_cursor,
-            ),
-          ],
-        )
-      } else {
-        match model.project.workspace {
-          Some(record) => (
+    ProjectTerminalFocus =>
+      match model.project.workspace {
+        Some(record) => {
+          let should_open = model.project.terminal_id == "" &&
+            model.project.terminal_state == TerminalClosed
+          let commands : Array[MachineCommand] = if should_open {
+            [ProjectOpenTerminal(record.id)]
+          } else {
+            none
+          }
+          (
             {
               ..model,
-              project: { ..model.project, busy: true },
+              page: Projects,
+              scroll_epoch: model.scroll_epoch + 1,
+              project: {
+                ..model.project,
+                terminal_focus: true,
+                terminal_state: if should_open {
+                  TerminalOpening
+                } else {
+                  model.project.terminal_state
+                },
+                // Re-entering the focused view must not overlap a read that
+                // was already in flight when the user left the page.
+                terminal_read_in_flight: model.project.terminal_read_in_flight,
+              },
             },
-            [ProjectOpenTerminal(record.id)],
+            commands,
           )
-          None => (
+        }
+        None =>
+          (
             {
               ..model,
               project: {
@@ -1780,7 +1844,267 @@ pub fn update_full(
             },
             none,
           )
+      }
+    ProjectTerminalBack =>
+      (
+        {
+          ..model,
+          project: { ..model.project, terminal_focus: false },
+          scroll_epoch: model.scroll_epoch + 1,
+        },
+        none,
+      )
+    ProjectTerminalReconnect => {
+      let old_session = model.project.terminal_id
+      let commands : Array[MachineCommand] = []
+      if old_session != "" {
+        commands.push(ProjectCloseTerminal(old_session))
+      }
+      match model.project.workspace {
+        Some(record) => {
+          commands.push(ProjectOpenTerminal(record.id))
+          (
+            {
+              ..model,
+              page: Projects,
+              project: {
+                ..model.project,
+                terminal_id: "",
+                terminal_text: "",
+                terminal_cursor: 0L,
+                terminal_focus: true,
+                terminal_state: TerminalOpening,
+                terminal_eof: false,
+                terminal_error: "",
+                terminal_read_in_flight: false,
+                terminal_scroll_epoch: model.project.terminal_scroll_epoch + 1,
+              },
+            },
+            commands,
+          )
         }
+        None =>
+          (
+            {
+              ..model,
+              project: {
+                ..model.project,
+                message: tr(
+                  model.lang,
+                  "open a project first",
+                  "请先打开一个项目",
+                ),
+              },
+            },
+            commands,
+          )
+      }
+    }
+    ProjectTerminalClear =>
+      (
+        {
+          ..model,
+          project: {
+            ..model.project,
+            terminal_text: "",
+            terminal_scroll_epoch: model.project.terminal_scroll_epoch + 1,
+          },
+        },
+        none,
+      )
+    ProjectTerminalClose => {
+      let commands : Array[MachineCommand] = if model.project.terminal_id != "" {
+        [ProjectCloseTerminal(model.project.terminal_id)]
+      } else {
+        none
+      }
+      (
+        {
+          ..model,
+          project: {
+            ..model.project,
+            terminal_id: "",
+            terminal_text: "",
+            terminal_input: "",
+            terminal_cursor: 0L,
+            terminal_eof: false,
+            terminal_error: "",
+            terminal_read_in_flight: false,
+            terminal_state: TerminalClosed,
+            terminal_scroll_epoch: model.project.terminal_scroll_epoch + 1,
+          },
+        },
+        commands,
+      )
+    }
+    ProjectTerminalStop =>
+      if model.project.terminal_id != "" &&
+        model.project.terminal_state == TerminalRunning {
+        (model, [ProjectTerminalWrite(model.project.terminal_id, "\u{3}")])
+      } else {
+        (model, none)
+      }
+    ProjectTerminalPoll =>
+      if terminal_should_poll(model) && !model.project.terminal_read_in_flight {
+        (
+          {
+            ..model,
+            project: { ..model.project, terminal_read_in_flight: true },
+          },
+          [
+            ProjectTerminalRead(
+              model.project.terminal_id,
+              model.project.terminal_cursor,
+            ),
+          ],
+        )
+      } else {
+        (model, none)
+      }
+    ProjectTerminalOpened(session_id, text, cursor, eof) =>
+      if session_id == "" {
+        (
+          {
+            ..model,
+            project: {
+              ..model.project,
+              terminal_state: TerminalFailed,
+              terminal_error: "terminal.open: missing session_id",
+              terminal_read_in_flight: false,
+            },
+          },
+          none,
+        )
+      } else {
+        (
+          {
+            ..model,
+            project: {
+              ..model.project,
+              terminal_id: session_id,
+              terminal_text: text,
+              terminal_cursor: cursor,
+              terminal_state: if eof {
+                TerminalEnded
+              } else {
+                TerminalRunning
+              },
+              terminal_eof: eof,
+              terminal_error: "",
+              terminal_read_in_flight: false,
+              terminal_scroll_epoch: model.project.terminal_scroll_epoch + 1,
+              busy: false,
+            },
+          },
+          none,
+        )
+      }
+    ProjectTerminalOutput(session_id, cursor, text, eof) =>
+      if session_id != model.project.terminal_id {
+        (model, none)
+      } else {
+        let advanced = cursor > model.project.terminal_cursor
+        let next_text = terminal_text_after_read(
+          model.project.terminal_text,
+          model.project.terminal_cursor,
+          cursor,
+          text,
+        )
+        let next_eof = eof || model.project.terminal_eof
+        (
+          {
+            ..model,
+            project: {
+              ..model.project,
+              terminal_text: next_text,
+              terminal_cursor: if advanced {
+                cursor
+              } else {
+                model.project.terminal_cursor
+              },
+              terminal_state: if next_eof {
+                TerminalEnded
+              } else {
+                TerminalRunning
+              },
+              terminal_eof: next_eof,
+              terminal_read_in_flight: false,
+              terminal_scroll_epoch: if advanced && text != "" {
+                model.project.terminal_scroll_epoch + 1
+              } else {
+                model.project.terminal_scroll_epoch
+              },
+            },
+          },
+          none,
+        )
+      }
+    ProjectTerminalFailed(session_id, error) =>
+      if session_id != "" && session_id != model.project.terminal_id {
+        (model, none)
+      } else {
+        (
+          {
+            ..model,
+            project: {
+              ..model.project,
+              terminal_state: TerminalFailed,
+              terminal_error: error,
+              terminal_read_in_flight: false,
+            },
+          },
+          none,
+        )
+      }
+    ProjectTerminalHistory(command) =>
+      (
+        { ..model, project: { ..model.project, terminal_input: command } },
+        none,
+      )
+    // A selectable transcript is rendered with a text area. Edits are
+    // discarded; leaving `terminal_text` unchanged makes a read-only view
+    // without reaching into MoUI's caret internals.
+    ProjectTerminalTranscriptEdited(_text) => (model, none)
+    ProjectTerminalSend => {
+      let line = model.project.terminal_input
+      if line == "" {
+        (model, none)
+      } else if model.project.terminal_id != "" &&
+        model.project.terminal_state == TerminalRunning {
+        (
+          {
+            ..model,
+            project: {
+              ..model.project,
+              terminal_input: "",
+              terminal_history: terminal_history_push(
+                model.project.terminal_history,
+                line,
+              ),
+            },
+          },
+          [
+            ProjectTerminalWrite(
+              model.project.terminal_id,
+              terminal_command_payload(line),
+            ),
+          ],
+        )
+      } else {
+        (
+          {
+            ..model,
+            project: {
+              ..model.project,
+              message: tr(
+                model.lang,
+                "terminal is not running; reconnect first",
+                "终端未运行，请先重新连接",
+              ),
+            },
+          },
+          none,
+        )
       }
     }
     ProjectWorktreeBranch(value) => (
