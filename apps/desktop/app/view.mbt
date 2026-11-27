@@ -65,9 +65,9 @@ fn inbox_needs_count(model : Model) -> Int {
 /// page is open and a hover wash otherwise. The Inbox row carries its needs-you
 /// count.
 fn nav_item(model : Model, page : Page) -> @moui.View[Msg] {
-  let label = page.label()
-  let active = model.page.label() == label
-  let hover_key = "nav:" + label
+  let label = page.label_in(model.lang)
+  let active = model.page == page
+  let hover_key = "nav:" + page.label()
   let hovered = model.hover_row == hover_key
   let tone = if active {
     ui_accent()
@@ -89,7 +89,7 @@ fn nav_item(model : Model, page : Page) -> @moui.View[Msg] {
     .foreground(tone),
     spacer(weight=1.0),
   ]
-  if label == "Inbox" {
+  if page == Inbox {
     let needs = inbox_needs_count(model)
     if needs > 0 {
       children.push(ui_pill(needs.to_string(), active))
@@ -186,12 +186,19 @@ fn page_refresh_msg(model : Model) -> Msg? {
 ///|
 fn top_bar(model : Model) -> @moui.View[Msg] {
   let children : Array[@moui.View[Msg]] = [
-    ui_page_title(model.page.label()),
+    ui_page_title(model.page.label_in(model.lang)),
     spacer(weight=1.0),
-    ui_state_pill("host " + model.host.link.label(), link_tone(model.host.link)),
+    ui_state_pill(
+      tr(model.lang, "host ", "主机 ") +
+      model.host.link.label_in(model.lang),
+      link_tone(model.host.link),
+    ),
   ]
   match page_refresh_msg(model) {
-    Some(msg) => children.push(ui_ghost_compact("Refresh", msg, 64.0))
+    Some(msg) =>
+      children.push(
+        ui_ghost_compact(tr(model.lang, "Refresh", "刷新"), msg, 64.0),
+      )
     None => ()
   }
   container(
@@ -209,14 +216,19 @@ fn top_bar(model : Model) -> @moui.View[Msg] {
 ///|
 fn status_bar(model : Model) -> @moui.View[Msg] {
   let host = model.host
-  let left = if host.host_id == "" { "not connected" } else { host.host_id }
+  let left = if host.host_id == "" {
+    tr(model.lang, "not connected", "未连接")
+  } else {
+    host.host_id
+  }
   let right = if host.event_count > 0 {
-    "events: " +
+    tr(model.lang, "events: ", "事件：") +
     host.event_count.to_string() +
-    " · seq " +
+    tr(model.lang, " · seq ", " · 序号 ") +
     host.event_seq.to_string()
   } else {
-    "MoNexus " + @contracts.PRODUCT_VERSION + " · 8 pages"
+    "MoNexus " + @contracts.PRODUCT_VERSION +
+    tr(model.lang, " · 8 pages", " · 8 个页面")
   }
   container(
     padding_xy(
@@ -239,57 +251,73 @@ fn home_page(model : Model) -> @moui.View[Msg] {
   let host = model.host
   let stats = row([
     ui_stat_card(
-      "Machines",
+      tr(model.lang, "Machines", "机器"),
       model.machines.length().to_string(),
-      if model.machines.is_empty() { "none registered" } else { "registered" },
-      322.0,
-    ),
-    ui_stat_card(
-      "Decisions",
-      model.inbox.decisions.length().to_string(),
-      if model.inbox.decisions.is_empty() {
-        "inbox empty"
+      if model.machines.is_empty() {
+        tr(model.lang, "none registered", "未注册")
       } else {
-        "in the inbox"
+        tr(model.lang, "registered", "已注册")
       },
       322.0,
     ),
     ui_stat_card(
-      "Tasks",
+      tr(model.lang, "Decisions", "决策"),
+      model.inbox.decisions.length().to_string(),
+      if model.inbox.decisions.is_empty() {
+        tr(model.lang, "inbox empty", "收件箱为空")
+      } else {
+        tr(model.lang, "in the inbox", "位于收件箱")
+      },
+      322.0,
+    ),
+    ui_stat_card(
+      tr(model.lang, "Tasks", "任务"),
       model.task.tasks.length().to_string(),
-      if model.task.tasks.is_empty() { "board empty" } else { "on the board" },
+      if model.task.tasks.is_empty() {
+        tr(model.lang, "board empty", "看板为空")
+      } else {
+        tr(model.lang, "on the board", "位于看板")
+      },
       322.0,
     ),
   ], spacing=12.0).frame(width=992.0)
   let connection : Array[@moui.View[Msg]] = [
-    ui_section("Connection"),
-    ui_kv("state", host.link.label(), 960.0),
+    ui_section(tr(model.lang, "Connection", "连接")),
+    ui_kv(tr(model.lang, "state", "状态"), host.link.label_in(model.lang), 960.0),
     ui_kv(
-      "host id",
-      if host.host_id == "" { "(not connected)" } else { host.host_id },
+      tr(model.lang, "host id", "主机 ID"),
+      if host.host_id == "" {
+        tr(model.lang, "(not connected)", "（未连接）")
+      } else {
+        host.host_id
+      },
       960.0,
     ),
     ui_kv(
-      "endpoint",
+      tr(model.lang, "endpoint", "端点"),
       if host.ws_url == "" {
-        "(waiting for host.json)"
+        tr(model.lang, "(waiting for host.json)", "（等待 host.json）")
       } else {
         host.ws_url
       },
       960.0,
     ),
     ui_kv(
-      "version",
-      if host.version == "" { "(not connected)" } else { host.version },
+      tr(model.lang, "version", "版本"),
+      if host.version == "" {
+        tr(model.lang, "(not connected)", "（未连接）")
+      } else {
+        host.version
+      },
       960.0,
     ),
     ui_kv(
-      "events",
+      tr(model.lang, "events", "事件"),
       if host.event_count == 0 {
-        "none yet"
+        tr(model.lang, "none yet", "暂无")
       } else {
         host.event_count.to_string() +
-        " · last " +
+        tr(model.lang, " · last ", " · 最近 ") +
         host.last_event +
         " @" +
         host.event_seq.to_string()
@@ -299,15 +327,22 @@ fn home_page(model : Model) -> @moui.View[Msg] {
   ]
   if host.last_error != "" {
     connection.push(
-      text("reason: " + host.last_error, width=960.0, align=@core.TextAlign::TextStart, wrap=true)
-      .font(ui_font(11.0, 400))
-      .foreground(ui_danger()),
+      text(
+        tr(model.lang, "reason: ", "原因：") + host.last_error,
+        width=960.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(11.0, 400)).foreground(ui_danger()),
     )
   }
   column([
-    ui_hero("Welcome to MoNexus"),
+    ui_hero(tr(model.lang, "Welcome to MoNexus", "欢迎使用 MoNexus")),
     ui_muted_wrapped(
-      "A local-first desktop shell for machines, tasks and agent sessions.",
+      tr(
+        model.lang,
+        "A local-first desktop shell for machines, tasks and agent sessions.",
+        "面向机器、任务和智能体会话的本地优先桌面外壳。",
+      ),
       620.0,
     ),
     stats,
@@ -322,8 +357,12 @@ fn machine_card(
   model : Model,
   record : @contracts.MachineRecord,
 ) -> @moui.View[Msg] {
-  let status = machine_status_text(record.status)
-  let identity = if record.identity == "" { "(default)" } else { record.identity }
+  let status = machine_status_text_in(record.status, model.lang)
+  let identity = if record.identity == "" {
+    tr(model.lang, "(default)", "（默认）")
+  } else {
+    record.identity
+  }
   let children : Array[@moui.View[Msg]] = [
     row([
       column([
@@ -335,30 +374,43 @@ fn machine_card(
     ], spacing=12.0, align=@style.CrossAlign::Center).frame(width=960.0),
     row([
       ui_mono(record.target_label() + ":" + record.port.to_string(), 11.0),
-      ui_meta("identity " + identity),
-      ui_meta("config " + (if record.use_ssh_config { "on" } else { "off" })),
+      ui_meta(tr(model.lang, "identity ", "身份 ") + identity),
+      ui_meta(
+        tr(model.lang, "config ", "配置 ") +
+        (if record.use_ssh_config {
+          tr(model.lang, "on", "开")
+        } else {
+          tr(model.lang, "off", "关")
+        }),
+      ),
       spacer(weight=1.0),
     ], spacing=12.0, align=@style.CrossAlign::Center).frame(width=960.0),
     ui_meta(
-      "host keys " +
+      tr(model.lang, "host keys ", "主机密钥 ") +
       record.host_key_policy +
       " · " +
-      machine_profile_summary(record),
+      machine_profile_summary_in(record, model.lang),
     ),
   ]
   if record.last_error != "" {
     children.push(
-      text("reason: " + record.last_error, width=900.0, align=@core.TextAlign::TextStart, wrap=true)
-      .font(ui_font(11.0, 400))
-      .foreground(ui_danger()),
+      text(
+        tr(model.lang, "reason: ", "原因：") + record.last_error,
+        width=900.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(11.0, 400)).foreground(ui_danger()),
     )
   }
   let actions : Array[@moui.View[Msg]] = [
-    ui_ghost_small("Probe", ProbeMachine(record.id)),
-    ui_danger_ghost("Remove", RemoveMachine(record.id)),
+    ui_ghost_small(tr(model.lang, "Probe", "探测"), ProbeMachine(record.id)),
+    ui_danger_ghost(
+      tr(model.lang, "Remove", "移除"),
+      RemoveMachine(record.id),
+    ),
   ]
   if model.machine_busy == record.id {
-    actions.push(ui_meta("working..."))
+    actions.push(ui_meta(tr(model.lang, "working...", "处理中...")))
   }
   children.push(row(actions, spacing=8.0, align=@style.CrossAlign::Center))
   ui_card(children, width=992.0)
@@ -368,66 +420,82 @@ fn machine_card(
 fn machines_page(model : Model) -> @moui.View[Msg] {
   let draft = model.draft
   let form : Array[@moui.View[Msg]] = [
-    ui_section("Add machine"),
+    ui_section(tr(model.lang, "Add machine", "添加机器")),
     row([
       ui_field(
-        "Name",
+        tr(model.lang, "Name", "名称"),
         draft.name,
         fn(value) { DraftName(value) },
-        "name",
+        tr(model.lang, "name", "名称"),
         220.0,
       ),
       ui_field(
-        "Host",
+        tr(model.lang, "Host", "主机"),
         draft.host,
         fn(value) { DraftHost(value) },
-        "host (required)",
+        tr(model.lang, "host (required)", "主机（必填）"),
         280.0,
       ),
-      ui_field("Port", draft.port, fn(value) { DraftPort(value) }, "port", 90.0),
       ui_field(
-        "User",
+        tr(model.lang, "Port", "端口"),
+        draft.port,
+        fn(value) { DraftPort(value) },
+        tr(model.lang, "port", "端口"),
+        90.0,
+      ),
+      ui_field(
+        tr(model.lang, "User", "用户"),
         draft.user,
         fn(value) { DraftUser(value) },
-        "user",
+        tr(model.lang, "user", "用户"),
         160.0,
       ),
     ], spacing=12.0, align=@style.CrossAlign::End),
     row([
       ui_field(
-        "Identity file",
+        tr(model.lang, "Identity file", "身份文件"),
         draft.identity,
         fn(value) { DraftIdentity(value) },
-        "identity file (optional)",
+        tr(model.lang, "identity file (optional)", "身份文件（可选）"),
         320.0,
       ),
       checkbox(
-        "use ~/.ssh/config",
+        tr(model.lang, "use ~/.ssh/config", "使用 ~/.ssh/config"),
         checked=draft.use_ssh_config,
         on_change=fn(value) { DraftUseConfig(value) },
       ),
       spacer(weight=1.0),
-      ui_ghost("host keys: " + draft.host_key_policy, CycleDraftPolicy),
-      ui_primary("Add machine", SubmitMachine),
+      ui_ghost(
+        tr(model.lang, "host keys: ", "主机密钥：") +
+        draft.host_key_policy,
+        CycleDraftPolicy,
+      ),
+      ui_primary(tr(model.lang, "Add machine", "添加机器"), SubmitMachine),
     ], spacing=12.0, align=@style.CrossAlign::Center).frame(width=960.0),
   ]
   if model.machine_message != "" {
     form.push(ui_muted_wrapped(model.machine_message, 960.0))
   }
+  let registered = model.machines.length().to_string() +
+    tr(model.lang, " registered", " 台已注册")
   let saved : Array[@moui.View[Msg]] = [
     row([
-      ui_section("Saved machines"),
+      ui_section(tr(model.lang, "Saved machines", "已保存的机器")),
       spacer(weight=1.0),
-      ui_meta(model.machines.length().to_string() + " registered"),
+      ui_meta(registered),
     ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
   ]
   if model.machines.is_empty() {
     saved.push(
       ui_muted_wrapped(
         if model.machines_loaded {
-          "no machines registered yet"
+          tr(model.lang, "no machines registered yet", "尚未注册机器")
         } else {
-          "loading machines from the host..."
+          tr(
+            model.lang,
+            "loading machines from the host...",
+            "正在从主机加载机器...",
+          )
         },
         960.0,
       ),
@@ -468,7 +536,11 @@ fn entry_row(
         ).font(mono_font(11.0, 400)).foreground(tone),
         spacer(weight=1.0),
         ui_ghost_small(
-          if entry.is_dir { "list" } else { "open" },
+          if entry.is_dir {
+            tr(model.lang, "list", "列表")
+          } else {
+            tr(model.lang, "open", "打开")
+          },
           if entry.is_dir {
             ProjectOpenDir(entry.path)
           } else {
@@ -501,9 +573,18 @@ fn workspace_row(
         ui_mono(record.root, 11.0),
       ], spacing=3.0, align=@style.CrossAlign::Start),
       spacer(weight=1.0),
-      ui_tag(if record.is_git { "git" } else { "exclusive" }),
+      ui_tag(
+        if record.is_git {
+          "git"
+        } else {
+          tr(model.lang, "exclusive", "独占")
+        },
+      ),
       ui_mono(record.id, 10.5),
-      ui_ghost_small("restore", ProjectSelectWorkspace(record.id)),
+      ui_ghost_small(
+        tr(model.lang, "restore", "恢复"),
+        ProjectSelectWorkspace(record.id),
+      ),
     ], spacing=12.0, align=@style.CrossAlign::Center).frame(width=964.0),
   ], spacing=6.0).frame(width=964.0)
   container(
@@ -531,21 +612,27 @@ fn project_detail(model : Model) -> Array[@moui.View[Msg]] {
   match project.workspace {
     Some(record) => {
       let files : Array[@moui.View[Msg]] = [
-        ui_section("Files"),
+        ui_section(tr(model.lang, "Files", "文件")),
         ui_mono_wrapped(
-          "workspace " +
+          tr(model.lang, "workspace ", "工作区 ") +
           record.id +
-          " · root " +
+          tr(model.lang, " · root ", " · 根目录 ") +
           record.root +
           " · " +
-          (if record.is_git { "git" } else { "non-git (exclusive lease)" }),
+          (if record.is_git {
+            "git"
+          } else {
+            tr(model.lang, "non-git (exclusive lease)", "非 git（独占租约）")
+          }),
           10.5,
           960.0,
           ui_dim(),
         ),
       ]
       if project.entries.is_empty() {
-        files.push(ui_muted_wrapped("no entries loaded", 960.0))
+        files.push(
+          ui_muted_wrapped(tr(model.lang, "no entries loaded", "未加载条目"), 960.0),
+        )
       } else {
         for entry in project.entries {
           files.push(entry_row(model, entry))
@@ -553,42 +640,50 @@ fn project_detail(model : Model) -> Array[@moui.View[Msg]] {
       }
       detail.push(ui_card(files, width=992.0))
       let editor : Array[@moui.View[Msg]] = [
-        ui_section("Editor"),
+        ui_section(tr(model.lang, "Editor", "编辑器")),
         ui_meta(
           if project.selected == "" {
-            "select a file"
+            tr(model.lang, "select a file", "选择文件")
           } else {
-            project.selected + (if project.dirty { " · unsaved" } else { "" })
+            project.selected +
+            (if project.dirty {
+              tr(model.lang, " · unsaved", " · 未保存")
+            } else {
+              ""
+            })
           },
         ),
         ui_text_area_field(
-          "Content",
+          tr(model.lang, "Content", "内容"),
           project.content,
           fn(value) { ProjectDraft(value) },
-          "file content",
+          tr(model.lang, "file content", "文件内容"),
           960.0,
           8,
         ),
         row([
-          ui_primary("Save", ProjectSaveFile),
-          ui_ghost("Refresh diff", ProjectRefreshDiff),
+          ui_primary(tr(model.lang, "Save", "保存"), ProjectSaveFile),
+          ui_ghost(
+            tr(model.lang, "Refresh diff", "刷新差异"),
+            ProjectRefreshDiff,
+          ),
         ], spacing=8.0, align=@style.CrossAlign::Center),
       ]
       detail.push(ui_card(editor, width=992.0))
       let git : Array[@moui.View[Msg]] = [
-        ui_section("Git status"),
+        ui_section(tr(model.lang, "Git status", "Git 状态")),
         ui_code_block(
           if project.status_text == "" {
-            "(not loaded)"
+            tr(model.lang, "(not loaded)", "（未加载）")
           } else {
             project.status_text
           },
           960.0,
         ),
-        ui_section("Git diff"),
+        ui_section(tr(model.lang, "Git diff", "Git 差异")),
         ui_code_block(
           if project.diff_text == "" {
-            "(no diff loaded)"
+            tr(model.lang, "(no diff loaded)", "（未加载差异）")
           } else {
             project.diff_text
           },
@@ -597,10 +692,14 @@ fn project_detail(model : Model) -> Array[@moui.View[Msg]] {
       ]
       detail.push(ui_card(git, width=992.0))
       let terminal : Array[@moui.View[Msg]] = [
-        ui_section("Terminal"),
+        ui_section(tr(model.lang, "Terminal", "终端")),
         ui_code_block(
           if project.terminal_text == "" {
-            "(send a command to start a local PTY or remote ssh -tt + tmux session)"
+            tr(
+              model.lang,
+              "(send a command to start a local PTY or remote ssh -tt + tmux session)",
+              "（发送命令以启动本地 PTY 或远程 ssh -tt + tmux 会话）",
+            )
           } else {
             project.terminal_text
           },
@@ -608,34 +707,37 @@ fn project_detail(model : Model) -> Array[@moui.View[Msg]] {
         ),
         row([
           ui_field(
-            "Command",
+            tr(model.lang, "Command", "命令"),
             project.terminal_input,
             fn(value) { ProjectTerminalInput(value) },
-            "shell command",
+            tr(model.lang, "shell command", "shell 命令"),
             800.0,
           ),
-          ui_primary("Send", ProjectTerminalSend),
+          ui_primary(tr(model.lang, "Send", "发送"), ProjectTerminalSend),
         ], spacing=12.0, align=@style.CrossAlign::End),
       ]
       detail.push(ui_card(terminal, width=992.0))
       let worktree : Array[@moui.View[Msg]] = [
-        ui_section("Worktree"),
+        ui_section(tr(model.lang, "Worktree", "工作树")),
         row([
           ui_field(
-            "Branch",
+            tr(model.lang, "Branch", "分支"),
             project.worktree_branch,
             fn(value) { ProjectWorktreeBranch(value) },
-            "branch",
+            tr(model.lang, "branch", "分支"),
             240.0,
           ),
           ui_field(
-            "Path",
+            tr(model.lang, "Path", "路径"),
             project.worktree_path,
             fn(value) { ProjectWorktreePath(value) },
-            "/absolute/worktree/path",
+            tr(model.lang, "/absolute/worktree/path", "/绝对路径/工作树"),
             440.0,
           ),
-          ui_primary("Create worktree", ProjectCreateWorktree),
+          ui_primary(
+            tr(model.lang, "Create worktree", "创建工作树"),
+            ProjectCreateWorktree,
+          ),
         ], spacing=12.0, align=@style.CrossAlign::End),
       ]
       if project.worktree_message != "" {
@@ -647,7 +749,11 @@ fn project_detail(model : Model) -> Array[@moui.View[Msg]] {
       detail.push(
         ui_card([
           ui_muted_wrapped(
-            "No project selected. Pick an open workspace in the list above or open a root.",
+            tr(
+              model.lang,
+              "No project selected. Pick an open workspace in the list above or open a root.",
+              "未选择项目。请从上方列表中选择一个打开的工作区，或打开一个根目录。",
+            ),
             960.0,
           ),
         ], width=992.0),
@@ -660,42 +766,48 @@ fn project_detail(model : Model) -> Array[@moui.View[Msg]] {
 fn projects_page(model : Model) -> @moui.View[Msg] {
   let project = model.project
   let open_form : Array[@moui.View[Msg]] = [
-    ui_section("Open project"),
+    ui_section(tr(model.lang, "Open project", "打开项目")),
     row([
       ui_field(
-        "Machine id",
+        tr(model.lang, "Machine id", "机器 ID"),
         project.machine_id,
         fn(value) { ProjectMachine(value) },
-        "machine id (blank = local)",
+        tr(model.lang, "machine id (blank = local)", "机器 ID（留空 = 本地）"),
         260.0,
       ),
       ui_field(
-        "Root",
+        tr(model.lang, "Root", "根目录"),
         project.root,
         fn(value) { ProjectRoot(value) },
-        "/absolute/project/root",
+        tr(model.lang, "/absolute/project/root", "/绝对路径/项目根目录"),
         440.0,
       ),
-      ui_primary("Open project", ProjectOpen),
+      ui_primary(tr(model.lang, "Open project", "打开项目"), ProjectOpen),
     ], spacing=12.0, align=@style.CrossAlign::End),
   ]
   if project.message != "" {
     open_form.push(ui_muted_wrapped(project.message, 960.0))
   }
+  let open_count = project.workspaces.length().to_string() +
+    tr(model.lang, " open", " 个打开")
   let workspaces : Array[@moui.View[Msg]] = [
     row([
-      ui_section("Open workspaces"),
+      ui_section(tr(model.lang, "Open workspaces", "打开的工作区")),
       spacer(weight=1.0),
-      ui_meta(project.workspaces.length().to_string() + " open"),
+      ui_meta(open_count),
     ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
   ]
   if project.workspaces.is_empty() {
     workspaces.push(
       ui_muted_wrapped(
         if project.workspaces_loaded {
-          "no open workspaces yet"
+          tr(model.lang, "no open workspaces yet", "尚无打开的工作区")
         } else {
-          "loading workspaces from the host..."
+          tr(
+            model.lang,
+            "loading workspaces from the host...",
+            "正在从主机加载工作区...",
+          )
         },
         960.0,
       ),
@@ -718,50 +830,50 @@ fn projects_page(model : Model) -> @moui.View[Msg] {
 fn agents_page(model : Model) -> @moui.View[Msg] {
   let agent = model.agent
   let start : Array[@moui.View[Msg]] = [
-    ui_page_title("Agents / Sessions"),
+    ui_page_title(tr(model.lang, "Agents / Sessions", "智能体 / 会话")),
     row([
       ui_field(
-        "Agent id",
+        tr(model.lang, "Agent id", "智能体 ID"),
         agent.agent_id,
         fn(value) { AgentId(value) },
-        "agent id",
+        tr(model.lang, "agent id", "智能体 ID"),
         170.0,
       ),
       ui_field(
-        "Mode",
+        tr(model.lang, "Mode", "模式"),
         agent.mode,
         fn(value) { AgentMode(value) },
         "acp | stdout",
         150.0,
       ),
       ui_field(
-        "Workspace",
+        tr(model.lang, "Workspace", "工作区"),
         agent.workspace_id,
         fn(value) { AgentWorkspace(value) },
-        "workspace id (blank = cwd)",
+        tr(model.lang, "workspace id (blank = cwd)", "工作区 ID（留空 = cwd）"),
         240.0,
       ),
       ui_field(
-        "Worktree",
+        tr(model.lang, "Worktree", "工作树"),
         agent.worktree_id,
         fn(value) { AgentWorktree(value) },
-        "worktree id (optional)",
+        tr(model.lang, "worktree id (optional)", "工作树 ID（可选）"),
         220.0,
       ),
     ], spacing=12.0, align=@style.CrossAlign::End),
     ui_text_area_field(
-      "Initial prompt",
+      tr(model.lang, "Initial prompt", "初始提示词"),
       agent.prompt,
       fn(value) { AgentPromptDraft(value) },
-      "initial prompt",
+      tr(model.lang, "initial prompt", "初始提示词"),
       960.0,
       3,
     ),
     row([
-      ui_primary("Start session", AgentStartSession),
-      ui_ghost("Stop", AgentStopSession),
-      ui_ghost("Resume", AgentResumeSession),
-      ui_ghost("Probe", AgentProbeNow),
+      ui_primary(tr(model.lang, "Start session", "启动会话"), AgentStartSession),
+      ui_ghost(tr(model.lang, "Stop", "停止"), AgentStopSession),
+      ui_ghost(tr(model.lang, "Resume", "恢复"), AgentResumeSession),
+      ui_ghost(tr(model.lang, "Probe", "探测"), AgentProbeNow),
       spacer(weight=1.0),
     ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
   ]
@@ -771,61 +883,77 @@ fn agents_page(model : Model) -> @moui.View[Msg] {
   let session_line = match agent.session {
     Some(record) =>
       text(
-        "session " +
+        tr(model.lang, "session ", "会话 ") +
         record.id +
         " · " +
         (if agent.state_text == "" { record.state } else { agent.state_text }) +
-        " · turns " +
+        tr(model.lang, " · turns ", " · 轮次 ") +
         record.turns.to_string() +
-        " · chunks " +
+        tr(model.lang, " · chunks ", " · 片段 ") +
         record.chunks.to_string() +
-        " · memory " +
+        tr(model.lang, " · memory ", " · 内存 ") +
         record.memory_bytes.to_string() +
-        "B · artifacts " +
+        tr(model.lang, "B · artifacts ", "B · 产物 ") +
         record.artifacts.length().to_string() +
-        (if agent.stop_reason == "" { "" } else { " · stop " + agent.stop_reason }),
+        (if agent.stop_reason == "" {
+          ""
+        } else {
+          tr(model.lang, " · stop ", " · 停止原因 ") + agent.stop_reason
+        }),
         width=960.0,
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(mono_font(11.0, 400)).foreground(ui_dim())
     None =>
-      text("No session started yet.", width=960.0, align=@core.TextAlign::TextStart)
-      .font(ui_font(12.0, 400))
-      .foreground(ui_muted())
+      text(
+        tr(model.lang, "No session started yet.", "尚未启动会话。"),
+        width=960.0,
+        align=@core.TextAlign::TextStart,
+      ).font(ui_font(12.0, 400)).foreground(ui_muted())
   }
   let session : Array[@moui.View[Msg]] = [
-    ui_section("Session"),
+    ui_section(tr(model.lang, "Session", "会话")),
     session_line,
   ]
   if agent.pending_decision != "" {
     session.push(
-      text("pending decision: " + agent.pending_decision, width=960.0, align=@core.TextAlign::TextStart, wrap=true)
-      .font(mono_font(11.0, 400))
-      .foreground(ui_warning()),
+      text(
+        tr(model.lang, "pending decision: ", "待处理决策：") +
+        agent.pending_decision,
+        width=960.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(mono_font(11.0, 400)).foreground(ui_warning()),
     )
   }
   let transcript : Array[@moui.View[Msg]] = [
-    ui_section("Transcript"),
+    ui_section(tr(model.lang, "Transcript", "对话记录")),
     ui_code_block(
-      if agent.transcript == "" { "No session yet" } else { agent.transcript },
+      if agent.transcript == "" {
+        tr(model.lang, "No session yet", "暂无会话")
+      } else {
+        agent.transcript
+      },
       960.0,
       height=220.0,
       size=12.0,
     ),
     row([
       ui_field(
-        "Follow-up prompt",
+        tr(model.lang, "Follow-up prompt", "后续提示词"),
         agent.input,
         fn(value) { AgentInputDraft(value) },
-        "follow-up prompt",
+        tr(model.lang, "follow-up prompt", "后续提示词"),
         800.0,
       ),
-      ui_primary("Send", AgentSendInput),
+      ui_primary(tr(model.lang, "Send", "发送"), AgentSendInput),
     ], spacing=12.0, align=@style.CrossAlign::End),
   ]
-  let recent : Array[@moui.View[Msg]] = [ui_section("Recent sessions")]
+  let recent : Array[@moui.View[Msg]] = [
+    ui_section(tr(model.lang, "Recent sessions", "最近会话")),
+  ]
   if agent.sessions.is_empty() {
-    recent.push(ui_muted_wrapped("(none)", 960.0))
+    recent.push(ui_muted_wrapped(tr(model.lang, "(none)", "（无）"), 960.0))
   } else {
     for record in agent.sessions {
       recent.push(
@@ -835,7 +963,7 @@ fn agents_page(model : Model) -> @moui.View[Msg] {
           record.agent_id +
           " · " +
           record.state +
-          " · turns " +
+          tr(model.lang, " · turns ", " · 轮次 ") +
           record.turns.to_string() +
           " · " +
           record.cwd,
@@ -858,16 +986,25 @@ fn agents_page(model : Model) -> @moui.View[Msg] {
 // MARK: - Inbox
 
 fn inbox_decision_card(
+  model : Model,
   decision : @contracts.DecisionRecord,
 ) -> @moui.View[Msg] {
   let bucket = inbox_bucket_of(decision)
   let actionable = bucket == @contracts.INBOX_NEEDS_YOU
   let meta =
-    "session " +
-    (if decision.session_id == "" { "(none)" } else { decision.session_id }) +
-    " · agent " +
+    tr(model.lang, "session ", "会话 ") +
+    (if decision.session_id == "" {
+      tr(model.lang, "(none)", "（无）")
+    } else {
+      decision.session_id
+    }) +
+    tr(model.lang, " · agent ", " · 智能体 ") +
     decision.agent_id +
-    (if decision.run_id == "" { "" } else { " · run " + decision.run_id })
+    (if decision.run_id == "" {
+      ""
+    } else {
+      tr(model.lang, " · run ", " · 运行 ") + decision.run_id
+    })
   let body : Array[@moui.View[Msg]] = [
     row([
       ui_dot(status_tone(bucket)),
@@ -891,7 +1028,7 @@ fn inbox_decision_card(
     .foreground(ui_dim()),
   ]
   if decision.detail == "" {
-    body.push(ui_meta("(no detail)"))
+    body.push(ui_meta(tr(model.lang, "(no detail)", "（无详情）")))
   } else {
     body.push(ui_code_block(decision.detail, 964.0))
   }
@@ -906,19 +1043,26 @@ fn inbox_decision_card(
       )
     }
     answers.push(
-      ui_ghost_small("Answer with text", InboxSubmitText(decision.id)),
+      ui_ghost_small(
+        tr(model.lang, "Answer with text", "用文本回答"),
+        InboxSubmitText(decision.id),
+      ),
     )
   }
   if answers.is_empty() {
-    body.push(ui_meta("handled"))
+    body.push(ui_meta(tr(model.lang, "handled", "已处理")))
   } else {
     body.push(row(answers, spacing=8.0, align=@style.CrossAlign::Center))
   }
   if decision.status == @contracts.DECISION_STATUS_ANSWERED {
     body.push(
       ui_meta(
-        "answered by " +
-        (if decision.answered_by == "" { "owner" } else { decision.answered_by }) +
+        tr(model.lang, "answered by ", "回答者：") +
+        (if decision.answered_by == "" {
+          tr(model.lang, "owner", "所有者")
+        } else {
+          decision.answered_by
+        }) +
         (if decision.option_id == "" { "" } else { " · " + decision.option_id }) +
         (if decision.answer_text == "" { "" } else { " · " + decision.answer_text }),
       ),
@@ -937,6 +1081,7 @@ fn inbox_decision_card(
 
 ///|
 fn push_inbox_section(
+  model : Model,
   lines : Array[@moui.View[Msg]],
   title : String,
   items : Array[@contracts.DecisionRecord],
@@ -946,7 +1091,7 @@ fn push_inbox_section(
   }
   lines.push(ui_section(title))
   for decision in items {
-    lines.push(inbox_decision_card(decision))
+    lines.push(inbox_decision_card(model, decision))
   }
 }
 
@@ -966,43 +1111,72 @@ fn inbox_page(model : Model) -> @moui.View[Msg] {
       handled.push(decision)
     }
   }
+  let needs_title = tr(model.lang, "Needs you", "需要你")
+  let waiting_title = tr(model.lang, "Waiting", "等待中")
+  let handled_title = tr(model.lang, "Handled", "已处理")
   let stats = row([
-    ui_stat_card("Needs you", needs.length().to_string(), "waiting on you", 322.0),
-    ui_stat_card("Waiting", waiting.length().to_string(), "in flight", 322.0),
-    ui_stat_card("Handled", handled.length().to_string(), "resolved", 322.0),
+    ui_stat_card(
+      needs_title,
+      needs.length().to_string(),
+      tr(model.lang, "waiting on you", "等待你处理"),
+      322.0,
+    ),
+    ui_stat_card(
+      waiting_title,
+      waiting.length().to_string(),
+      tr(model.lang, "in flight", "处理中"),
+      322.0,
+    ),
+    ui_stat_card(
+      handled_title,
+      handled.length().to_string(),
+      tr(model.lang, "resolved", "已解决"),
+      322.0,
+    ),
   ], spacing=12.0).frame(width=992.0)
   let lines : Array[@moui.View[Msg]] = [
-    ui_section("Approvals"),
+    ui_section(tr(model.lang, "Approvals", "审批")),
     ui_muted_wrapped(
-      "Approvals, Agent permissions, evidence-gate waivers and recovery retries all wait in this one queue. An answer is recorded as an event and an audit record; nothing is auto-approved.",
+      tr(
+        model.lang,
+        "Approvals, Agent permissions, evidence-gate waivers and recovery retries all wait in this one queue. An answer is recorded as an event and an audit record; nothing is auto-approved.",
+        "审批、智能体权限、证据门禁豁免和恢复重试都汇聚在这一队列。回答会记录为事件和审计记录；不会自动批准任何事项。",
+      ),
       960.0,
     ),
   ]
   // `inbox.message` carries the same needs/waiting/handled counts already shown
   // in the stat cards above, so only surface transient status text here.
-  if inbox.message != "" && !inbox.message.has_prefix("needs you: ") {
+  let counts_prefix = tr(model.lang, "needs you: ", "需要你：")
+  if inbox.message != "" && !inbox.message.has_prefix(counts_prefix) {
     lines.push(ui_meta(inbox.message))
   }
   let queue : Array[@moui.View[Msg]] = []
   if inbox.decisions.is_empty() {
-    queue.push(ui_muted_wrapped("No decisions yet.", 960.0))
+    queue.push(
+      ui_muted_wrapped(tr(model.lang, "No decisions yet.", "暂无决策。"), 960.0),
+    )
   } else {
-    push_inbox_section(queue, "Needs you", needs)
-    push_inbox_section(queue, "Waiting", waiting)
-    push_inbox_section(queue, "Handled", handled)
+    push_inbox_section(model, queue, needs_title, needs)
+    push_inbox_section(model, queue, waiting_title, waiting)
+    push_inbox_section(model, queue, handled_title, handled)
   }
   column([
     stats,
     ui_card(lines, width=992.0),
     column(queue, spacing=10.0),
     ui_card([
-      ui_section("Answer text"),
+      ui_section(tr(model.lang, "Answer text", "回答文本")),
       row([
         ui_field(
-          "Free text",
+          tr(model.lang, "Free text", "自由文本"),
           inbox.text,
           fn(value) { InboxText(value) },
-          "free-text answer (questions/readiness)",
+          tr(
+            model.lang,
+            "free-text answer (questions/readiness)",
+            "自由文本回答（问题/就绪度）",
+          ),
           760.0,
         ),
         spacer(weight=1.0),
@@ -1020,10 +1194,18 @@ fn task_card(
 ) -> @moui.View[Msg] {
   let selected = model.task.selected_task == record.id
   let meta =
-    "workspace " +
-    (if record.workspace_id == "" { "(none)" } else { record.workspace_id }) +
-    (if record.parent_id == "" { "" } else { " · parent " + record.parent_id }) +
-    " · verify " +
+    tr(model.lang, "workspace ", "工作区 ") +
+    (if record.workspace_id == "" {
+      tr(model.lang, "(none)", "（无）")
+    } else {
+      record.workspace_id
+    }) +
+    (if record.parent_id == "" {
+      ""
+    } else {
+      tr(model.lang, " · parent ", " · 父任务 ") + record.parent_id
+    }) +
+    tr(model.lang, " · verify ", " · 验证 ") +
     record.verify.length().to_string() +
     (if record.goal == "" { "" } else { " · " + record.goal })
   let child = column([
@@ -1031,8 +1213,11 @@ fn task_card(
       ui_row_title_wrapped(record.title, 500.0),
       ui_tag(record.status),
       spacer(weight=1.0),
-      ui_ghost_small("Select", TaskSelect(record.id)),
-      ui_ghost_small("Cancel", TaskCancelNow(record.id)),
+      ui_ghost_small(tr(model.lang, "Select", "选择"), TaskSelect(record.id)),
+      ui_ghost_small(
+        tr(model.lang, "Cancel", "取消"),
+        TaskCancelNow(record.id),
+      ),
     ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=964.0),
     row([
       ui_mono_wrapped(meta, 10.5, 720.0, ui_dim()),
@@ -1063,11 +1248,18 @@ fn run_row(
   model : Model,
   record : @contracts.RunRecord,
 ) -> @moui.View[Msg] {
-  let _ = model
   let origin =
-    "machine " +
-    (if record.machine_id == "" { "local" } else { record.machine_id }) +
-    (if record.worktree_id == "" { "" } else { " · worktree " + record.worktree_id })
+    tr(model.lang, "machine ", "机器 ") +
+    (if record.machine_id == "" {
+      tr(model.lang, "local", "本地")
+    } else {
+      record.machine_id
+    }) +
+    (if record.worktree_id == "" {
+      ""
+    } else {
+      tr(model.lang, " · worktree ", " · 工作树 ") + record.worktree_id
+    })
   column([
     row([
       text(
@@ -1078,8 +1270,11 @@ fn run_row(
       ).font(mono_font(11.0, 400)).foreground(ui_text_color()),
       ui_tag(record.status),
       spacer(weight=1.0),
-      ui_ghost_small("Open", RunSelect(record.id)),
-      ui_ghost_small("Cancel", RunCancelNow(record.id)),
+      ui_ghost_small(tr(model.lang, "Open", "打开"), RunSelect(record.id)),
+      ui_ghost_small(
+        tr(model.lang, "Cancel", "取消"),
+        RunCancelNow(record.id),
+      ),
     ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
     row([
       ui_mono_wrapped(origin, 10.5, 700.0, ui_dim()),
@@ -1091,43 +1286,66 @@ fn run_row(
 
 ///|
 fn run_detail_view(model : Model) -> @moui.View[Msg] {
-  let children : Array[@moui.View[Msg]] = [ui_section("Run detail")]
+  let children : Array[@moui.View[Msg]] = [
+    ui_section(tr(model.lang, "Run detail", "运行详情")),
+  ]
   match model.task.detail {
     Some(detail) => {
       let run = detail.run
       children.push(
         row([
-          text("Run " + run.id, align=@core.TextAlign::TextStart).font(ui_font(14.0, 600)).foreground(ui_text_color()),
+          text(
+            tr(model.lang, "Run ", "运行 ") + run.id,
+            align=@core.TextAlign::TextStart,
+          ).font(ui_font(14.0, 600)).foreground(ui_text_color()),
           ui_tag(run.status),
           spacer(weight=1.0),
         ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
       )
       children.push(
         ui_mono(
-          "machine " +
-          (if run.machine_id == "" { "local" } else { run.machine_id }) +
+          tr(model.lang, "machine ", "机器 ") +
+          (if run.machine_id == "" {
+            tr(model.lang, "local", "本地")
+          } else {
+            run.machine_id
+          }) +
           " · " +
           run.mode +
-          (if run.worktree_id == "" { "" } else { " · worktree " + run.worktree_id }),
+          (if run.worktree_id == "" {
+            ""
+          } else {
+            tr(model.lang, " · worktree ", " · 工作树 ") + run.worktree_id
+          }),
           10.5,
         ),
       )
       children.push(
         ui_code_block(
           (if run.command == "" { run.prompt } else { run.command }) +
-          (if run.stop_reason == "" { "" } else { "\nstop: " + run.stop_reason }) +
-          (if run.last_error == "" { "" } else { "\nerror: " + run.last_error }) +
+          (if run.stop_reason == "" {
+            ""
+          } else {
+            tr(model.lang, "\nstop: ", "\n停止：") + run.stop_reason
+          }) +
+          (if run.last_error == "" {
+            ""
+          } else {
+            tr(model.lang, "\nerror: ", "\n错误：") + run.last_error
+          }) +
           (if run.output_summary == "" {
             ""
           } else {
-            "\nsummary: " + run.output_summary
+            tr(model.lang, "\nsummary: ", "\n摘要：") + run.output_summary
           }),
           960.0,
         ),
       )
-      children.push(ui_section("Evidence"))
+      children.push(ui_section(tr(model.lang, "Evidence", "证据")))
       if detail.evidence.is_empty() {
-        children.push(ui_muted_wrapped("(no evidence yet)", 900.0))
+        children.push(
+          ui_muted_wrapped(tr(model.lang, "(no evidence yet)", "（暂无证据）"), 900.0),
+        )
       } else {
         for evidence in detail.evidence {
           let evidence_body : Array[@moui.View[Msg]] = [
@@ -1136,37 +1354,44 @@ fn run_detail_view(model : Model) -> @moui.View[Msg] {
               spacer(weight=1.0),
               ui_tag(
                 if evidence.passed {
-                  "passed"
+                  tr(model.lang, "passed", "通过")
                 } else if evidence.waived {
-                  "waived"
+                  tr(model.lang, "waived", "已豁免")
                 } else {
-                  "failed"
+                  tr(model.lang, "failed", "失败")
                 },
               ),
             ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=912.0),
             ui_mono(
               "$ " +
               evidence.command +
-              " · exit " +
+              tr(model.lang, " · exit ", " · 退出码 ") +
               evidence.exit_code.to_string(),
               10.5,
             ),
           ]
           evidence_body.push(
             ui_code_block(
-              if evidence.excerpt == "" { "(no output)" } else { evidence.excerpt },
+              if evidence.excerpt == "" {
+                tr(model.lang, "(no output)", "（无输出）")
+              } else {
+                evidence.excerpt
+              },
               912.0,
             ),
           )
           if evidence.artifact_id == "" {
-            evidence_body.push(ui_meta("no artifact"))
+            evidence_body.push(ui_meta(tr(model.lang, "no artifact", "无产物")))
           } else {
             evidence_body.push(
               row([
-                ui_mono("artifact " + evidence.artifact_id, 10.5),
+                ui_mono(
+                  tr(model.lang, "artifact ", "产物 ") + evidence.artifact_id,
+                  10.5,
+                ),
                 spacer(weight=1.0),
                 ui_ghost_small(
-                  "Read",
+                  tr(model.lang, "Read", "读取"),
                   ArtifactReadNow(evidence.artifact_id),
                 ),
               ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=912.0),
@@ -1175,9 +1400,11 @@ fn run_detail_view(model : Model) -> @moui.View[Msg] {
           children.push(ui_card(evidence_body, padding=12.0, width=936.0))
         }
       }
-      children.push(ui_section("Artifacts"))
+      children.push(ui_section(tr(model.lang, "Artifacts", "产物")))
       if detail.artifacts.is_empty() {
-        children.push(ui_muted_wrapped("(no artifacts)", 900.0))
+        children.push(
+          ui_muted_wrapped(tr(model.lang, "(no artifacts)", "（暂无产物）"), 900.0),
+        )
       } else {
         for artifact in detail.artifacts {
           children.push(
@@ -1193,18 +1420,31 @@ fn run_detail_view(model : Model) -> @moui.View[Msg] {
                 wrap=true,
               ).font(mono_font(10.5, 400)).foreground(ui_dim()),
               spacer(weight=1.0),
-              ui_ghost_small("Read", ArtifactReadNow(artifact.id)),
+              ui_ghost_small(tr(model.lang, "Read", "读取"), ArtifactReadNow(artifact.id)),
             ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
           )
         }
       }
       if model.task.artifact_text != "" {
-        children.push(ui_section("Artifact: " + model.task.artifact_name))
+        children.push(
+          ui_section(
+            tr(model.lang, "Artifact: ", "产物：") + model.task.artifact_name,
+          ),
+        )
         children.push(ui_code_block(model.task.artifact_text, 960.0))
       }
-      children.push(ui_section("Diff (HEAD)"))
+      children.push(ui_section(tr(model.lang, "Diff (HEAD)", "差异（HEAD）")))
       if detail.diff == "" {
-        children.push(ui_muted_wrapped("(no diff / not a git worktree)", 900.0))
+        children.push(
+          ui_muted_wrapped(
+            tr(
+              model.lang,
+              "(no diff / not a git worktree)",
+              "（无差异 / 不是 git 工作树）",
+            ),
+            900.0,
+          ),
+        )
       } else {
         children.push(ui_code_block(detail.diff, 960.0))
       }
@@ -1212,7 +1452,11 @@ fn run_detail_view(model : Model) -> @moui.View[Msg] {
     None =>
       children.push(
         ui_muted_wrapped(
-          "Select a run to inspect evidence, artifacts and the diff.",
+          tr(
+            model.lang,
+            "Select a run to inspect evidence, artifacts and the diff.",
+            "选择一个运行以查看证据、产物和差异。",
+          ),
           900.0,
         ),
       )
@@ -1225,19 +1469,21 @@ fn activity_view(model : Model) -> @moui.View[Msg] {
   let events = model.task.events
   let children : Array[@moui.View[Msg]] = [
     row([
-      ui_section("Activity"),
+      ui_section(tr(model.lang, "Activity", "活动")),
       spacer(weight=1.0),
       ui_meta(
-        "cursor " +
+        tr(model.lang, "cursor ", "游标 ") +
         model.task.event_seq.to_string() +
         " · " +
         events.length().to_string() +
-        " cached",
+        tr(model.lang, " cached", " 已缓存"),
       ),
     ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
   ]
   if events.is_empty() {
-    children.push(ui_muted_wrapped("(no events yet)", 900.0))
+    children.push(
+      ui_muted_wrapped(tr(model.lang, "(no events yet)", "（暂无事件）"), 900.0),
+    )
   } else {
     let start = if events.length() > 30 { events.length() - 30 } else { 0 }
     let mut index = start
@@ -1273,40 +1519,40 @@ fn activity_view(model : Model) -> @moui.View[Msg] {
 fn tasks_page(model : Model) -> @moui.View[Msg] {
   let state = model.task
   let create : Array[@moui.View[Msg]] = [
-    ui_section("Create task"),
+    ui_section(tr(model.lang, "Create task", "创建任务")),
     row([
       ui_field(
-        "Title",
+        tr(model.lang, "Title", "标题"),
         state.title,
         fn(value) { TaskTitle(value) },
-        "task title (required)",
+        tr(model.lang, "task title (required)", "任务标题（必填）"),
         440.0,
       ),
       ui_field(
-        "Workspace id",
+        tr(model.lang, "Workspace id", "工作区 ID"),
         state.workspace_id,
         fn(value) { TaskWorkspace(value) },
-        "blank = open Project",
+        tr(model.lang, "blank = open Project", "留空 = 当前打开的项目"),
         340.0,
       ),
     ], spacing=12.0, align=@style.CrossAlign::End),
     ui_field(
-      "Goal",
+      tr(model.lang, "Goal", "目标"),
       state.goal,
       fn(value) { TaskGoal(value) },
-      "goal (optional)",
+      tr(model.lang, "goal (optional)", "目标（可选）"),
       560.0,
     ),
     ui_text_area_field(
-      "Verify commands",
+      tr(model.lang, "Verify commands", "验证命令"),
       state.verify_text,
       fn(value) { TaskVerify(value) },
-      "verify commands, one per line",
+      tr(model.lang, "verify commands, one per line", "验证命令，每行一条"),
       960.0,
       3,
     ),
     row([
-      ui_primary("Create", TaskCreateSubmit),
+      ui_primary(tr(model.lang, "Create", "创建"), TaskCreateSubmit),
       spacer(weight=1.0),
     ], spacing=8.0, align=@style.CrossAlign::Center),
   ]
@@ -1315,16 +1561,22 @@ fn tasks_page(model : Model) -> @moui.View[Msg] {
   }
   let board : Array[@moui.View[Msg]] = [
     row([
-      ui_section("Board"),
+      ui_section(tr(model.lang, "Board", "看板")),
       spacer(weight=1.0),
       ui_meta(
         state.tasks.length().to_string() +
-        (if state.tasks.length() == 1 { " task" } else { " tasks" }),
+        (if state.tasks.length() == 1 {
+          tr(model.lang, " task", " 个任务")
+        } else {
+          tr(model.lang, " tasks", " 个任务")
+        }),
       ),
     ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
   ]
   if state.tasks.is_empty() {
-    board.push(ui_muted_wrapped("No tasks yet.", 960.0))
+    board.push(
+      ui_muted_wrapped(tr(model.lang, "No tasks yet.", "暂无任务。"), 960.0),
+    )
   } else {
     for record in state.tasks {
       board.push(task_card(model, record))
@@ -1333,16 +1585,24 @@ fn tasks_page(model : Model) -> @moui.View[Msg] {
   if state.selected_task != "" {
     let runs : Array[@moui.View[Msg]] = [
       row([
-        ui_section("Runs for " + state.selected_task),
+        ui_section(
+          tr(model.lang, "Runs for ", "运行列表：") + state.selected_task,
+        ),
         spacer(weight=1.0),
         ui_meta(
           state.runs.length().to_string() +
-          (if state.runs.length() == 1 { " run" } else { " runs" }),
+          (if state.runs.length() == 1 {
+            tr(model.lang, " run", " 个运行")
+          } else {
+            tr(model.lang, " runs", " 个运行")
+          }),
         ),
       ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
     ]
     if state.runs.is_empty() {
-      runs.push(ui_muted_wrapped("(no runs yet)", 900.0))
+      runs.push(
+        ui_muted_wrapped(tr(model.lang, "(no runs yet)", "（暂无运行）"), 900.0),
+      )
     } else {
       for record in state.runs {
         runs.push(run_row(model, record))
@@ -1351,20 +1611,20 @@ fn tasks_page(model : Model) -> @moui.View[Msg] {
     runs.push(
       row([
         ui_field(
-          "Command",
+          tr(model.lang, "Command", "命令"),
           state.command,
           fn(value) { TaskCommand(value) },
-          "command to run in the worktree",
+          tr(model.lang, "command to run in the worktree", "在工作树中运行的命令"),
           520.0,
         ),
         ui_field(
-          "Machine id",
+          tr(model.lang, "Machine id", "机器 ID"),
           state.machine_id,
           fn(value) { TaskMachine(value) },
-          "blank = local",
+          tr(model.lang, "blank = local", "留空 = 本地"),
           220.0,
         ),
-        ui_primary("Dispatch run", RunDispatch),
+        ui_primary(tr(model.lang, "Dispatch run", "派发运行"), RunDispatch),
       ], spacing=12.0, align=@style.CrossAlign::End),
     )
     board.push(ui_card(runs, width=992.0))
@@ -1383,23 +1643,37 @@ fn tasks_page(model : Model) -> @moui.View[Msg] {
 fn search_page(model : Model) -> @moui.View[Msg] {
   let state = model.search
   let form : Array[@moui.View[Msg]] = [
-    ui_section("Search sessions"),
+    ui_section(tr(model.lang, "Search sessions", "搜索会话")),
     row([
       ui_field(
-        "Query",
+        tr(model.lang, "Query", "查询"),
         state.query,
         fn(value) { SearchQuery(value) },
-        "e.g. verify failed, flaky test, waived",
+        tr(
+          model.lang,
+          "e.g. verify failed, flaky test, waived",
+          "例如：验证失败、偶发测试、已豁免",
+        ),
         760.0,
       ),
-      ui_primary("Search", SearchSubmit),
+      ui_primary(tr(model.lang, "Search", "搜索"), SearchSubmit),
     ], spacing=12.0, align=@style.CrossAlign::End),
-    ui_meta("Search session transcripts and decision text recorded by the host."),
+    ui_meta(
+      tr(
+        model.lang,
+        "Search session transcripts and decision text recorded by the host.",
+        "搜索主机记录的会话对话和决策文本。",
+      ),
+    ),
     ui_meta(
       if state.backend == "" {
-        "FTS5 when available, LIKE otherwise"
+        tr(
+          model.lang,
+          "FTS5 when available, LIKE otherwise",
+          "可用时使用 FTS5，否则使用 LIKE",
+        )
       } else {
-        "backend: " + state.backend
+        tr(model.lang, "backend: ", "后端：") + state.backend
       },
     ),
   ]
@@ -1411,7 +1685,11 @@ fn search_page(model : Model) -> @moui.View[Msg] {
     results.push(
       ui_card([
         ui_muted_wrapped(
-          "No hits yet. Search matches session transcripts and decision text.",
+          tr(
+            model.lang,
+            "No hits yet. Search matches session transcripts and decision text.",
+            "暂无结果。搜索会匹配会话对话和决策文本。",
+          ),
           960.0,
         ),
       ], width=992.0),
@@ -1445,45 +1723,71 @@ fn search_page(model : Model) -> @moui.View[Msg] {
 fn settings_page(model : Model) -> @moui.View[Msg] {
   let host = model.host
   let connection : Array[@moui.View[Msg]] = [
-    ui_section("Connection"),
-    ui_mono("state: " + host.link.label(), 11.0),
+    ui_section(tr(model.lang, "Connection", "连接")),
     ui_mono(
-      "host address: " +
+      tr(model.lang, "state: ", "状态：") + host.link.label_in(model.lang),
+      11.0,
+    ),
+    ui_mono(
+      tr(model.lang, "host address: ", "主机地址：") +
       (if host.ws_url == "" {
-        "(waiting for host.json)"
+        tr(model.lang, "(waiting for host.json)", "（等待 host.json）")
       } else {
         host.ws_url
       }),
       11.0,
     ),
-    ui_mono("token: " + host.token_status, 11.0),
     ui_mono(
-      "version: " + (if host.version == "" { "(not connected)" } else { host.version }),
+      tr(model.lang, "token: ", "令牌：") +
+      token_status_text_in(host.token_status, model.lang),
       11.0,
     ),
-    ui_mono("data directory: " + host.state_dir, 11.0),
     ui_mono(
-      "host id: " +
-      (if host.host_id == "" { "(not connected)" } else { host.host_id }),
+      tr(model.lang, "version: ", "版本：") +
+      (if host.version == "" {
+        tr(model.lang, "(not connected)", "（未连接）")
+      } else {
+        host.version
+      }),
+      11.0,
+    ),
+    ui_mono(
+      tr(model.lang, "data directory: ", "数据目录：") + host.state_dir,
+      11.0,
+    ),
+    ui_mono(
+      tr(model.lang, "host id: ", "主机 ID：") +
+      (if host.host_id == "" {
+        tr(model.lang, "(not connected)", "（未连接）")
+      } else {
+        host.host_id
+      }),
       11.0,
     ),
   ]
   if host.last_error != "" {
     connection.push(
-      text("last error: " + host.last_error, width=960.0, align=@core.TextAlign::TextStart, wrap=true)
-      .font(ui_font(11.0, 400))
-      .foreground(ui_danger()),
+      text(
+        tr(model.lang, "last error: ", "最后错误：") + host.last_error,
+        width=960.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(11.0, 400)).foreground(ui_danger()),
     )
   }
   let appearance : Array[@moui.View[Msg]] = [
-    ui_section("Appearance"),
+    ui_section(tr(model.lang, "Appearance", "外观")),
     row([
-      ui_segment("Light", Light, model.theme_mode),
-      ui_segment("Dark", Dark, model.theme_mode),
+      ui_segment(tr(model.lang, "Light", "浅色"), Light, model.theme_mode),
+      ui_segment(tr(model.lang, "Dark", "深色"), Dark, model.theme_mode),
       spacer(weight=1.0),
     ], spacing=8.0, align=@style.CrossAlign::Center),
     ui_meta(
-      "Applies immediately and is saved for future launches; MONEXUS_THEME picks the startup mode only until you choose one.",
+      tr(
+        model.lang,
+        "Applies immediately and is saved for future launches; MONEXUS_THEME picks the startup mode only until you choose one.",
+        "立即生效并保存供后续启动使用；在你做出选择前，MONEXUS_THEME 决定启动模式。",
+      ),
     ),
   ]
   // A corrupt preference file or a failed write is reported here rather than
@@ -1498,16 +1802,46 @@ fn settings_page(model : Model) -> @moui.View[Msg] {
       ).font(ui_font(11.0, 400)).foreground(ui_danger()),
     )
   }
+  let language : Array[@moui.View[Msg]] = [
+    ui_section(tr(model.lang, "Language", "语言")),
+    row([
+      ui_language_segment("English", English, model.lang),
+      ui_language_segment("中文", Chinese, model.lang),
+      spacer(weight=1.0),
+    ], spacing=8.0, align=@style.CrossAlign::Center),
+    ui_meta(
+      tr(
+        model.lang,
+        "Switches the desktop UI immediately and is saved for future launches; MONEXUS_LANG picks the startup language only until you choose one.",
+        "立即切换桌面界面并保存供后续启动使用；在你做出选择前，MONEXUS_LANG 决定启动语言。",
+      ),
+    ),
+  ]
+  if model.lang_note != "" {
+    language.push(
+      text(
+        model.lang_note,
+        width=960.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(11.0, 400)).foreground(ui_danger()),
+    )
+  }
   let local_host : Array[@moui.View[Msg]] = [
-    ui_section("Local host"),
+    ui_section(tr(model.lang, "Local host", "本地主机")),
     ui_muted_wrapped(
-      "Start or reuse the host with monexus. Headless machines: monexus start --headless.",
+      tr(
+        model.lang,
+        "Start or reuse the host with monexus. Headless machines: monexus start --headless.",
+        "用 monexus 启动或复用主机。无图形界面的机器：monexus start --headless。",
+      ),
       960.0,
     ),
   ]
   column([
     ui_card(connection, width=992.0),
     ui_card(appearance, width=992.0),
+    ui_card(language, width=992.0),
     ui_card(local_host, width=992.0),
   ], spacing=16.0)
 }

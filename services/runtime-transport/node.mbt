@@ -302,11 +302,39 @@ pub fn NodeService::empty(outbox : OutboxPort) -> NodeService {
 struct NodeWriter {
   stream : TlsStream
   mutex : @async.Mutex
+  /// Handler tasks outlive a session (`group` continues across reconnects),
+  /// so one can finish after the serve loop lost the connection and try to
+  /// answer. Writing then would touch a freed TLS object; sealed sends are
+  /// dropped instead.
+  sealed : Ref[Bool]
+  closed : Ref[Bool]
 }
 
 ///|
 fn node_writer(stream : TlsStream) -> NodeWriter {
-  { stream, mutex: @async.Mutex::Mutex() }
+  { stream, mutex: @async.Mutex::Mutex(), sealed: Ref(false), closed: Ref(false) }
+}
+
+///|
+/// Stop accepting frames without touching the stream. This runs when the
+/// serve loop exits, before any later teardown, so a handler that has not
+/// started writing yet can never begin.
+fn NodeWriter::seal(self : NodeWriter) -> Unit {
+  self.sealed.val = true
+}
+
+///|
+/// Close the stream after in-flight writes finish. A waiting or later send
+/// observes `sealed` under the mutex and drops its frame.
+async fn NodeWriter::close(self : NodeWriter) -> Unit {
+  self.mutex.acquire()
+  defer self.mutex.release()
+  self.sealed.val = true
+  if self.closed.val {
+    return
+  }
+  self.closed.val = true
+  self.stream.close()
 }
 
 ///|
@@ -314,8 +342,14 @@ async fn NodeWriter::send(
   self : NodeWriter,
   value : @json.Json,
 ) -> Result[Unit, String] {
+  if self.sealed.val {
+    return Err("runtime session is closed")
+  }
   self.mutex.acquire()
   defer self.mutex.release()
+  if self.sealed.val {
+    return Err("runtime session is closed")
+  }
   self.stream.write(value) catch {
     error => return Err(safe_error(error))
   }
@@ -402,6 +436,7 @@ async fn node_install_policy(
 /// One authenticated session on a live pinned TLS connection.
 pub struct NodeSession {
   stream : TlsStream
+  writer : NodeWriter
   runtime_id : String
   session_id : String
   resume_cursor : Int64
@@ -522,6 +557,7 @@ pub async fn connect_session(
   }
   let session : NodeSession = {
     stream,
+    writer: node_writer(stream),
     runtime_id,
     session_id,
     resume_cursor,
@@ -631,7 +667,10 @@ async fn[X] NodeSession::serve(
   service : NodeService,
   group : @async.TaskGroup[X],
 ) -> SessionEnd {
-  let writer = node_writer(self.stream)
+  let writer = self.writer
+  // The first thing every exit does is reject late handler responses. The
+  // stream itself is freed by node_serve under the writer mutex.
+  defer writer.seal()
   let dispatch_mutex = @async.Mutex::Mutex()
   // Install the policy carried by hello before serving any application
   // request, and acknowledge it so the primary can audit delivery.
@@ -914,22 +953,15 @@ pub async fn[X] node_serve(
     let connected = connect_session(config, token, last_ack)
     match connected {
       Ok(session) => {
-        match session.serve(config, service, group) {
-          SessionDrained => {
-            session.stream.close()
-            return NodeRunOutcome::Drained
-          }
-          SessionRevoked => {
-            session.stream.close()
-            return NodeRunOutcome::Revoked
-          }
-          SessionUnauthorized => {
-            session.stream.close()
-            return NodeRunOutcome::Unauthorized
-          }
-          SessionLost(_) => {
-            session.stream.close()
-          }
+        let end = session.serve(config, service, group)
+        // Handler tasks may still be responding; close serializes with them
+        // and makes every later response a dropped no-op.
+        session.writer.close()
+        match end {
+          SessionDrained => return NodeRunOutcome::Drained
+          SessionRevoked => return NodeRunOutcome::Revoked
+          SessionUnauthorized => return NodeRunOutcome::Unauthorized
+          SessionLost(_) => ()
         }
       }
       Err(NodeRevoked) => return NodeRunOutcome::Revoked

@@ -42,7 +42,7 @@ for _ in $(seq 1 100); do
 done
 [[ -f "$STATE_DIR/host.json" ]] || fail "host.json was not written"
 
-MODE="$(stat -c '%a' "$STATE_DIR/host.json")"
+MODE="$(stat -c '%a' "$STATE_DIR/host.json" 2>/dev/null || stat -f '%Lp' "$STATE_DIR/host.json" 2>/dev/null || echo '?')"
 [[ "$MODE" == "600" ]] || fail "host.json mode is $MODE, expected 600"
 echo "      host.json mode=$MODE pid=$HOST_PID"
 

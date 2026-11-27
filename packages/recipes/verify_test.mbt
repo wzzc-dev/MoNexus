@@ -296,7 +296,7 @@ async test "missing and unusable verifiers fail closed without fallback" {
     detail: "not found",
   }
   let unsupported : @recipes.VerifierProbe = {
-    tool: "/bin/false",
+    tool: "/usr/bin/false",
     found: true,
     version: "",
     supports_signatures: false,

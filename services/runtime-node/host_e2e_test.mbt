@@ -83,6 +83,46 @@ async fn host_wait_for(
 }
 
 ///|
+/// Reissue one idempotent mutation while the flapping session reconnects.
+/// The reconnect scenario deliberately drops the link every few hundred
+/// milliseconds; a request sent during a drop or one whose response is
+/// cancelled by a drop is retried until the run is confirmed cancelled.
+async fn host_retry_cancel(
+  h : NodeHarness,
+  run_id : String,
+  client_request_id : String,
+) -> @provider_runtime.RunSnapshot {
+  let deadline = @async.now() + 15_000L
+  let mut last_error = ""
+  let mut attempt = 0
+  while @async.now() < deadline {
+    // A drop can strand the first request while the node is still executing
+    // it; its durable tombstone then refuses the same id until the result is
+    // recorded. A fresh id re-enters `exec.cancel`, which is idempotent once
+    // the run has settled.
+    let request_id = client_request_id + "-" + attempt.to_string()
+    attempt = attempt + 1
+    match h.machine.exec_cancel(run_id, client_request_id=request_id) {
+      Ok(value) => return value
+      Err(error) => {
+        let transient = error.code == @transport.ERR_POLICY_STALE ||
+          error.code == @transport.ERR_BUSY ||
+          (error.code == @contracts.ERR_HOST &&
+            (error.message.contains("not connected") ||
+              error.message.contains("already accepted"))) ||
+          error.message.contains("ChannelClosed")
+        if !transient {
+          fail("exec cancel failed: " + error.message)
+        }
+        last_error = error.message
+      }
+    }
+    @async.sleep(50)
+  }
+  fail("exec cancel failed: " + last_error)
+}
+
+///|
 fn host_mode(path : String) -> Int {
   match @transport.stat_path(path) {
     Some(info) => info.mode & 0o777
@@ -481,13 +521,15 @@ async test "node host pairs, serves, probes, runs fs and fails closed" {
 
 ///|
 async test "exec runs, refuses duplicates and replays across reconnect" {
-  // The server times out a silent connection after one missed 150 ms
+  // The server times out a silent connection after one missed 500 ms
   // heartbeat while the node only heartbeats every 5 s, so the link drops
-  // mid-exec and the node reconnects with backoff.
+  // mid-exec and the node reconnects with backoff. The window must still be
+  // wide enough for one `exec.cancel` round trip: the macOS process-tree
+  // walk and signal path is slower than the Linux `setsid` group signal.
   host_run_scenario(
     "mn-node-exec",
     "rt-node-exec",
-    150L,
+    500L,
     1,
     5_000L,
     300L,
@@ -501,7 +543,7 @@ async test "exec runs, refuses duplicates and replays across reconnect" {
       // pattern: `sh -c` requires an owner approval, `sh <script>` does not.
       host_sh(
         h.workspace,
-        "printf 'sleep 1.2; echo out; echo err 1>&2; exit 0\\n' > exec1.sh\n" +
+        "printf 'sleep 2; echo out; echo err 1>&2; exit 0\\n' > exec1.sh\n" +
         "printf 'touch dup-marker.txt\\n' > dup.sh\n" +
         "printf 'sleep 30\\n' > cancel.sh\n",
       )
@@ -612,11 +654,7 @@ async test "exec runs, refuses duplicates and replays across reconnect" {
         Ok(value) => value
         Err(error) => fail("cancel test start failed: " + error.message)
       }
-      let cancelled = match
-        h.machine.exec_cancel("run-exec-2", client_request_id="cancel-1") {
-        Ok(value) => value
-        Err(error) => fail("exec cancel failed: " + error.message)
-      }
+      let cancelled = host_retry_cancel(h, "run-exec-2", "cancel-1")
       assert_true(
         cancelled.status == @contracts.RUN_STATUS_CANCELLED ||
         cancelled.status == @contracts.RUN_STATUS_FAILED,

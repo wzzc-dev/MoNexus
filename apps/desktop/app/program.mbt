@@ -13,19 +13,30 @@ pub fn dispatch_ready() -> Bool {
 }
 
 ///|
-/// Program built from `MONEXUS_THEME` only. Tests and screenshot scenes use
-/// this; the desktop entry point uses `program_with_startup` with the resolved
-/// saved preference.
+/// Program built from environment preferences only. Tests and screenshot
+/// scenes use this; the desktop entry point uses `program_with_preferences`
+/// with the resolved saved choices.
 pub fn program() -> @moui.Program[Model, Msg] {
-  program_with_startup(startup_theme_from_env())
+  program_with_preferences(
+    startup_theme_from_env(),
+    startup_language_from_env(),
+  )
 }
 
 ///|
 pub fn program_with_startup(startup : StartupTheme) -> @moui.Program[Model, Msg] {
+  program_with_preferences(startup, startup_language_from_env())
+}
+
+///|
+pub fn program_with_preferences(
+  startup : StartupTheme,
+  language : StartupLanguage,
+) -> @moui.Program[Model, Msg] {
   @moui.Program::new(
     init=() => {
       (
-        Model::new_with_startup(startup),
+        Model::new_with_preferences(startup, language),
         @moui.Effect::run(
           key="host-link-dispatch",
           kind="host-link",
@@ -59,6 +70,15 @@ pub fn program_with_startup(startup : StartupTheme) -> @moui.Program[Model, Msg]
               kind="theme-preference",
               label="Persist appearance choice",
               run= _dispatch => enqueue_theme_choice(mode),
+            ),
+          )
+        SetLanguage(lang) =>
+          effects.push(
+            @moui.Effect::run(
+              key="language-preference",
+              kind="language-preference",
+              label="Persist language choice",
+              run= _dispatch => enqueue_language_choice(lang),
             ),
           )
         _ => ()

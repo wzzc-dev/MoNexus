@@ -33,9 +33,11 @@ monexus --help
 - `--no-keep-alive` stops a host that this invocation started, once the
   window exits. The default is keep-alive: closing the window leaves the host
   running.
-- Without Wayland/X11 the launcher exits 3 with a headless/xvfb hint. The
-  native desktop binary does the same. Under CI or a headless box:
-  `xvfb-run -a monexus` runs the real window against a virtual X server.
+- On Linux, without Wayland/X11 the launcher exits 3 with a headless/xvfb
+  hint; the native desktop binary does the same. Under CI or a headless Linux
+  box, `xvfb-run -a monexus` runs the real window against a virtual X server.
+  On macOS the window needs a logged-in GUI session (AppKit/WindowServer);
+  over SSH, use `monexus start --headless`.
 
 `monexus status` prints the RPC status plus the discovery file:
 
@@ -239,8 +241,8 @@ Remote agent PoC (rounds 1–2, not full remote-agent support):
   `last_error` "remote agent exited mid-turn", exactly one
   `agent.session.interrupted` event, and no false `exited`. That is a
   synthetic non-255 remote exit on a real DSH stream (test harness), not a
-  real DSH crash; the wrapper is test-only and not committed. No Ubuntu/macOS
-  claim is made.
+  real DSH crash; the wrapper is test-only and not committed. This DSH result
+  makes no Ubuntu or macOS claim.
 - Still missing for real remote agents: `agent.probe` is local-only,
   `agent.resume` does not reconstruct an SSH launch, and `env` from
   `agent.start` is not forwarded over SSH.
@@ -769,10 +771,10 @@ copy the token file or a pairing code into a report.
 - **PTY exit codes are not surfaced**; use exec for exit status.
 - **Primary crash rebind:** stop the node before an immediate same-port
   restart if the listener is still in `TIME-WAIT`.
-- **Packaging:** macOS packaging is not claimed; Ubuntu was not separately
-  verified in this environment; RISC-V is out of scope. The A1.5 evidence was
-  produced on Linux x86_64. Do not cite this section as Ubuntu or macOS
-  validation.
+- **Packaging:** verified for Linux x86_64 and macOS aarch64; Ubuntu was not
+  separately verified in this environment, and RISC-V is out of scope. The
+  A1.5 runtime-node evidence was produced on Linux x86_64; do not cite it as
+  Ubuntu or as macOS runtime-node validation.
 - **Real ACP model turn:** the harness runs a mock ACP agent by default. With
   `M4_REAL_ACP=1` (and a logged-in adapter under the node's HOME) it also
   attempts one real model turn. Without that dependency the row is recorded as
@@ -819,7 +821,8 @@ files under `<state-dir>/credentials/`; wrong permissions are refused, never
 repaired silently. `--credential-storage file` forces that backend; asking for
 `keychain` on a non-macOS host fails closed (`unsupported`) instead of falling
 back. The Keychain backend feeds the secret through stdin, never argv, but it
-was not exercised in this Linux environment and is reported as unverified.
+has not been exercised end-to-end in the recorded environments and is
+reported as unverified.
 
 ### Local Agent (the host machine)
 
@@ -1473,7 +1476,8 @@ no orphan can ever exist.
 | `MONEXUS_STATE_DIR` | state directory (default `$HOME/.monexus`) |
 | `MONEXUS_RUNTIME_DIR` | default node state base for `runtime pair/serve/status` (default `$HOME/.monexus/runtime`); overridden by `--state-base` |
 | `MONEXUS_THEME=light\|dark` | desktop startup appearance used when no Settings choice has been saved (illegal or missing → dark) |
-| `MONEXUS_CONFIG_DIR` | desktop preference directory (default `$XDG_CONFIG_HOME/monexus`, else `$HOME/.config/monexus`); the theme choice is `theme.json` |
+| `MONEXUS_LANG=en\|zh` | desktop startup language used when no Settings choice has been saved (illegal or missing → English; `zh-CN`/`zh-Hans` are also accepted) |
+| `MONEXUS_CONFIG_DIR` | desktop preference directory (default `$XDG_CONFIG_HOME/monexus`, else `$HOME/.config/monexus`); the theme choice is `theme.json` and the language choice is `language.json` |
 | `MONEXUS_HOST_BIN`, `MONEXUS_DESKTOP_BIN` | override component binaries in the launcher |
 | `MONEXUS_MAX_PARALLEL` | per-machine Run limit (default 4) |
 | `MONEXUS_AGENT_SSH=1` | opt in to the round-1 remote-agent PoC: SSH-backed `agent.start` launches the adapter over `ssh -T` instead of returning the local-only error |
@@ -1514,3 +1518,26 @@ file is silent, while an unreadable, corrupt or unknown-valued file is ignored,
 falls through to the environment/default and is reported on the Settings page.
 `MONEXUS_THEME` therefore only decides the mode until a choice has been saved;
 remove `theme.json` to make the variable authoritative again.
+
+### Language preference
+
+The Settings page's English/中文 control switches the desktop UI immediately
+and saves the explicit choice locally. Startup uses, in order:
+
+1. the saved choice (`language.json` in the config directory above);
+2. a legal `MONEXUS_LANG=en|zh` (`zh-CN`, `zh-Hans`, `en-US` etc. are accepted);
+3. English, the product default.
+
+The file is one small JSON object (`{"schema_version":1,"language":"zh"}`),
+written atomically with mode 0600 and holding no secrets. It lives beside
+`theme.json`, not in the workspace or host event log, and has the same failure
+handling: a missing file is silent; an unreadable, corrupt or unknown-valued
+file is ignored, falls through and is reported on the Settings page. Remove
+`language.json` to make `MONEXUS_LANG` authoritative again.
+
+The static desktop shell (navigation, pages, buttons, placeholders and form
+validation) is translated. Host/agent technical output, ids, commands and
+error strings returned by the host remain in the language they were produced
+in, so diagnostics stay searchable and unchanged. macOS renders Chinese with
+the system PingFang/Hiragino fonts; a Linux desktop needs a CJK font such as
+Noto Sans CJK SC (`fonts-noto-cjk`) for the Chinese labels to display.

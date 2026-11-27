@@ -1,6 +1,6 @@
 # ADR-0010：M7 启动器、打包与首次运行
 
-- 状态：Accepted
+- 状态：Accepted（2026-11-27 增补 macOS 支持）
 - 日期：2026-11-25
 - 依据：`docs/architecture.md` §7.2、§10、§14；M7 目标“干净机器一键启动”
 
@@ -84,3 +84,23 @@ M1–M6 已经提供 host、桌面、机器/Workspace、Agent 与 Task/Run/恢�
   不是远端探测结果。打包不含 auto-update、签名或 macOS 验证。
 - 后续：若把 host 生命周期改回桌面托管，需要同时保留 headless 入口和
   `--no-keep-alive` 语义，并另写 ADR 替换本决策。
+
+## 补充（2026-11-27）：macOS 支持
+
+决策 4 与“只验证 Linux”的边界按以下方式扩展，原决策其余内容不变：
+
+- `apps/desktop/macos_skia/` 是 macOS 原生入口，使用 MoUI `backend/macos`、
+  `NativeGpuPlatform::MacOS` 与 AppKit；不链接 Vulkan/X11/Wayland。
+  `scripts/monexus.sh` 按 `uname -s` 选择 `linux_skia` 或 `macos_skia`，
+  `scripts/package.sh` 的固定产物路径相应参数化。
+- 发布物仍为 `dist/monexus-0.1.0-<os>-<arch>.tar.gz`，macOS 使用
+  `shasum -a 256` 生成/校验 `.sha256`，并在 tar 时设置
+  `COPYFILE_DISABLE=1` 避免 AppleDouble 元数据。安装布局与 `--version`
+  自检不变。
+- 已验证：macOS 26.3 / aarch64 上 debug/release 构建、`moon test --target
+  native` 524/524、`scripts/package.sh`、`scripts/host_smoke.sh`、安装后
+  launcher 的 `start --headless`/`status`/`stop`。macOS x86_64 未单独验证。
+  macOS 窗口需要登录的 GUI session；CI runner 无 GUI，只构建不启动窗口。
+  `scripts/acceptance.sh` 的 loopback sshd + `xvfb-run` 路径仍只适用于
+  Linux。
+- 打包仍不含 auto-update、签名或公证（notarization）。

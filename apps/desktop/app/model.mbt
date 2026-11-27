@@ -1,6 +1,7 @@
 ///|
 /// Five shell pages. M1 only switches between them; the content is a
 /// placeholder for M2-M5 business screens.
+#derive(Eq)
 pub(all) enum Page {
   Home
   Machines
@@ -23,6 +24,22 @@ pub fn Page::label(self : Page) -> String {
     Tasks => "Tasks"
     Search => "Search"
     Settings => "Settings"
+  }
+}
+
+///|
+/// Localized navigation label. `label()` stays the stable English identifier
+/// used by `MONEXUS_SCENE_PAGE` and tests; this is the one the shell paints.
+pub fn Page::label_in(self : Page, lang : Lang) -> String {
+  match self {
+    Home => tr(lang, "Home", "主页")
+    Machines => tr(lang, "Machines", "机器")
+    Projects => tr(lang, "Projects", "项目")
+    Agents => tr(lang, "Agents", "智能体")
+    Inbox => tr(lang, "Inbox", "收件箱")
+    Tasks => tr(lang, "Tasks", "任务")
+    Search => tr(lang, "Search", "搜索")
+    Settings => tr(lang, "Settings", "设置")
   }
 }
 
@@ -54,6 +71,15 @@ pub fn LinkState::label(self : LinkState) -> String {
     Connecting => "connecting"
     Online => "online"
     Offline => "offline"
+  }
+}
+
+///|
+pub fn LinkState::label_in(self : LinkState, lang : Lang) -> String {
+  match self {
+    Connecting => tr(lang, "connecting", "连接中")
+    Online => tr(lang, "online", "在线")
+    Offline => tr(lang, "offline", "离线")
   }
 }
 
@@ -315,6 +341,12 @@ pub struct Model {
   /// Diagnostic from startup preference loading or the last save attempt;
   /// empty when nothing needs reporting.
   theme_note : String
+  /// UI language; seeded at startup from the saved choice, else MONEXUS_LANG,
+  /// and flipped by the Settings page.
+  lang : Lang
+  /// Diagnostic from startup language loading or the last save attempt; empty
+  /// when nothing needs reporting.
+  lang_note : String
   /// Key of the nav/row currently hovered, for hover washes on hand-painted
   /// rows (buttons carry their own hover styles).
   hover_row : String
@@ -325,14 +357,27 @@ pub struct Model {
 ///|
 /// Environment-only constructor used by tests, screenshot scenes and callers
 /// that do not have async file access. The desktop entry point builds the
-/// model with `new_with_startup(startup_theme())` so a saved Settings choice
-/// wins over `MONEXUS_THEME`.
+/// model with `new_with_preferences(startup_theme(), startup_language())` so
+/// saved Settings choices win over `MONEXUS_THEME`/`MONEXUS_LANG`.
 pub fn Model::new() -> Model {
-  Model::new_with_startup(startup_theme_from_env())
+  Model::new_with_preferences(
+    startup_theme_from_env(),
+    startup_language_from_env(),
+  )
 }
 
 ///|
+/// Appearance-only constructor for callers that read the theme preference but
+/// keep the environment language.
 pub fn Model::new_with_startup(startup : StartupTheme) -> Model {
+  Model::new_with_preferences(startup, startup_language_from_env())
+}
+
+///|
+pub fn Model::new_with_preferences(
+  startup : StartupTheme,
+  language : StartupLanguage,
+) -> Model {
   let state_dir = @client.default_state_dir()
   let page = match @env.get_env_var("MONEXUS_SCENE_PAGE") {
     Some(value) => Page::from_label(value)
@@ -410,6 +455,8 @@ pub fn Model::new_with_startup(startup : StartupTheme) -> Model {
     search: SearchState::new(),
     theme_mode: startup.mode,
     theme_note: startup.note,
+    lang: language.language,
+    lang_note: language.note,
     hover_row: "",
     scroll_epoch: 0,
   }
@@ -480,6 +527,12 @@ pub(all) enum Msg {
   /// Result of persisting an explicit choice, shown on the Settings page when
   /// the write failed.
   ThemeChoiceStored(ThemeSaveStatus)
+  /// UI language flip from the Settings segmented control; asks the preference
+  /// worker to persist the explicit choice.
+  SetLanguage(Lang)
+  /// Result of persisting the language choice, shown on the Settings page when
+  /// the write failed.
+  LanguageStored(LanguageSaveStatus)
   /// Hover bookkeeping for hand-painted nav/list rows.
   HoverRow(String, Bool)
   LinkConnecting
@@ -709,17 +762,46 @@ fn next_host_key_policy(policy : String) -> String {
 
 ///|
 pub fn machine_status_text(status : String) -> String {
+  machine_status_text_in(status, English)
+}
+
+///|
+pub fn machine_status_text_in(status : String, lang : Lang) -> String {
   match status {
-    @contracts.MACHINE_STATUS_ONLINE => "online"
-    @contracts.MACHINE_STATUS_DEGRADED => "degraded"
-    @contracts.MACHINE_STATUS_OFFLINE => "offline"
-    _ => "unknown"
+    @contracts.MACHINE_STATUS_ONLINE => tr(lang, "online", "在线")
+    @contracts.MACHINE_STATUS_DEGRADED => tr(lang, "degraded", "降级")
+    @contracts.MACHINE_STATUS_OFFLINE => tr(lang, "offline", "离线")
+    _ => tr(lang, "unknown", "未知")
+  }
+}
+
+///|
+/// Token presence is desktop-local state (never the value itself), so its
+/// labels follow the UI language instead of the host's protocol vocabulary.
+pub fn token_status_text_in(status : String, lang : Lang) -> String {
+  match status {
+    "" | "unknown (host not connected)" =>
+      tr(lang, "unknown (host not connected)", "未知（主机未连接）")
+    "missing" => tr(lang, "missing", "缺失")
+    "present (host.json, never displayed)" =>
+      tr(lang, "present (host.json, never displayed)", "存在（host.json，从不显示）")
+    "present (host.json 0600, scene)" =>
+      tr(lang, "present (host.json 0600, scene)", "存在（host.json 0600，场景）")
+    _ => status
   }
 }
 
 ///|
 pub fn machine_profile_summary(
   record : @contracts.MachineRecord,
+) -> String {
+  machine_profile_summary_in(record, English)
+}
+
+///|
+pub fn machine_profile_summary_in(
+  record : @contracts.MachineRecord,
+  lang : Lang,
 ) -> String {
   match record.profile {
     Some(profile) =>
@@ -728,10 +810,10 @@ pub fn machine_profile_summary(
       profile.arch +
       " · " +
       profile.max_parallel.to_string() +
-      " cpus" +
+      tr(lang, " cpus", " 核") +
       (if profile.has_docker { " · docker" } else { "" }) +
-      (if profile.has_gui { " · gui" } else { "" })
-    None => "not probed yet"
+      (if profile.has_gui { tr(lang, " · gui", " · 图形界面") } else { "" })
+    None => tr(lang, "not probed yet", "尚未探测")
   }
 }
 
@@ -846,7 +928,20 @@ pub fn update_full(
         ..model,
         theme_note: match status {
           ThemeSaveOk => ""
-          ThemeSaveFailed(message) => "Appearance not saved: " + message
+          ThemeSaveFailed(message) =>
+            tr(model.lang, "Appearance not saved: ", "外观偏好未保存：") + message
+        },
+      },
+      none,
+    )
+    SetLanguage(lang) => ({ ..model, lang }, none)
+    LanguageStored(status) => (
+      {
+        ..model,
+        lang_note: match status {
+          LanguageSaveOk => ""
+          LanguageSaveFailed(message) =>
+            tr(model.lang, "Language not saved: ", "语言偏好未保存：") + message
         },
       },
       none,
@@ -1002,12 +1097,26 @@ pub fn update_full(
       }
       if host == "" {
         (
-          { ..model, machine_message: "add failed: host is required" },
+          {
+            ..model,
+            machine_message: tr(
+              model.lang,
+              "add failed: host is required",
+              "添加失败：主机为必填项",
+            ),
+          },
           none,
         )
       } else if port <= 0 || port > 65_535 {
         (
-          { ..model, machine_message: "add failed: port must be 1-65535" },
+          {
+            ..model,
+            machine_message: tr(
+              model.lang,
+              "add failed: port must be 1-65535",
+              "添加失败：端口必须在 1-65535 之间",
+            ),
+          },
           none,
         )
       } else {
@@ -1022,7 +1131,7 @@ pub fn update_full(
             ..model,
             draft: next_draft,
             machine_busy: "add",
-            machine_message: "adding " + host + "...",
+            machine_message: tr(model.lang, "adding ", "正在添加 ") + host + "...",
           },
           [AddMachine(next_draft)],
         )
@@ -1032,7 +1141,9 @@ pub fn update_full(
       {
         ..model,
         machine_busy: machine_id,
-        machine_message: "probing " + machine_id + "...",
+        machine_message: tr(model.lang, "probing ", "正在探测 ") +
+        machine_id +
+        "...",
       },
       [ProbeMachine(machine_id)],
     )
@@ -1040,7 +1151,9 @@ pub fn update_full(
       {
         ..model,
         machine_busy: machine_id,
-        machine_message: "removing " + machine_id + "...",
+        machine_message: tr(model.lang, "removing ", "正在移除 ") +
+        machine_id +
+        "...",
       },
       [RemoveMachine(machine_id)],
     )
@@ -1053,7 +1166,11 @@ pub fn update_full(
             ..model,
             project: {
               ..model.project,
-              message: "root is required (absolute path)",
+              message: tr(
+                model.lang,
+                "root is required (absolute path)",
+                "根目录为必填项（绝对路径）",
+              ),
             },
           },
           none,
@@ -1066,7 +1183,7 @@ pub fn update_full(
               ..model.project,
               root,
               busy: true,
-              message: "opening " + root + "...",
+              message: tr(model.lang, "opening ", "正在打开 ") + root + "...",
             },
           },
           [OpenProject(model.project.machine_id, root)],
@@ -1113,7 +1230,7 @@ pub fn update_full(
             terminal_text: "",
             terminal_cursor: 0L,
             busy: false,
-            message: "opened " + record.root,
+            message: tr(model.lang, "opened ", "已打开 ") + record.root,
           },
         },
         none,
@@ -1140,7 +1257,9 @@ pub fn update_full(
               machine_id: record.machine_id,
               root: record.root,
               busy: true,
-              message: "restoring " + record.root + "...",
+              message: tr(model.lang, "restoring ", "正在恢复 ") +
+              record.root +
+              "...",
             },
           },
           [OpenProject(record.machine_id, record.root)],
@@ -1150,7 +1269,9 @@ pub fn update_full(
             ..model,
             project: {
               ..model.project,
-              message: "workspace " + workspace_id + " is no longer open",
+              message: tr(model.lang, "workspace ", "工作区 ") +
+              workspace_id +
+              tr(model.lang, " is no longer open", " 已不再打开"),
             },
           },
           none,
@@ -1227,7 +1348,11 @@ pub fn update_full(
         Some(record) => (
           {
             ..model,
-            project: { ..model.project, busy: true, message: "listing..." },
+            project: {
+              ..model.project,
+              busy: true,
+              message: tr(model.lang, "listing...", "正在列出..."),
+            },
           },
           [ProjectListFiles(record.id, path)],
         )
@@ -1243,7 +1368,7 @@ pub fn update_full(
           dirty: false,
           diff_text: "",
           busy: true,
-          message: "reading " + path + "...",
+          message: tr(model.lang, "reading ", "正在读取 ") + path + "...",
         },
       },
       match model.project.workspace {
@@ -1260,7 +1385,11 @@ pub fn update_full(
                 ..model,
                 project: {
                   ..model.project,
-                  message: "select a file first",
+                  message: tr(
+                    model.lang,
+                    "select a file first",
+                    "请先选择一个文件",
+                  ),
                 },
               },
               none,
@@ -1269,7 +1398,11 @@ pub fn update_full(
             (
               {
                 ..model,
-                project: { ..model.project, busy: true, message: "saving..." },
+                project: {
+                  ..model.project,
+                  busy: true,
+                  message: tr(model.lang, "saving...", "正在保存..."),
+                },
               },
               [
                 ProjectWriteFile(
@@ -1281,7 +1414,17 @@ pub fn update_full(
             )
           }
         None => (
-          { ..model, project: { ..model.project, message: "open a project first" } },
+          {
+            ..model,
+            project: {
+              ..model.project,
+              message: tr(
+                model.lang,
+                "open a project first",
+                "请先打开一个项目",
+              ),
+            },
+          },
           none,
         )
       }
@@ -1290,7 +1433,11 @@ pub fn update_full(
         Some(record) => (
           {
             ..model,
-            project: { ..model.project, busy: true, message: "refreshing..." },
+            project: {
+              ..model.project,
+              busy: true,
+              message: tr(model.lang, "refreshing...", "正在刷新..."),
+            },
           },
           [
             ProjectList,
@@ -1302,7 +1449,14 @@ pub fn update_full(
         None => (
           {
             ..model,
-            project: { ..model.project, message: "refreshing projects..." },
+            project: {
+              ..model.project,
+              message: tr(
+                model.lang,
+                "refreshing projects...",
+                "正在刷新项目...",
+              ),
+            },
           },
           [ProjectList],
         )
@@ -1330,7 +1484,8 @@ pub fn update_full(
         project: {
           ..model.project,
           terminal_id,
-          terminal_text: model.project.terminal_text + "$ terminal ready\n",
+          terminal_text: model.project.terminal_text +
+          tr(model.lang, "$ terminal ready\n", "$ 终端已就绪\n"),
           busy: false,
         },
       },
@@ -1375,7 +1530,14 @@ pub fn update_full(
           None => (
             {
               ..model,
-              project: { ..model.project, message: "open a project first" },
+              project: {
+                ..model.project,
+                message: tr(
+                  model.lang,
+                  "open a project first",
+                  "请先打开一个项目",
+                ),
+              },
             },
             none,
           )
@@ -1403,7 +1565,11 @@ pub fn update_full(
                 ..model,
                 project: {
                   ..model.project,
-                  message: "branch and path are required",
+                  message: tr(
+                    model.lang,
+                    "branch and path are required",
+                    "分支和路径均为必填项",
+                  ),
                 },
               },
               none,
@@ -1415,7 +1581,11 @@ pub fn update_full(
                 project: {
                   ..model.project,
                   busy: true,
-                  message: "creating worktree...",
+                  message: tr(
+                    model.lang,
+                    "creating worktree...",
+                    "正在创建工作树...",
+                  ),
                 },
               },
               [
@@ -1428,7 +1598,17 @@ pub fn update_full(
             )
           }
         None => (
-          { ..model, project: { ..model.project, message: "open a project first" } },
+          {
+            ..model,
+            project: {
+              ..model.project,
+              message: tr(
+                model.lang,
+                "open a project first",
+                "请先打开一个项目",
+              ),
+            },
+          },
           none,
         )
       }
@@ -1438,8 +1618,11 @@ pub fn update_full(
         project: {
           ..model.project,
           busy: false,
-          worktree_message: "worktree ready " + record.path,
-          message: "worktree " + record.branch + " ready",
+          worktree_message: tr(model.lang, "worktree ready ", "工作树已就绪 ") +
+          record.path,
+          message: tr(model.lang, "worktree ", "工作树 ") +
+          record.branch +
+          tr(model.lang, " ready", " 已就绪"),
         },
       },
       none,
@@ -1449,7 +1632,8 @@ pub fn update_full(
         ..model,
         project: {
           ..model.project,
-          worktree_message: "worktrees: " + records.length().to_string(),
+          worktree_message: tr(model.lang, "worktrees: ", "工作树：") +
+          records.length().to_string(),
         },
       },
       none,
@@ -1484,7 +1668,9 @@ pub fn update_full(
         ..model,
         agent: {
           ..model.agent,
-          message: "probing " + model.agent.agent_id + "...",
+          message: tr(model.lang, "probing ", "正在探测 ") +
+          model.agent.agent_id +
+          "...",
         },
       },
       [AgentProbe(model.agent.agent_id, model.agent.mode, "")],
@@ -1499,7 +1685,9 @@ pub fn update_full(
           pending_decision: "",
           state_text: "starting",
           stop_reason: "",
-          message: "starting " + model.agent.agent_id + "...",
+          message: tr(model.lang, "starting ", "正在启动 ") +
+          model.agent.agent_id +
+          "...",
         },
       },
       [
@@ -1525,7 +1713,7 @@ pub fn update_full(
                   ..model.agent,
                   input: "",
                   state_text: "running",
-                  message: "prompt sent",
+                  message: tr(model.lang, "prompt sent", "提示词已发送"),
                 },
               },
               [AgentSend(record.id, model.agent.input)],
@@ -1534,7 +1722,14 @@ pub fn update_full(
         None => (
           {
             ..model,
-            agent: { ..model.agent, message: "start a session first" },
+            agent: {
+              ..model.agent,
+              message: tr(
+                model.lang,
+                "start a session first",
+                "请先启动一个会话",
+              ),
+            },
           },
           none,
         )
@@ -1544,7 +1739,10 @@ pub fn update_full(
         Some(record) => (
           {
             ..model,
-            agent: { ..model.agent, message: "stopping..." },
+            agent: {
+              ..model.agent,
+              message: tr(model.lang, "stopping...", "正在停止..."),
+            },
           },
           [AgentStop(record.id)],
         )
@@ -1555,14 +1753,26 @@ pub fn update_full(
         Some(record) => (
           {
             ..model,
-            agent: { ..model.agent, message: "resuming " + record.id + "..." },
+            agent: {
+              ..model.agent,
+              message: tr(model.lang, "resuming ", "正在恢复 ") +
+              record.id +
+              "...",
+            },
           },
           [AgentResume(record.id)],
         )
         None => (
           {
             ..model,
-            agent: { ..model.agent, message: "no session to resume" },
+            agent: {
+              ..model.agent,
+              message: tr(
+                model.lang,
+                "no session to resume",
+                "没有可恢复的会话",
+              ),
+            },
           },
           none,
         )
@@ -1595,7 +1805,8 @@ pub fn update_full(
         agent: {
           ..model.agent,
           sessions: records,
-          message: "sessions: " + records.length().to_string(),
+          message: tr(model.lang, "sessions: ", "会话数：") +
+          records.length().to_string(),
         },
       },
       none,
@@ -1667,8 +1878,12 @@ pub fn update_full(
           inbox: {
             ..model.inbox,
             decisions: records,
-            message: "needs you: " + needs.to_string() + " · waiting: " +
-            waiting.to_string() + " · handled: " + handled.to_string(),
+            message: tr(model.lang, "needs you: ", "需要你：") +
+            needs.to_string() +
+            tr(model.lang, " · waiting: ", " · 等待中：") +
+            waiting.to_string() +
+            tr(model.lang, " · handled: ", " · 已处理：") +
+            handled.to_string(),
           },
         },
         none,
@@ -1681,7 +1896,10 @@ pub fn update_full(
     InboxAnswer(decision_id, option_id) => (
       {
         ..model,
-        inbox: { ..model.inbox, message: "answering..." },
+        inbox: {
+          ..model.inbox,
+          message: tr(model.lang, "answering...", "正在回答..."),
+        },
       },
       [
         DecisionRespond(decision_id, option_id, model.inbox.text, "owner"),
@@ -1691,7 +1909,14 @@ pub fn update_full(
     InboxSubmitText(decision_id) => (
       {
         ..model,
-        inbox: { ..model.inbox, message: "answering with text..." },
+        inbox: {
+          ..model.inbox,
+          message: tr(
+            model.lang,
+            "answering with text...",
+            "正在用文本回答...",
+          ),
+        },
       },
       [
         DecisionRespond(decision_id, "", model.inbox.text, "owner"),
@@ -1739,7 +1964,11 @@ pub fn update_full(
             ..model,
             task: {
               ..model.task,
-              message: "create failed: title is required",
+              message: tr(
+                model.lang,
+                "create failed: title is required",
+                "创建失败：标题为必填项",
+              ),
             },
           },
           none,
@@ -1751,7 +1980,11 @@ pub fn update_full(
             task: {
               ..model.task,
               workspace_id,
-              message: "create failed: open a Project or paste a workspace id",
+              message: tr(
+                model.lang,
+                "create failed: open a Project or paste a workspace id",
+                "创建失败：请打开一个项目或粘贴工作区 ID",
+              ),
             },
           },
           none,
@@ -1763,7 +1996,7 @@ pub fn update_full(
             task: {
               ..model.task,
               workspace_id,
-              message: "creating " + title + "...",
+              message: tr(model.lang, "creating ", "正在创建 ") + title + "...",
             },
           },
           [TaskCreate(title, state.goal, workspace_id, state.verify_text)],
@@ -1813,7 +2046,7 @@ pub fn update_full(
           detail: None,
           artifact_name: "",
           artifact_text: "",
-          message: "selected " + task_id,
+          message: tr(model.lang, "selected ", "已选择 ") + task_id,
         },
       },
       [RunList(task_id)],
@@ -1823,7 +2056,7 @@ pub fn update_full(
         ..model,
         task: {
           ..model.task,
-          message: "cancelling " + task_id + "...",
+          message: tr(model.lang, "cancelling ", "正在取消 ") + task_id + "...",
         },
       },
       [TaskCancel(task_id)],
@@ -1868,7 +2101,14 @@ pub fn update_full(
         (
           {
             ..model,
-            task: { ..model.task, message: "dispatch failed: select a task" },
+            task: {
+              ..model.task,
+              message: tr(
+                model.lang,
+                "dispatch failed: select a task",
+                "派发失败：请选择一个任务",
+              ),
+            },
           },
           none,
         )
@@ -1876,7 +2116,14 @@ pub fn update_full(
         (
           {
             ..model,
-            task: { ..model.task, message: "dispatch failed: command is empty" },
+            task: {
+              ..model.task,
+              message: tr(
+                model.lang,
+                "dispatch failed: command is empty",
+                "派发失败：命令为空",
+              ),
+            },
           },
           none,
         )
@@ -1886,7 +2133,11 @@ pub fn update_full(
             ..model,
             task: {
               ..model.task,
-              message: "dispatch failed: task has no workspace",
+              message: tr(
+                model.lang,
+                "dispatch failed: task has no workspace",
+                "派发失败：任务没有工作区",
+              ),
             },
           },
           none,
@@ -1897,9 +2148,9 @@ pub fn update_full(
             ..model,
             task: {
               ..model.task,
-              message: "dispatching on " +
+              message: tr(model.lang, "dispatching on ", "正在派发到 ") +
                 (if state.machine_id == "" {
-                  "local"
+                  tr(model.lang, "local", "本地")
                 } else {
                   state.machine_id
                 }) +
@@ -1926,7 +2177,7 @@ pub fn update_full(
           detail: None,
           artifact_name: "",
           artifact_text: "",
-          message: "opening " + run_id + "...",
+          message: tr(model.lang, "opening ", "正在打开 ") + run_id + "...",
         },
       },
       [RunGet(run_id)],
@@ -1934,7 +2185,10 @@ pub fn update_full(
     RunCancelNow(run_id) => (
       {
         ..model,
-        task: { ..model.task, message: "cancelling " + run_id + "..." },
+        task: {
+          ..model.task,
+          message: tr(model.lang, "cancelling ", "正在取消 ") + run_id + "...",
+        },
       },
       [RunCancel(run_id)],
     )
@@ -1960,7 +2214,12 @@ pub fn update_full(
     ArtifactReadNow(artifact_id) => (
       {
         ..model,
-        task: { ..model.task, message: "reading artifact " + artifact_id + "..." },
+        task: {
+          ..model.task,
+          message: tr(model.lang, "reading artifact ", "正在读取产物 ") +
+          artifact_id +
+          "...",
+        },
       },
       [ArtifactRead(artifact_id)],
     )
@@ -1971,7 +2230,7 @@ pub fn update_full(
           ..model.task,
           artifact_name: name,
           artifact_text: text,
-          message: "artifact loaded: " + name,
+          message: tr(model.lang, "artifact loaded: ", "产物已加载：") + name,
         },
       },
       none,
@@ -2032,7 +2291,14 @@ pub fn update_full(
         (
           {
             ..model,
-            search: { ..model.search, message: "type a query first" },
+            search: {
+              ..model.search,
+              message: tr(
+                model.lang,
+                "type a query first",
+                "请先输入查询内容",
+              ),
+            },
           },
           none,
         )
@@ -2042,7 +2308,9 @@ pub fn update_full(
             ..model,
             search: {
               ..model.search,
-              message: "searching for " + query + "...",
+              message: tr(model.lang, "searching for ", "正在搜索 ") +
+              query +
+              "...",
             },
           },
           [SearchSessions(query)],

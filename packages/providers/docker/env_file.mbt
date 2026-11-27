@@ -172,6 +172,7 @@ async fn stat_tool() -> String? {
 }
 
 ///|
+/// Read the mode through GNU `stat -c %a` or BSD/macOS `stat -f %Lp`.
 async fn file_mode(path : String) -> Result[String, DockerError] {
   let tool = match stat_tool() {
     Some(value) => value
@@ -182,39 +183,44 @@ async fn file_mode(path : String) -> Result[String, DockerError] {
         ),
       )
   }
-  let collected = @async.with_timeout_opt(2_000, async fn() {
-    let result = @process.collect_output(tool, ["-c", "%a", path]) catch {
-      _ => return None
+  let formats : Array[Array[String]] = [
+    ["-c", "%a", path],
+    ["-f", "%Lp", path],
+  ]
+  for args in formats {
+    let collected = @async.with_timeout_opt(2_000, async fn() {
+      let result = @process.collect_output(tool, args) catch {
+        _ => return None
+      }
+      Some(result)
+    })
+    let (code, stdout, _stderr) = match collected {
+      None =>
+        return Err(
+          DockerError::new(EnvFileInsecure).with_detail("stat timed out"),
+        )
+      Some(None) =>
+        return Err(
+          DockerError::new(EnvFileInsecure).with_detail(
+            "stat could not be spawned",
+          ),
+        )
+      Some(Some(value)) => value
     }
-    Some(result)
-  })
-  let (code, stdout, _stderr) = match collected {
-    None =>
-      return Err(
-        DockerError::new(EnvFileInsecure).with_detail("stat timed out"),
-      )
-    Some(None) =>
-      return Err(
-        DockerError::new(EnvFileInsecure).with_detail(
-          "stat could not be spawned",
-        ),
-      )
-    Some(Some(value)) => value
+    if code != 0 {
+      continue
+    }
+    let text = stdout.text() catch {
+      _ =>
+        return Err(
+          DockerError::new(EnvFileInsecure).with_detail(
+            "stat output was not readable",
+          ),
+        )
+    }
+    return Ok(text.trim().to_owned())
   }
-  if code != 0 {
-    return Err(
-      DockerError::new(EnvFileInsecure).with_detail("stat failed"),
-    )
-  }
-  let text = stdout.text() catch {
-    _ =>
-      return Err(
-        DockerError::new(EnvFileInsecure).with_detail(
-          "stat output was not readable",
-        ),
-      )
-  }
-  Ok(text.trim().to_owned())
+  Err(DockerError::new(EnvFileInsecure).with_detail("stat failed"))
 }
 
 ///|

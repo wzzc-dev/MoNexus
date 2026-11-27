@@ -27,10 +27,11 @@ If the skia prebuild download stalls, retry on a working network; the
 prebuild cache lives under `.mooncakes/wzzc-dev/moui_skia/.skia-cache`. A
 cache copied from a completed build can be reused when versions match.
 
-**Vulkan link errors.** The desktop needs a Vulkan runtime
+**Vulkan link errors (Linux).** The Linux desktop needs a Vulkan runtime
 (`libvulkan.so.1`). The repo supplies a linker shim; no `libvulkan-dev` is
 needed. Without a GPU runtime set `MOUI_SKIA_ENABLE_GPU_VULKAN=0` and rebuild.
 `moui screenshot` also needs `LIBRARY_PATH=<repo>/apps/desktop/linux_skia/third_party/vulkan`.
+The macOS entry uses the AppKit backend and does not link Vulkan.
 
 **`scripts/package.sh` reports VERSION disagreement.** `VERSION` and
 `PRODUCT_VERSION` in `packages/contracts/version.mbt` must match exactly. Fix
@@ -41,7 +42,8 @@ both, then re-run. `--skip-build` does not skip this check.
 ```bash
 moon build --target native --release
 ls _build/native/release/build/monexus/host/host.exe
-ls _build/native/release/build/monexus/desktop/linux_skia/linux_skia.exe
+ls _build/native/release/build/monexus/desktop/linux_skia/linux_skia.exe  # Linux
+ls _build/native/release/build/monexus/desktop/macos_skia/macos_skia.exe  # macOS
 ```
 
 **Checksum verification fails.** Re-copy the tarball and `.sha256` together;
@@ -50,6 +52,8 @@ the tarball:
 
 ```bash
 cd dist && sha256sum -c monexus-0.1.0-linux-x86_64.tar.gz.sha256
+# macOS (no sha256sum in the base system):
+cd dist && shasum -a 256 -c monexus-0.1.0-macos-aarch64.tar.gz.sha256
 ```
 
 **`monexus: monexus-host binary not found`.** You ran a launcher from a
@@ -59,9 +63,9 @@ and add its real `bin/` directory to `PATH`; do not symlink only
 
 ## Window and display
 
-**`no display server found (DISPLAY and WAYLAND_DISPLAY are unset)`, exit 3.**
-This is intentional. Either run headless (`monexus start --headless`) or
-provide a display:
+**Linux: `no display server found (DISPLAY and WAYLAND_DISPLAY are unset)`,
+exit 3.** This is intentional. Either run headless
+(`monexus start --headless`) or provide a display:
 
 ```bash
 xvfb-run -a monexus                 # virtual X server
@@ -71,16 +75,22 @@ xvfb-run -a monexus-desktop         # binaries accept --version/--help too
 Wayland/X11 must be reachable from the process; `sudo` without `-E` or a
 stripped environment often loses `DISPLAY`/`WAYLAND_DISPLAY`.
 
+**macOS: the window does not open from an SSH session.** AppKit needs a
+logged-in GUI session; a pure terminal/SSH login has no WindowServer access.
+Run `monexus` from the desktop session (Terminal, or `launchctl asuser` for a
+logged-in user), or use `monexus start --headless` and the CLI. macOS builds
+do not use Xvfb, Wayland or Vulkan.
+
 **The window opens but shows `offline`.** The host is down or on another
 state dir. `monexus status` should show an endpoint. Set
 `MONEXUS_LINK_TRACE=1` to see `link connecting/online/offline` lines. A stale
 `host.json` from a dead host is harmless; the launcher overwrites it on the
 next start.
 
-**Desktop exits immediately under Xvfb.** Run it without redirecting stderr
-to see the renderer error. Missing Vulkan runtime or a broken Xvfb screen size
-are the usual causes; `xvfb-run -a -s "-screen 0 1280x800x24" ...` is a safe
-default.
+**Linux: desktop exits immediately under Xvfb.** Run it without redirecting
+stderr to see the renderer error. Missing Vulkan runtime or a broken Xvfb
+screen size are the usual causes; `xvfb-run -a -s "-screen 0 1280x800x24" ...`
+is a safe default. This section does not apply to macOS.
 
 ## Host lifecycle
 
@@ -240,9 +250,9 @@ uniform 401 and existing Task/Run/Decision behavior is unchanged.
 readable TZif data: set `MONEXUS_TZDATA_DIR` or install system tzdata
 (`/usr/share/zoneinfo`). Invalid names, unreadable files and parse failures
 are rejected rather than falling back to UTC. `UTC` and fixed `±HH:MM`
-offsets never need tzdata. IANA-zone behavior is verified on Linux native/CI;
-other platforms have not been exercised — verify tzdata availability there
-before relying on named zones.
+offsets never need tzdata. IANA-zone behavior is covered by the native suite
+on Linux and macOS; verify tzdata availability on other platforms before
+relying on named zones.
 
 **A schedule trigger is not firing.** `trigger.get` shows `state`,
 `next_fire_at` and the recent fire ledger. Check the trigger is `active` (not

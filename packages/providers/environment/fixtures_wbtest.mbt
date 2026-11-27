@@ -370,11 +370,19 @@ async fn test_file_mode(path : String) -> String {
     _ => return "stat-failed"
   }
   let (code, output, _) = result
-  if code != 0 {
+  if code == 0 {
+    let text = output.text() catch { _ => "" }
+    return text.trim().to_owned()
+  }
+  // BSD/macOS stat spelling; GNU stat exits non-zero above.
+  let fallback = @process.collect_output(stat, ["-f", "%Lp", path]) catch {
+    _ => return "stat-failed"
+  }
+  let (fallback_code, fallback_output, _) = fallback
+  if fallback_code != 0 {
     return "stat-failed"
   }
-  let text = output.text() catch { _ => "" }
-  text.trim().to_owned()
+  fallback_output.text().trim().to_owned()
 }
 
 ///|

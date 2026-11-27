@@ -12,6 +12,26 @@ fn restore_env_var(key : String, previous : String?) -> Unit {
 }
 
 ///|
+/// GNU `stat -c %a` on Linux, BSD `stat -f %Lp` on macOS.
+async fn theme_test_mode(path : String) -> String {
+  let (code, out, _) = @process.collect_output("stat", ["-c", "%a", path]) catch {
+    _ => return ""
+  }
+  if code == 0 {
+    return out.text().trim().to_owned()
+  }
+  let (fallback_code, fallback_out, _) = @process.collect_output("stat", [
+    "-f", "%Lp", path,
+  ]) catch {
+    _ => return ""
+  }
+  if fallback_code != 0 {
+    return ""
+  }
+  fallback_out.text().trim().to_owned()
+}
+
+///|
 test "theme preference encodes both modes" {
   let light = encode_theme_pref(Light)
   assert_true(light.contains("\"schema_version\":1"))
@@ -138,19 +158,11 @@ async test "theme choice round-trips atomically with mode 0600" {
   let path = theme_pref_path_in(config)
   assert_true(@fs.exists(path))
   assert_true(!(@fs.exists(path + ".tmp")))
-  let (code, stdout, _) = @process.collect_output("/bin/sh", [
-    "-c", "stat -c %a \"$1\"", "sh", path,
-  ])
-  assert_eq(code, 0)
-  assert_eq(stdout.text().trim(), "600")
+  assert_eq(theme_test_mode(path), "600")
   // Replacing the choice publishes one complete file, still mode 0600.
   assert_true(write_theme_choice_in(config, Dark) is Ok(_))
   assert_true(read_theme_choice_in(config) is SavedThemeChoice(Dark))
-  let (code2, stdout2, _) = @process.collect_output("/bin/sh", [
-    "-c", "stat -c %a \"$1\"", "sh", path,
-  ])
-  assert_eq(code2, 0)
-  assert_eq(stdout2.text().trim(), "600")
+  assert_eq(theme_test_mode(path), "600")
 }
 
 ///|
@@ -205,11 +217,7 @@ async test "a saved choice seeds a fresh model and is written 0600" {
   let model = Model::new_with_startup(startup)
   assert_true(model.theme_mode == Light)
   assert_eq(model.theme_note, "")
-  let (code, stdout, _) = @process.collect_output("/bin/sh", [
-    "-c", "stat -c %a \"$1\"", "sh", theme_pref_path_in(config),
-  ])
-  assert_eq(code, 0)
-  assert_eq(stdout.text().trim(), "600")
+  assert_eq(theme_test_mode(theme_pref_path_in(config)), "600")
 }
 
 ///|

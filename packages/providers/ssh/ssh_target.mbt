@@ -204,7 +204,8 @@ pub fn remote_exec_command(cwd : String, argv : Array[String]) -> String {
 /// M2 fields: hostname, CPU count (for `max_parallel`), docker CLI presence,
 /// and a deliberately conservative GUI heuristic. `has_docker` means the CLI
 /// exists, not that the daemon is reachable; `has_gui` is only true when the
-/// SSH session exposes X11/Wayland (see notes in the profile).
+/// SSH session exposes X11/Wayland or an Aqua session (see notes in the
+/// profile).
 pub fn probe_script() -> String {
   [
     "printf 'OS=%s\\n' \"$(uname -s)\"",
@@ -217,7 +218,7 @@ pub fn probe_script() -> String {
     "printf 'SHELL=%s\\n' \"${SHELL:-}\"",
     "printf 'CPUS=%s\\n' \"$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || printf 0)\"",
     "printf 'DOCKER=%s\\n' \"$(command -v docker 2>/dev/null || printf '')\"",
-    "if [ -n \"${DISPLAY:-}${WAYLAND_DISPLAY:-}\" ] || [ -S /tmp/.X11-unix/X0 ]; then",
+    "if [ \"$(launchctl managername 2>/dev/null)\" = Aqua ] || [ -n \"${DISPLAY:-}${WAYLAND_DISPLAY:-}\" ] || [ -S /tmp/.X11-unix/X0 ]; then",
     "  printf 'GUI=yes\\n'",
     "else",
     "  printf 'GUI=no\\n'",

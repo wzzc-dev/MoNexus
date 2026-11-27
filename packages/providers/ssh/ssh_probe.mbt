@@ -445,6 +445,11 @@ pub fn parse_probe(raw : String) -> MachineProfile {
       _ => ()
     }
   }
+  // Requirement matching uses lower-case platform names; `uname -s` reports
+  // Darwin for macOS.
+  if os.to_lower() == "darwin" {
+    os = "macos"
+  }
   let has_docker = docker_path != ""
   if has_docker {
     tools.set("docker", docker_path)
@@ -452,8 +457,9 @@ pub fn parse_probe(raw : String) -> MachineProfile {
   let max_parallel = if cpus > 0 { cpus.min(64) } else { 4 }
   let notes = [
     "probe ran via POSIX login shell (sh -lc)",
+    "os is normalized (Darwin -> macos)",
     "has_docker means the docker CLI is present (daemon not checked)",
-    "has_gui is a session heuristic (DISPLAY/WAYLAND_DISPLAY or /tmp/.X11-unix/X0)",
+    "has_gui is a session heuristic (Aqua, DISPLAY/WAYLAND_DISPLAY or /tmp/.X11-unix/X0)",
   ].join("; ")
   {
     os,

@@ -85,3 +85,64 @@ jobs:
 
       - name: Runtime e2e
         run: bash scripts/runtime_e2e.sh
+
+  test-macos:
+    name: build-test-macos
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # The MoUI skia package runs a node prebuild step.
+          node-version: "26"
+
+      - name: Setup MoonBit
+        uses: hustcer/setup-moonbit@v1
+
+      - name: Record toolchain versions
+        run: |
+          moon version --all
+          node --version
+          uname -sm
+
+      - name: Update MoonBit registry
+        run: moon update
+
+      # The desktop backend links AppKit through the registry build hooks.
+      # tmux and OpenSSL 3 are needed by the durable-run/TLS tests; the system
+      # LibreSSL lacks the `-addext` PKI flags. There is no GUI session on the
+      # runner, so the window itself is built, not launched; acceptance.sh
+      # (loopback sshd + xvfb) stays in the Linux job.
+      - name: Install test tools
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install -q tmux openssl@3
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: moon build --target native
+
+      - name: Test
+        run: moon test --target native
+
+      - name: Package
+        run: bash scripts/package.sh
+
+      - name: Host smoke
+        run: bash scripts/host_smoke.sh
+
+      - name: Installed launcher headless lifecycle
+        run: |
+          set -euo pipefail
+          stage="$(find dist -maxdepth 1 -type d -name 'monexus-*-macos-*' | head -n 1)"
+          [[ -n "$stage" ]] || { echo "macOS stage not found" >&2; exit 1; }
+          state="$(mktemp -d)"
+          trap '"$stage/bin/monexus" stop --state-dir "$state" >/dev/null 2>&1 || true; rm -rf "$state"' EXIT
+          "$stage/bin/monexus" start --headless --state-dir "$state"
+          "$stage/bin/monexus" status --state-dir "$state" | grep -q '^host online$'
+          "$stage/bin/monexus" stop --state-dir "$state"

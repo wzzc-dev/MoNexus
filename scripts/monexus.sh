@@ -14,6 +14,11 @@
 set -u -o pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+case "$(uname -s)" in
+  Darwin) HOST_OS=macos; DESKTOP_DIR=macos_skia ;;
+  Linux) HOST_OS=linux; DESKTOP_DIR=linux_skia ;;
+  *) HOST_OS=unknown; DESKTOP_DIR=linux_skia ;;
+esac
 INSTALLED=0
 if [[ -d "$SELF/../share/monexus" && -x "$SELF/monexus-host" ]]; then
   INSTALLED=1
@@ -40,8 +45,8 @@ else
     "$ROOT/_build/native/release/build/monexus/host/host.exe" \
     "$ROOT/_build/native/debug/build/monexus/host/host.exe" || true)}"
   DESKTOP_BIN="${MONEXUS_DESKTOP_BIN:-$(pick_bin \
-    "$ROOT/_build/native/release/build/monexus/desktop/linux_skia/linux_skia.exe" \
-    "$ROOT/_build/native/debug/build/monexus/desktop/linux_skia/linux_skia.exe" || true)}"
+    "$ROOT/_build/native/release/build/monexus/desktop/$DESKTOP_DIR/$DESKTOP_DIR.exe" \
+    "$ROOT/_build/native/debug/build/monexus/desktop/$DESKTOP_DIR/$DESKTOP_DIR.exe" || true)}"
 fi
 
 version_of() { # file
@@ -67,6 +72,10 @@ start (default):
   --state-dir DIR   state directory (default $MONEXUS_STATE_DIR, else
                     $HOME/.monexus)
   --no-keep-alive   stop the host when the desktop exits
+
+Platforms:
+  Linux uses the Skia/Wayland or X11 entry; macOS uses the Skia/AppKit entry.
+  A GUI login session is required for the macOS window.
 
 Environment:
   MONEXUS_HOST_BIN, MONEXUS_DESKTOP_BIN  override component paths
@@ -123,11 +132,15 @@ json_string() { # key file
   sed -n "s/.*\"$1\":\"\\([^\"]*\\)\".*/\\1/p" "$2" 2>/dev/null | head -n 1
 }
 
+file_mode() { # path
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null || echo '?'
+}
+
 print_endpoint() {
   local host_json="$STATE_DIR/host.json"
   if [[ -f "$host_json" ]]; then
     echo "state dir:  $STATE_DIR"
-    echo "host.json:  $host_json (mode $(stat -c '%a' "$host_json" 2>/dev/null || echo '?'))"
+    echo "host.json:  $host_json (mode $(file_mode "$host_json"))"
     echo "endpoint:   $(json_string ws_url "$host_json")"
     if [[ -n "$(json_string token "$host_json")" ]]; then
       echo "token:      present (stored only in host.json; never printed)"
@@ -225,7 +238,7 @@ case "$COMMAND" in
       echo "  build it with: moon build --target native --release" >&2
       exit 1
     fi
-    if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+    if [[ "$HOST_OS" == "linux" && -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
       echo "monexus: no display server found (DISPLAY and WAYLAND_DISPLAY are unset)." >&2
       echo "  The host is running. Use headless mode on this machine:" >&2
       echo "    monexus start --headless" >&2
