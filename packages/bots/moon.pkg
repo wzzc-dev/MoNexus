@@ -1,0 +1,5 @@
+import {
+  "monexus/contracts" @contracts,
+}
+
+supported_targets = "native"
