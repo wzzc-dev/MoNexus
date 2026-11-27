@@ -252,7 +252,8 @@ pub fn MachineStore::get_agent_session(
 ) -> Result[@contracts.AgentSessionRecord?, String] {
   try {
     let stmt = self.conn.prepare(
-      "SELECT record_json FROM agent_sessions WHERE id=?1",
+      "SELECT record_json FROM agent_sessions " +
+      "WHERE id=?1 AND record_kind='runtime'",
     )
     stmt.bind(index=1, session_id)
     let mut found : @contracts.AgentSessionRecord? = None
@@ -281,11 +282,13 @@ pub fn MachineStore::list_agent_sessions(
   try {
     let stmt = if agent_id == "" {
       self.conn.prepare(
-        "SELECT record_json FROM agent_sessions ORDER BY started_at ASC, id ASC",
+        "SELECT record_json FROM agent_sessions " +
+        "WHERE record_kind='runtime' ORDER BY started_at ASC, id ASC",
       )
     } else {
       let prepared = self.conn.prepare(
-        "SELECT record_json FROM agent_sessions WHERE agent_id=?1 " +
+        "SELECT record_json FROM agent_sessions " +
+        "WHERE agent_id=?1 AND record_kind='runtime' " +
         "ORDER BY started_at ASC, id ASC",
       )
       prepared.bind(index=1, agent_id)

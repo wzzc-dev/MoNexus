@@ -1,5 +1,6 @@
 import {
   "monexus/contracts" @contracts,
+  "monexus/bots" @bots,
   "moonbit-community/sqlite3",
   "moonbitlang/core/json",
   "moonbitlang/core/string",

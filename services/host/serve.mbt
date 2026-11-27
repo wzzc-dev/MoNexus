@@ -218,6 +218,27 @@ pub async fn serve(options : HostOptions) -> Result[Unit, String] {
       return Err("cannot rebuild environment projection: " + message)
     }
   }
+  match store.reconcile_bots_projection() {
+    Ok(counts) =>
+      println(
+        "monexus-host: bot projection rebuilt from events (bots=" +
+        counts.bots.to_string() +
+        " agents=" +
+        counts.agents.to_string() +
+        " chats=" +
+        counts.chats.to_string() +
+        " sessions=" +
+        counts.sessions.to_string() +
+        " memberships=" +
+        counts.memberships.to_string() +
+        ")",
+      )
+    Err(message) => {
+      store.close()
+      lock.close()
+      return Err("cannot rebuild bot projection: " + message)
+    }
+  }
   let trust = load_host_trust(options.state_dir)
   persist_trust_rows(store, trust)
   let verifier = @recipes.probe_verifier()

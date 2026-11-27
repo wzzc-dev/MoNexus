@@ -33,6 +33,9 @@ pub const EVENT_BOT_AGENT_SUSPENDED : String = "bot.agent.suspended"
 pub const EVENT_BOT_AGENT_RETIRED : String = "bot.agent.retired"
 
 ///|
+pub const EVENT_BOT_AGENT_UPDATED : String = "bot.agent.updated"
+
+///|
 pub const EVENT_BOT_AGENT_CREATION_DENIED : String = "bot.agent.creation_denied"
 
 ///|
@@ -126,72 +129,75 @@ pub fn bot_created_payload(
     ("create_policy", json_string(bot.create_policy)),
     ("actor", json_string(actor)),
     ("source", json_string(source)),
+    ("record", bot.to_json()),
   ])
 }
 
 ///|
 pub fn bot_updated_payload(
-  bot_id : String,
+  bot : BotRecord,
   changed_fields : Array[String],
   version : Int,
   actor : String,
 ) -> @json.Json {
   json_object([
-    ("bot_id", json_string(bot_id)),
+    ("bot_id", json_string(bot.id)),
     ("changed_fields", json_string_array(changed_fields)),
     ("version", json_int(version)),
     ("actor", json_string(actor)),
+    ("record", bot.to_json()),
   ])
 }
 
 ///|
 pub fn bot_policy_changed_payload(
-  bot_id : String,
+  bot : BotRecord,
   old_policy : String,
   new_policy : String,
-  agent_count_cap : Int,
-  agent_concurrency_cap : Int,
   software_allowlist_hash : String,
   actor : String,
 ) -> @json.Json {
   json_object([
-    ("bot_id", json_string(bot_id)),
+    ("bot_id", json_string(bot.id)),
     ("old_policy", json_string(old_policy)),
     ("new_policy", json_string(new_policy)),
-    ("agent_count_cap", json_int(agent_count_cap)),
-    ("agent_concurrency_cap", json_int(agent_concurrency_cap)),
+    ("agent_count_cap", json_int(bot.agent_count_cap)),
+    ("agent_concurrency_cap", json_int(bot.agent_concurrency_cap)),
     ("software_allowlist_hash", json_string(software_allowlist_hash)),
     ("actor", json_string(actor)),
+    ("record", bot.to_json()),
   ])
 }
 
 ///|
 pub fn bot_permissions_changed_payload(
-  bot_id : String,
+  bot : BotRecord,
   old_ceiling_hash : String,
   new_ceiling_hash : String,
   actor : String,
 ) -> @json.Json {
   json_object([
-    ("bot_id", json_string(bot_id)),
+    ("bot_id", json_string(bot.id)),
     ("old_ceiling_hash", json_string(old_ceiling_hash)),
     ("new_ceiling_hash", json_string(new_ceiling_hash)),
     ("actor", json_string(actor)),
+    ("record", bot.to_json()),
   ])
 }
 
 ///|
 pub fn bot_archived_payload(
-  bot_id : String,
+  bot : BotRecord,
   reason : String,
   active_session_count : Int,
   actor : String,
 ) -> @json.Json {
   json_object([
-    ("bot_id", json_string(bot_id)),
+    ("bot_id", json_string(bot.id)),
     ("reason", json_string(reason)),
     ("active_session_count", json_int(active_session_count)),
     ("actor", json_string(actor)),
+    ("record", bot.to_json()),
   ])
 }
 
@@ -214,32 +220,50 @@ pub fn bot_agent_created_payload(
     ("decision_id", json_string(decision_id)),
     ("actor", json_string(actor)),
     ("source", json_string(source)),
+    ("record", agent.to_json()),
   ])
 }
 
 ///|
 pub fn bot_agent_suspended_payload(
   bot_id : String,
-  agent_id : String,
+  agent : AgentRecord,
   reason : String,
   actor : String,
 ) -> @json.Json {
   json_object([
     ("bot_id", json_string(bot_id)),
-    ("agent_id", json_string(agent_id)),
+    ("agent_id", json_string(agent.id)),
     ("reason", json_string(reason)),
     ("actor", json_string(actor)),
+    ("record", agent.to_json()),
   ])
 }
 
 ///|
 pub fn bot_agent_retired_payload(
   bot_id : String,
-  agent_id : String,
+  agent : AgentRecord,
   reason : String,
   actor : String,
 ) -> @json.Json {
-  bot_agent_suspended_payload(bot_id, agent_id, reason, actor)
+  bot_agent_suspended_payload(bot_id, agent, reason, actor)
+}
+
+///|
+pub fn bot_agent_updated_payload(
+  agent : AgentRecord,
+  changed_fields : Array[String],
+  actor : String,
+) -> @json.Json {
+  json_object([
+    ("bot_id", json_string(agent.bot_id)),
+    ("agent_id", json_string(agent.id)),
+    ("changed_fields", json_string_array(changed_fields)),
+    ("runtime_binding_hash", json_string(agent.runtime_binding.hash)),
+    ("actor", json_string(actor)),
+    ("record", agent.to_json()),
+  ])
 }
 
 ///|
@@ -329,68 +353,75 @@ pub fn bot_memory_write_denied_payload(
 ///|
 pub fn chat_created_payload(
   chat : ChatRecord,
-  participant_bot_ids : Array[String],
+  participants : Array[ChatParticipant],
   actor : String,
   source : String,
 ) -> @json.Json {
+  let participant_bot_ids : Array[String] = []
+  let participant_json : Array[@json.Json] = []
+  for participant in participants {
+    participant_bot_ids.push(participant.bot_id)
+    participant_json.push(participant.to_json())
+  }
   json_object([
     ("chat_id", json_string(chat.id)),
     ("participant_bot_ids", json_string_array(participant_bot_ids)),
+    ("participants", json_array(participant_json)),
     ("project_id", json_string(chat.project_id)),
     ("title", json_string(chat.title)),
     ("actor", json_string(actor)),
     ("source", json_string(source)),
+    ("record", chat.to_json()),
   ])
 }
 
 ///|
 pub fn chat_participant_added_payload(
-  chat_id : String,
-  bot_id : String,
-  role : String,
+  participant : ChatParticipant,
   project_access_check : String,
   actor : String,
 ) -> @json.Json {
   json_object([
-    ("chat_id", json_string(chat_id)),
-    ("bot_id", json_string(bot_id)),
-    ("role", json_string(role)),
+    ("chat_id", json_string(participant.chat_id)),
+    ("bot_id", json_string(participant.bot_id)),
+    ("role", json_string(participant.role)),
     ("project_access_check", json_string(project_access_check)),
     ("actor", json_string(actor)),
+    ("record", participant.to_json()),
   ])
 }
 
 ///|
 pub fn chat_participant_removed_payload(
-  chat_id : String,
-  bot_id : String,
+  participant : ChatParticipant,
   reason : String,
   active_session_ended : Bool,
   actor : String,
 ) -> @json.Json {
   json_object([
-    ("chat_id", json_string(chat_id)),
-    ("bot_id", json_string(bot_id)),
+    ("chat_id", json_string(participant.chat_id)),
+    ("bot_id", json_string(participant.bot_id)),
     ("reason", json_string(reason)),
     ("active_session_ended", json_bool(active_session_ended)),
     ("actor", json_string(actor)),
+    ("record", participant.to_json()),
   ])
 }
 
 ///|
 pub fn chat_project_changed_payload(
-  chat_id : String,
+  chat : ChatRecord,
   old_project_id : String,
-  new_project_id : String,
   membership_check : String,
   actor : String,
 ) -> @json.Json {
   json_object([
-    ("chat_id", json_string(chat_id)),
+    ("chat_id", json_string(chat.id)),
     ("old_project_id", json_string(old_project_id)),
-    ("new_project_id", json_string(new_project_id)),
+    ("new_project_id", json_string(chat.project_id)),
     ("membership_check", json_string(membership_check)),
     ("actor", json_string(actor)),
+    ("record", chat.to_json()),
   ])
 }
 
@@ -426,12 +457,13 @@ pub fn chat_agent_selected_payload(
     ("permission_snapshot_hash", json_string(permission_snapshot_hash)),
     ("actor", json_string(actor)),
     ("decision_id", json_string(decision_id)),
+    ("record", agent.to_json()),
   ])
 }
 
 ///|
 pub fn chat_agent_switched_payload(
-  chat_id : String,
+  chat : ChatRecord,
   from_agent_id : String,
   to_agent_id : String,
   from_session_id : String,
@@ -442,7 +474,7 @@ pub fn chat_agent_switched_payload(
   actor : String,
 ) -> @json.Json {
   json_object([
-    ("chat_id", json_string(chat_id)),
+    ("chat_id", json_string(chat.id)),
     ("from_agent_id", json_string(from_agent_id)),
     ("to_agent_id", json_string(to_agent_id)),
     ("from_session_id", json_string(from_session_id)),
@@ -457,6 +489,7 @@ pub fn chat_agent_switched_payload(
       json_string(new_permission_snapshot_hash),
     ),
     ("actor", json_string(actor)),
+    ("record", chat.to_json()),
   ])
 }
 
@@ -508,6 +541,7 @@ pub fn chat_agent_session_started_payload(
     ),
     ("inherited_summary_ref", json_string(inherited_summary_ref)),
     ("started_at", json_string(session.started_at)),
+    ("record", session.to_json()),
   ])
 }
 
@@ -524,6 +558,7 @@ pub fn chat_agent_session_updated_payload(
     ("turns", json_int(turns)),
     ("decisions", json_int(decisions)),
     ("updated_at", json_string(session.updated_at)),
+    ("record", session.to_json()),
   ])
 }
 
@@ -539,6 +574,7 @@ pub fn chat_agent_session_ended_payload(
     ("summary_ref", json_string(session.summary_ref)),
     ("ended_at", json_string(session.ended_at)),
     ("next_session_id", json_string(next_session_id)),
+    ("record", session.to_json()),
   ])
 }
 
@@ -557,6 +593,7 @@ pub fn project_member_added_payload(
     ("access", json_string_array(membership.access)),
     ("reason", json_string(membership.reason)),
     ("actor", json_string(actor)),
+    ("record", membership.to_json()),
   ])
 }
 
@@ -571,5 +608,177 @@ pub fn project_member_removed_payload(
     ("access", json_string_array(membership.access)),
     ("reason", json_string(membership.reason)),
     ("actor", json_string(actor)),
+    ("record", membership.to_json()),
   ])
+}
+
+// ---------------------------------------------------------------------------
+// Full-record decoders
+// ---------------------------------------------------------------------------
+
+///|
+fn payload_record(payload : @json.Json) -> @json.Json? {
+  let object = match as_object(payload) {
+    Some(value) => value
+    None => return None
+  }
+  object.get("record")
+}
+
+///|
+pub fn bot_created_record(payload : @json.Json) -> BotRecord? {
+  match payload_record(payload) {
+    Some(value) => bot_from_json(value)
+    None => None
+  }
+}
+
+///|
+pub fn bot_updated_record(payload : @json.Json) -> BotRecord? {
+  bot_created_record(payload)
+}
+
+///|
+pub fn bot_policy_changed_record(payload : @json.Json) -> BotRecord? {
+  bot_created_record(payload)
+}
+
+///|
+pub fn bot_permissions_changed_record(payload : @json.Json) -> BotRecord? {
+  bot_created_record(payload)
+}
+
+///|
+pub fn bot_archived_record(payload : @json.Json) -> BotRecord? {
+  bot_created_record(payload)
+}
+
+///|
+pub fn bot_agent_created_record(payload : @json.Json) -> AgentRecord? {
+  match payload_record(payload) {
+    Some(value) => agent_from_json(value)
+    None => None
+  }
+}
+
+///|
+pub fn bot_agent_suspended_record(payload : @json.Json) -> AgentRecord? {
+  bot_agent_created_record(payload)
+}
+
+///|
+pub fn bot_agent_retired_record(payload : @json.Json) -> AgentRecord? {
+  bot_agent_created_record(payload)
+}
+
+///|
+pub fn bot_agent_updated_record(payload : @json.Json) -> AgentRecord? {
+  bot_agent_created_record(payload)
+}
+
+///|
+pub fn chat_created_record(payload : @json.Json) -> ChatRecord? {
+  match payload_record(payload) {
+    Some(value) => chat_from_json(value)
+    None => None
+  }
+}
+
+///|
+pub fn chat_created_participants(
+  payload : @json.Json,
+) -> Array[ChatParticipant] {
+  let out : Array[ChatParticipant] = []
+  let object = match as_object(payload) {
+    Some(value) => value
+    None => return out
+  }
+  match object.get("participants") {
+    Some(@json.Json::Array(items)) => {
+      for item in items {
+        match chat_participant_from_json(item) {
+          Some(participant) => out.push(participant)
+          None => ()
+        }
+      }
+    }
+    _ => ()
+  }
+  out
+}
+
+///|
+pub fn chat_participant_added_record(
+  payload : @json.Json,
+) -> ChatParticipant? {
+  match payload_record(payload) {
+    Some(value) => chat_participant_from_json(value)
+    None => None
+  }
+}
+
+///|
+pub fn chat_participant_removed_record(
+  payload : @json.Json,
+) -> ChatParticipant? {
+  chat_participant_added_record(payload)
+}
+
+///|
+pub fn chat_project_changed_record(payload : @json.Json) -> ChatRecord? {
+  chat_created_record(payload)
+}
+
+///|
+pub fn chat_agent_switched_record(payload : @json.Json) -> ChatRecord? {
+  chat_created_record(payload)
+}
+
+///|
+pub fn chat_agent_selected_record(payload : @json.Json) -> AgentRecord? {
+  match payload_record(payload) {
+    Some(value) => agent_from_json(value)
+    None => None
+  }
+}
+
+///|
+pub fn chat_agent_session_started_record(
+  payload : @json.Json,
+) -> AgentSession? {
+  match payload_record(payload) {
+    Some(value) => chat_agent_session_from_json(value)
+    None => None
+  }
+}
+
+///|
+pub fn chat_agent_session_updated_record(
+  payload : @json.Json,
+) -> AgentSession? {
+  chat_agent_session_started_record(payload)
+}
+
+///|
+pub fn chat_agent_session_ended_record(
+  payload : @json.Json,
+) -> AgentSession? {
+  chat_agent_session_started_record(payload)
+}
+
+///|
+pub fn project_member_added_record(
+  payload : @json.Json,
+) -> ProjectMembership? {
+  match payload_record(payload) {
+    Some(value) => project_membership_from_json(value)
+    None => None
+  }
+}
+
+///|
+pub fn project_member_removed_record(
+  payload : @json.Json,
+) -> ProjectMembership? {
+  project_member_added_record(payload)
 }
