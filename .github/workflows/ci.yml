@@ -95,7 +95,8 @@ jobs:
 
   test-macos:
     name: build-test-macos
-    runs-on: macos-14
+    # GitHub retired the macOS 14 hosted-runner image on 2026-11-02.
+    runs-on: macos-15
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -158,5 +159,9 @@ jobs:
           state="$(mktemp -d)"
           trap '"$stage/bin/monexus" stop --state-dir "$state" >/dev/null 2>&1 || true; rm -rf "$state"' EXIT
           "$stage/bin/monexus" start --headless --state-dir "$state"
-          "$stage/bin/monexus" status --state-dir "$state" | grep -q '^host online$'
+          # Capture first: `status | grep -q` lets grep exit early, the
+          # launcher's remaining output hits a closed pipe, and pipefail
+          # turns the SIGPIPE into a step failure on macOS.
+          status="$("$stage/bin/monexus" status --state-dir "$state")"
+          grep -q '^host online$' <<<"$status"
           "$stage/bin/monexus" stop --state-dir "$state"
