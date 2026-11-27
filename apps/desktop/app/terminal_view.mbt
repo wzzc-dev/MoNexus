@@ -1,8 +1,8 @@
 ///|
 /// Focused terminal surface. It replaces the Projects body while active, so
 /// the transcript owns a stable viewport instead of sharing the long project
-/// card scroll. The host protocol stays unchanged: `terminal.open` still uses
-/// a fixed 24x80 PTY and `terminal.read` still advances by byte cursor.
+/// card scroll. PTY rows and columns are derived from this viewport's font
+/// metrics; `terminal.read` still advances by byte cursor.
 let terminal_transcript_width : Double = 960.0
 
 ///|
@@ -148,18 +148,20 @@ fn terminal_input_row(model : Model) -> @moui.View[Msg] {
       text("$", align=@core.TextAlign::TextStart)
       .font(mono_font(13.0, 600))
       .foreground(if running { ui_accent() } else { ui_dim() }),
-      @views.text_field(
-        model.project.terminal_input,
-        on_input=fn(value) { ProjectTerminalInput(value) },
-        on_submit=Some(ProjectTerminalSend),
-        placeholder=tr(
-          model.lang,
-          "type a command, Enter sends",
-          "输入命令，Enter 发送",
+      terminal_input_field(
+        @views.text_field(
+          model.project.terminal_input,
+          on_input=fn(value) { ProjectTerminalInput(value) },
+          on_submit=Some(ProjectTerminalSend),
+          placeholder=tr(
+            model.lang,
+            "type a command, Enter sends",
+            "输入命令，Enter 发送",
+          ),
+          style=ui_field_style(),
+          width=620.0,
+          height=34.0,
         ),
-        style=ui_field_style(),
-        width=620.0,
-        height=34.0,
       ),
       ui_primary(tr(model.lang, "Send", "发送"), ProjectTerminalSend),
       ui_danger_ghost(tr(model.lang, "Stop", "停止"), ProjectTerminalStop),
@@ -176,8 +178,8 @@ fn terminal_hint(model : Model) -> @moui.View[Msg] {
   ui_meta(
     tr(
       model.lang,
-      "Enter sends · Ctrl+Shift+C or Stop interrupts · fixed PTY 24x80",
-      "Enter 发送 · Ctrl+Shift+C 或 Stop 中断 · 固定 PTY 24x80",
+      "Enter sends · Ctrl+C, Ctrl+Shift+C or Stop interrupts",
+      "Enter 发送 · Ctrl+C、Ctrl+Shift+C 或 Stop 中断",
     ),
   )
 }

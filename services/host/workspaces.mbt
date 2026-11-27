@@ -1341,6 +1341,16 @@ async fn handle_terminal_open(
   let command = @contracts.string_field_or(request.params, "command", "")
   let rows = @contracts.int_field_or(request.params, "rows", 24)
   let cols = @contracts.int_field_or(request.params, "cols", 80)
+  if !@contracts.terminal_size_is_valid(rows, cols) {
+    workspace_io_error(
+      state,
+      sink,
+      request,
+      client_request_id,
+      workspace_invalid("rows and cols must be between 1 and 10000"),
+    )
+    return
+  }
   let record = match lookup_workspace(state, workspace_id) {
     Ok(value) => value
     Err(error) => {
@@ -1504,6 +1514,88 @@ async fn handle_terminal_write(
     _ => ()
   }
   let result = @contracts.workspace_ack_result(session_id, "")
+  send_machine_result(state, sink, request, client_request_id, result)
+}
+
+///|
+async fn handle_terminal_resize(
+  state : HostState,
+  sink : Sink,
+  request : @contracts.RpcRequest,
+  client_request_id : String,
+) -> Unit {
+  let session_id = match @contracts.string_field(request.params, "session_id") {
+    Some(value) if value != "" => value
+    _ => {
+      workspace_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        workspace_invalid("missing session_id"),
+      )
+      return
+    }
+  }
+  let rows = match @contracts.int_field(request.params, "rows") {
+    Some(value) => value
+    None => {
+      workspace_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        workspace_invalid("missing rows"),
+      )
+      return
+    }
+  }
+  let cols = match @contracts.int_field(request.params, "cols") {
+    Some(value) => value
+    None => {
+      workspace_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        workspace_invalid("missing cols"),
+      )
+      return
+    }
+  }
+  if !@contracts.terminal_size_is_valid(rows, cols) {
+    workspace_io_error(
+      state,
+      sink,
+      request,
+      client_request_id,
+      workspace_invalid("rows and cols must be between 1 and 10000"),
+    )
+    return
+  }
+  state.mutex.acquire()
+  let session = state.terminals.get(session_id)
+  state.mutex.release()
+  let found = match session {
+    Some(value) => value
+    None => {
+      workspace_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        workspace_not_found("terminal session not found"),
+      )
+      return
+    }
+  }
+  match
+    found.input.put(
+      @workspace.TerminalInput::Resize(rows, cols),
+    ) {
+    _ => ()
+  }
+  let result = @contracts.terminal_resize_result(session_id, rows, cols)
   send_machine_result(state, sink, request, client_request_id, result)
 }
 

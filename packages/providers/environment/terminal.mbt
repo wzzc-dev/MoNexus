@@ -198,6 +198,10 @@ async fn run_local_container_terminal(
           pty.write(text) catch {
             _ => break
           }
+        @workspace.TerminalInput::Resize(rows, cols) =>
+          pty.resize(rows~, cols~) catch {
+            _ => ()
+          }
         @workspace.TerminalInput::Close => break
       }
     }
@@ -288,6 +292,9 @@ async fn run_ssh_container_terminal(
           stdin_writer.write(text) catch {
             _ => break
           }
+        // The SSH transport is pipe-backed and has no window-change channel;
+        // ignore resize while keeping the container session alive.
+        @workspace.TerminalInput::Resize(_rows, _cols) => ()
         @workspace.TerminalInput::Close => break
       }
     }

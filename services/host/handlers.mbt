@@ -206,6 +206,10 @@ async fn handle_request(
       state.mutex.release()
       handle_terminal_write(state, sink, request, client_request_id)
     }
+    @contracts.METHOD_TERMINAL_RESIZE => {
+      state.mutex.release()
+      handle_terminal_resize(state, sink, request, client_request_id)
+    }
     @contracts.METHOD_TERMINAL_READ => {
       state.mutex.release()
       handle_terminal_read(state, sink, request, client_request_id)

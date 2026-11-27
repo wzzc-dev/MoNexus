@@ -1384,6 +1384,9 @@ binds the same root. Agent-mode Runs with an environment are rejected in A2.1
 only that Run's environment is touched. `terminal.open`,
 `workspace.gitStatus` and `workspace.gitDiff` redirect into a running
 environment for the workspace root (no specific `worktree_id`).
+`terminal.resize` takes `session_id`, `rows` and `cols` (validated `1..10000`);
+local PTY, container and runtime environments apply it, while pipe-backed SSH
+terminals accept and ignore it because they have no window-change channel.
 
 ### Start, stop, destroy, list, doctor
 

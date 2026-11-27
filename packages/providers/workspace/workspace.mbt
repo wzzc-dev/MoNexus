@@ -75,6 +75,7 @@ pub(all) enum WorkspaceProvider {
 ///|
 pub(all) enum TerminalInput {
   Data(String)
+  Resize(Int32, Int32)
   Close
 }
 
@@ -1213,6 +1214,10 @@ async fn run_local_terminal(
       let item = input.get() catch { _ => break }
       match item {
         Data(text) => pty.write(text) catch { _ => break }
+        Resize(rows, cols) =>
+          pty.resize(rows~, cols~) catch {
+            _ => ()
+          }
         Close => break
       }
     }
@@ -1333,6 +1338,10 @@ async fn run_ssh_terminal(
       let item = input.get() catch { _ => break }
       match item {
         Data(text) => stdin_writer.write(text) catch { _ => break }
+        // ssh(1) is driven through ordinary pipes here, so there is no SSH
+        // channel on which to send a window-change request. Accept and ignore
+        // resize input rather than tearing down a working session.
+        Resize(_rows, _cols) => ()
         Close => break
       }
     }
