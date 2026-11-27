@@ -93,6 +93,45 @@ pub fn program_with_preferences(
       (next, effect)
     },
     view~,
-    subscriptions=_model => @moui.Subscription::none(),
-  )
+    subscriptions=terminal_poll_subscription,
+  ).with_commands(commands=model => {
+    [
+      @core.ProgramCommand::new(
+        command=@core.ActionCommand::new(
+          intent=@core.Copy,
+          label=tr(model.lang, "Interrupt terminal", "中断终端"),
+          shortcut=Some(
+            @core.KeyboardShortcut::new(
+              key="c",
+              modifiers=@core.KeyModifiers::new(control=true, shift=true),
+            ),
+          ),
+          description=tr(
+            model.lang,
+            "Send Ctrl+C to the focused terminal.",
+            "向当前终端发送 Ctrl+C。",
+          ),
+        ),
+        message=ProjectTerminalStop,
+      ),
+      @core.ProgramCommand::new(
+        command=@core.ActionCommand::new(
+          intent=@core.Copy,
+          label=tr(model.lang, "Interrupt terminal", "中断终端"),
+          shortcut=Some(
+            @core.KeyboardShortcut::new(
+              key="C",
+              modifiers=@core.KeyModifiers::new(control=true, shift=true),
+            ),
+          ),
+          description=tr(
+            model.lang,
+            "Send Ctrl+C to the focused terminal.",
+            "向当前终端发送 Ctrl+C。",
+          ),
+        ),
+        message=ProjectTerminalStop,
+      ),
+    ]
+  })
 }

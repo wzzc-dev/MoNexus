@@ -29,8 +29,8 @@ fn machine_notice(command : MachineCommand, detail : String) -> String {
     ProjectGitStatus(_) => "git status updated"
     ProjectGitDiff(_, _) => "diff updated"
     ProjectOpenTerminal(_) => "terminal: " + detail
-    ProjectTerminalWrite(_, _, _) => "terminal input sent"
-    ProjectTerminalRead(_) => "terminal output read"
+    ProjectTerminalWrite(_, _) => "terminal input sent"
+    ProjectTerminalRead(_, _) => "terminal output read"
     ProjectCloseTerminal(_) => "terminal closed"
     ProjectListWorktrees(_) => detail
     ProjectCreateWorktree(_, branch, _) => "worktree " + branch + " created"
@@ -483,55 +483,69 @@ async fn execute_machine_command(
         ) {
         Ok(json) =>
           match @contracts.terminal_open_from_json(json) {
-            Some(opened) => dispatch(ProjectTerminalOpened(opened.session_id))
-            None => dispatch(ProjectError("terminal.open: malformed result"))
+            Some(opened) =>
+              dispatch(
+                ProjectTerminalOpened(
+                  opened.session_id,
+                  opened.text,
+                  opened.cursor,
+                  opened.eof,
+                ),
+              )
+            None =>
+              dispatch(
+                ProjectTerminalFailed("", "terminal.open: malformed result"),
+              )
           }
-        Err(message) => dispatch(ProjectError("terminal.open: " + message))
+        Err(message) =>
+          dispatch(ProjectTerminalFailed("", "terminal.open: " + message))
       }
     }
-    ProjectTerminalWrite(session_id, data, cursor) => {
+    ProjectTerminalWrite(session_id, data) => {
       let id = request_id("cmd")
       match
         client.call_json(
           id,
           @contracts.METHOD_TERMINAL_WRITE,
-          @contracts.terminal_write_params(id, session_id, data + "\n"),
+          @contracts.terminal_write_params(id, session_id, data),
         ) {
-        Ok(_) => {
-          @async.sleep(350)
-          let read_id = request_id("cmd")
-          match
-            client.call_json(
-              read_id,
-              @contracts.METHOD_TERMINAL_READ,
-              @contracts.terminal_read_params(read_id, session_id, cursor),
-            ) {
-            Ok(json) =>
-              match @contracts.terminal_read_from_json(json) {
-                Some(read) =>
-                  dispatch(ProjectTerminalOutput(read.cursor, read.text))
-                None => dispatch(ProjectError("terminal.read: malformed result"))
-              }
-            Err(message) => dispatch(ProjectError("terminal.read: " + message))
-          }
-        }
-        Err(message) => dispatch(ProjectError("terminal.write: " + message))
+        Ok(_) => ()
+        Err(message) =>
+          dispatch(
+            ProjectTerminalFailed(session_id, "terminal.write: " + message),
+          )
       }
     }
-    ProjectTerminalRead(session_id) => {
+    ProjectTerminalRead(session_id, cursor) => {
       let id = request_id("cmd")
       match
         client.call_json(
           id,
           @contracts.METHOD_TERMINAL_READ,
-          @contracts.terminal_read_params(id, session_id, 0L),
+          @contracts.terminal_read_params(id, session_id, cursor),
         ) {
         Ok(json) =>
           match @contracts.terminal_read_from_json(json) {
-            Some(read) => dispatch(ProjectTerminalOutput(read.cursor, read.text))
-            None => dispatch(ProjectError("terminal.read: malformed result"))
+            Some(read) =>
+              dispatch(
+                ProjectTerminalOutput(
+                  read.session_id,
+                  read.cursor,
+                  read.text,
+                  read.eof,
+                ),
+              )
+            None =>
+              dispatch(
+                ProjectTerminalFailed(
+                  session_id, "terminal.read: malformed result",
+                ),
+              )
           }
-        Err(message) => dispatch(ProjectError("terminal.read: " + message))
+        Err(message) =>
+          dispatch(
+            ProjectTerminalFailed(session_id, "terminal.read: " + message),
+          )
       }
     }
     ProjectCloseTerminal(session_id) => {
