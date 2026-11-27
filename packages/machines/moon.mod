@@ -10,5 +10,6 @@ description = "MoNexus machine registry: SQLite projection, event log and replay
 
 import {
   "monexus/contracts@0.1.0",
+  "monexus/bots@0.1.0",
   "moonbit-community/sqlite3@0.2.5",
 }

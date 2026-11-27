@@ -106,6 +106,7 @@ pub fn MachineStore::open(path : String) -> Result[MachineStore, String] {
     machine_store_migrate(conn)
     workspace_store_migrate(conn)
     agent_store_migrate(conn)
+    bots_store_migrate(conn)
     task_store_migrate(conn)
     trigger_store_migrate(conn)
     environment_store_migrate(conn)

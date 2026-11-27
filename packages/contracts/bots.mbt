@@ -239,6 +239,28 @@ pub fn RuntimeBinding::same_as(
   self.hash == other.hash
 }
 
+///|
+/// Canonical SHA-256 over the same deterministic JSON rendering used by the
+/// other contract hashes. Used for immutable policy and permission snapshots.
+pub fn bots_canonical_hash(value : @json.Json) -> String {
+  "sha256:" + trigger_sha256_hex(trigger_canonical_json(value))
+}
+
+///|
+/// Order-independent hash for an allowlist. Duplicate entries are dropped so
+/// two equivalent permission sets always produce the same snapshot hash.
+pub fn bots_permission_set_hash(values : Array[String]) -> String {
+  let sorted = values.copy()
+  sorted.sort()
+  let unique : Array[String] = []
+  for value in sorted {
+    if unique.length() == 0 || unique[unique.length() - 1] != value {
+      unique.push(value)
+    }
+  }
+  bots_canonical_hash(json_string_array(unique))
+}
+
 // ---------------------------------------------------------------------------
 // Bot
 // ---------------------------------------------------------------------------

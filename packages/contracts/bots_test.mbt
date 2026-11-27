@@ -266,3 +266,211 @@ test "ADR-0017 event constants and payload builders match the ADR catalog" {
   assert_eq(string_field_or(object, "create_policy", ""), BOT_CREATE_POLICY_AUTO)
   assert_eq(bot_event_subject(bot.id), "bot/" + bot.id)
 }
+
+///|
+test "ADR-0017 event payloads replay the complete post-change record" {
+  let binding = RuntimeBinding::new(
+    software_id="claude-code",
+    adapter_id="acp",
+    launch_kind=RUNTIME_LAUNCH_ACP,
+    command="/usr/bin/claude",
+    args=["--acp"],
+    model_profile="balanced",
+    hash="sha256:binding",
+    tools=["shell"],
+    skills=["review"],
+  )
+  let bot = BotRecord::new(
+    id=new_bot_id(1_000L),
+    org_id="org_local",
+    name="Builder",
+    created_at="2026-11-27T01:00:00Z",
+    memory_ref="bot/memory",
+    permission_ceiling=["repo:read", "tool:shell"],
+    create_policy=BOT_CREATE_POLICY_AUTO,
+    software_allowlist=["claude-code"],
+  )
+  let created = round_trip_json(
+    bot_created_payload(bot, "sha256:ceiling", "owner", "manual"),
+  )
+  match bot_created_record(created) {
+    Some(value) => {
+      assert_eq(value.id, bot.id)
+      assert_eq(value.name, "Builder")
+      assert_eq(value.permission_ceiling.length(), 2)
+      assert_eq(value.create_policy, BOT_CREATE_POLICY_AUTO)
+      assert_eq(value.software_allowlist[0], "claude-code")
+    }
+    None => fail("bot.created record did not decode")
+  }
+  let renamed = { ..bot, name: "Builder 2" }
+  let updated = round_trip_json(
+    bot_updated_payload(renamed, ["name"], 2, "owner"),
+  )
+  match bot_updated_record(updated) {
+    Some(value) => assert_eq(value.name, "Builder 2")
+    None => fail("bot.updated record did not decode")
+  }
+  let agent = AgentRecord::new(
+    id=new_agent_id(1_001L),
+    org_id="org_local",
+    bot_id=bot.id,
+    name="Claude worker",
+    runtime_binding=binding,
+    created_at="2026-11-27T01:01:00Z",
+    permission_scope=["repo:read"],
+    state=AGENT_LIFECYCLE_ACTIVE,
+  )
+  let agent_payload = round_trip_json(
+    bot_agent_created_payload(
+      bot.id,
+      agent,
+      "sha256:scope",
+      BOT_CREATE_POLICY_AUTO,
+      "",
+      "owner",
+      "manual",
+    ),
+  )
+  match bot_agent_created_record(agent_payload) {
+    Some(value) => {
+      assert_eq(value.id, agent.id)
+      assert_eq(value.bot_id, bot.id)
+      assert_eq(value.runtime_binding.command, "/usr/bin/claude")
+      assert_eq(value.runtime_binding.tools[0], "shell")
+    }
+    None => fail("bot.agent.created record did not decode")
+  }
+  let suspended = {
+    ..agent,
+    state: AGENT_LIFECYCLE_SUSPENDED,
+    updated_at: "2026-11-27T01:02:00Z",
+  }
+  let suspended_payload = round_trip_json(
+    bot_agent_suspended_payload(bot.id, suspended, "owner pause", "owner"),
+  )
+  match bot_agent_suspended_record(suspended_payload) {
+    Some(value) => assert_eq(value.state, AGENT_LIFECYCLE_SUSPENDED)
+    None => fail("bot.agent.suspended record did not decode")
+  }
+  let chat = ChatRecord::new(
+    id=new_chat_id(1_002L),
+    org_id="org_local",
+    title="P0.2",
+    created_at="2026-11-27T01:03:00Z",
+  )
+  let participant = ChatParticipant::new(
+    chat_id=chat.id,
+    bot_id=bot.id,
+    added_at="2026-11-27T01:03:00Z",
+  )
+  let chat_payload = round_trip_json(
+    chat_created_payload(chat, [participant], "owner", "manual"),
+  )
+  match chat_created_record(chat_payload) {
+    Some(value) => assert_eq(value.title, "P0.2")
+    None => fail("chat.created record did not decode")
+  }
+  let participants = chat_created_participants(chat_payload)
+  assert_eq(participants.length(), 1)
+  assert_eq(participants[0].bot_id, bot.id)
+  let project_id = new_project_id(1_003L)
+  let moved = { ..chat, project_id }
+  let moved_payload = round_trip_json(
+    chat_project_changed_payload(moved, "", "membership_ok", "owner"),
+  )
+  match chat_project_changed_record(moved_payload) {
+    Some(value) => assert_eq(value.project_id, project_id)
+    None => fail("chat.project.changed record did not decode")
+  }
+  let switched_payload = round_trip_json(
+    chat_agent_switched_payload(
+      moved,
+      agent.id,
+      agent.id,
+      new_agent_session_id(1_004L),
+      new_agent_session_id(1_005L),
+      "bnd_1",
+      "sha256:old",
+      "sha256:new",
+      "owner",
+    ),
+  )
+  match chat_agent_switched_record(switched_payload) {
+    Some(value) => assert_eq(value.id, chat.id)
+    None => fail("chat.agent.switched record did not decode")
+  }
+  let selected_payload = round_trip_json(
+    chat_agent_selected_payload(
+      chat.id,
+      bot.id,
+      agent,
+      "sha256:permission",
+      "owner",
+      "",
+    ),
+  )
+  match chat_agent_selected_record(selected_payload) {
+    Some(value) => assert_eq(value.runtime_binding.command, "/usr/bin/claude")
+    None => fail("chat.agent.selected record did not decode")
+  }
+  let session = AgentSession::new(
+    id=new_agent_session_id(1_006L),
+    chat_id=chat.id,
+    agent_id=agent.id,
+    permission_snapshot_hash="sha256:permission",
+    started_at="2026-11-27T01:04:00Z",
+    runtime_session_id="rt_1",
+    project_id=project_id,
+  )
+  let started_payload = round_trip_json(
+    chat_agent_session_started_payload(
+      session,
+      bot.id,
+      agent.runtime_binding.hash,
+      "",
+    ),
+  )
+  match chat_agent_session_started_record(started_payload) {
+    Some(value) => {
+      assert_eq(value.id, session.id)
+      assert_eq(value.runtime_session_id, "rt_1")
+      assert_eq(value.permission_snapshot_hash, "sha256:permission")
+    }
+    None => fail("chat.agent_session.started record did not decode")
+  }
+  let ended = {
+    ..session,
+    state: AGENT_SESSION_STATE_ENDED,
+    summary_ref: "chat/summary-1.md",
+    ended_at: "2026-11-27T01:05:00Z",
+  }
+  let ended_payload = round_trip_json(
+    chat_agent_session_ended_payload(ended, ""),
+  )
+  match chat_agent_session_ended_record(ended_payload) {
+    Some(value) => {
+      assert_eq(value.state, AGENT_SESSION_STATE_ENDED)
+      assert_eq(value.summary_ref, "chat/summary-1.md")
+    }
+    None => fail("chat.agent_session.ended record did not decode")
+  }
+  let membership = ProjectMembership::new(
+    project_id=project_id,
+    bot_id=bot.id,
+    added_at="2026-11-27T01:06:00Z",
+    access=["repo:read"],
+    reason="owner added",
+  )
+  let membership_payload = round_trip_json(
+    project_member_added_payload(membership, "owner"),
+  )
+  match project_member_added_record(membership_payload) {
+    Some(value) => {
+      assert_eq(value.project_id, project_id)
+      assert_eq(value.bot_id, bot.id)
+      assert_eq(value.access[0], "repo:read")
+    }
+    None => fail("project.member.added record did not decode")
+  }
+}
