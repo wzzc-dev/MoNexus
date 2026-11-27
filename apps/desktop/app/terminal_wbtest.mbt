@@ -34,7 +34,10 @@ test "terminal.open applies initial text, cursor and eof" {
   assert_eq(opening.project.terminal_state, TerminalOpening)
   assert_eq(commands.length(), 1)
   match commands[0] {
-    ProjectOpenTerminal(workspace_id) => assert_eq(workspace_id, "wsp_test")
+    ProjectOpenTerminal(workspace_id, rows, cols) => {
+      assert_eq(workspace_id, "wsp_test")
+      assert_eq((rows, cols), terminal_focused_pty_size())
+    }
     _ => fail("expected ProjectOpenTerminal")
   }
   let opened = update(
@@ -181,7 +184,10 @@ test "clear keeps the session and close resets it for reopening" {
   assert_eq(reopening.project.terminal_state, TerminalOpening)
   assert_eq(reopen_commands.length(), 1)
   match reopen_commands[0] {
-    ProjectOpenTerminal(workspace_id) => assert_eq(workspace_id, "wsp_test")
+    ProjectOpenTerminal(workspace_id, rows, cols) => {
+      assert_eq(workspace_id, "wsp_test")
+      assert_eq((rows, cols), terminal_focused_pty_size())
+    }
     _ => fail("expected ProjectOpenTerminal")
   }
   let fresh = update(
@@ -206,7 +212,10 @@ test "reconnect closes the lost session before opening a new one" {
     _ => fail("expected ProjectCloseTerminal")
   }
   match commands[1] {
-    ProjectOpenTerminal(workspace_id) => assert_eq(workspace_id, "wsp_test")
+    ProjectOpenTerminal(workspace_id, rows, cols) => {
+      assert_eq(workspace_id, "wsp_test")
+      assert_eq((rows, cols), terminal_focused_pty_size())
+    }
     _ => fail("expected ProjectOpenTerminal")
   }
   assert_eq(reconnecting.project.terminal_state, TerminalOpening)
@@ -236,7 +245,10 @@ test "a failed read stops polling and exposes reconnect" {
     _ => fail("expected ProjectCloseTerminal")
   }
   match commands[1] {
-    ProjectOpenTerminal(workspace_id) => assert_eq(workspace_id, "wsp_test")
+    ProjectOpenTerminal(workspace_id, rows, cols) => {
+      assert_eq(workspace_id, "wsp_test")
+      assert_eq((rows, cols), terminal_focused_pty_size())
+    }
     _ => fail("expected ProjectOpenTerminal")
   }
 }
@@ -281,4 +293,149 @@ test "the live session survives page navigation" {
   let reopened = update(back, ProjectOpened(terminal_test_record()))
   assert_eq(reopened.project.terminal_id, "sess_test")
   assert_eq(reopened.project.terminal_text, "$ ")
+}
+
+///|
+test "opening the focused terminal requests the computed viewport size" {
+  let model = update(Model::new(), SelectPage(Manage))
+  let model = update(model, ProjectOpened(terminal_test_record()))
+  let (opening, commands) = update_full(model, ProjectTerminalFocus)
+  let expected = terminal_focused_pty_size()
+  assert_true(expected.0 > 0)
+  assert_true(expected.1 > 0)
+  assert_eq(
+    (opening.project.terminal_target_rows, opening.project.terminal_target_cols),
+    expected,
+  )
+  assert_eq(
+    (opening.project.terminal_pty_rows, opening.project.terminal_pty_cols),
+    expected,
+  )
+  match commands[0] {
+    ProjectOpenTerminal(_, rows, cols) => assert_eq((rows, cols), expected)
+    _ => fail("expected ProjectOpenTerminal")
+  }
+}
+
+///|
+test "viewport resize is emitted once per real size change" {
+  let model = terminal_test_running_model()
+  let base = terminal_focused_pty_size()
+  let (unchanged, no_commands) = update_full(
+    model,
+    ProjectTerminalViewport(base.0, base.1),
+  )
+  assert_eq(no_commands.length(), 0)
+  assert_eq(
+    (
+      unchanged.project.terminal_target_rows,
+      unchanged.project.terminal_target_cols,
+    ),
+    base,
+  )
+  let wanted = (base.0 + 1, base.1 + 2)
+  let (resized, commands) = update_full(
+    model,
+    ProjectTerminalViewport(wanted.0, wanted.1),
+  )
+  assert_eq(commands.length(), 1)
+  match commands[0] {
+    ProjectTerminalResize(session_id, rows, cols) => {
+      assert_eq(session_id, "sess_test")
+      assert_eq((rows, cols), wanted)
+    }
+    _ => fail("expected ProjectTerminalResize")
+  }
+  assert_eq(
+    (resized.project.terminal_pty_rows, resized.project.terminal_pty_cols),
+    wanted,
+  )
+  let (_, duplicate) = update_full(
+    resized,
+    ProjectTerminalViewport(wanted.0, wanted.1),
+  )
+  assert_eq(duplicate.length(), 0)
+}
+
+///|
+test "a viewport change during terminal.open reconciles after open" {
+  let model = update(Model::new(), SelectPage(Manage))
+  let model = update(model, ProjectOpened(terminal_test_record()))
+  let (opening, open_commands) = update_full(model, ProjectTerminalFocus)
+  let open_size = match open_commands[0] {
+    ProjectOpenTerminal(_, rows, cols) => (rows, cols)
+    _ => fail("expected ProjectOpenTerminal")
+  }
+  let wanted = (open_size.0 + 2, open_size.1 + 3)
+  let (opening, during_open) = update_full(
+    opening,
+    ProjectTerminalViewport(wanted.0, wanted.1),
+  )
+  assert_eq(during_open.length(), 0)
+  let (opened, after_open) = update_full(
+    opening,
+    ProjectTerminalOpened("sess_resized", "$ ", 2L, false),
+  )
+  assert_eq(after_open.length(), 1)
+  match after_open[0] {
+    ProjectTerminalResize(session_id, rows, cols) => {
+      assert_eq(session_id, "sess_resized")
+      assert_eq((rows, cols), wanted)
+    }
+    _ => fail("expected ProjectTerminalResize")
+  }
+  assert_eq(
+    (opened.project.terminal_pty_rows, opened.project.terminal_pty_cols),
+    wanted,
+  )
+  let (_, duplicate) = update_full(
+    opened,
+    ProjectTerminalViewport(wanted.0, wanted.1),
+  )
+  assert_eq(duplicate.length(), 0)
+}
+
+///|
+test "float resize updates the target without RPCs and syncs once on end" {
+  let base = update(terminal_test_running_model(), ToggleFloatWorkspace)
+  let model = update(base, FloatNewTerminal)
+  let (started, started_commands) = update_full(
+    model,
+    FloatResizeDrag(@core.DragGesturePhase::Started, 0.0, 0.0),
+  )
+  assert_eq(started_commands.length(), 0)
+  let (dragging, changed_commands) = update_full(
+    started,
+    FloatResizeDrag(@core.DragGesturePhase::Changed, 60.0, 40.0),
+  )
+  assert_eq(changed_commands.length(), 0)
+  let wanted = terminal_float_pty_size(dragging)
+  assert_eq(
+    (
+      dragging.project.terminal_target_rows,
+      dragging.project.terminal_target_cols,
+    ),
+    wanted,
+  )
+  let (ended, end_commands) = update_full(
+    dragging,
+    FloatResizeDrag(@core.DragGesturePhase::Ended, 60.0, 40.0),
+  )
+  assert_eq(end_commands.length(), 1)
+  match end_commands[0] {
+    ProjectTerminalResize(session_id, rows, cols) => {
+      assert_eq(session_id, "sess_test")
+      assert_eq((rows, cols), wanted)
+    }
+    _ => fail("expected ProjectTerminalResize")
+  }
+  assert_eq(
+    (ended.project.terminal_pty_rows, ended.project.terminal_pty_cols),
+    wanted,
+  )
+  let (_, duplicate) = update_full(
+    ended,
+    FloatResizeDrag(@core.DragGesturePhase::Ended, 60.0, 40.0),
+  )
+  assert_eq(duplicate.length(), 0)
 }

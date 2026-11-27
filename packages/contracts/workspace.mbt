@@ -68,10 +68,29 @@ pub const METHOD_TERMINAL_OPEN : String = "terminal.open"
 pub const METHOD_TERMINAL_WRITE : String = "terminal.write"
 
 ///|
+pub const METHOD_TERMINAL_RESIZE : String = "terminal.resize"
+
+///|
 pub const METHOD_TERMINAL_READ : String = "terminal.read"
 
 ///|
 pub const METHOD_TERMINAL_CLOSE : String = "terminal.close"
+
+///|
+pub const TERMINAL_MIN_SIZE : Int = 1
+
+///|
+pub const TERMINAL_MAX_SIZE : Int = 10_000
+
+///|
+/// The PTY size is part of the wire contract, so validation lives here rather
+/// than in each transport. The upper bound matches the local PTY runtime.
+pub fn terminal_size_is_valid(rows : Int, cols : Int) -> Bool {
+  rows >= TERMINAL_MIN_SIZE &&
+  rows <= TERMINAL_MAX_SIZE &&
+  cols >= TERMINAL_MIN_SIZE &&
+  cols <= TERMINAL_MAX_SIZE
+}
 
 // ---------------------------------------------------------------------------
 // Events
@@ -644,6 +663,50 @@ pub fn terminal_open_from_json(
   })
 }
 
+///|
+pub(all) struct TerminalResizeResult {
+  session_id : String
+  rows : Int
+  cols : Int
+}
+
+///|
+pub fn TerminalResizeResult::to_json(
+  self : TerminalResizeResult,
+) -> @json.Json {
+  json_object([
+    ("session_id", json_string(self.session_id)),
+    ("rows", json_int(self.rows)),
+    ("cols", json_int(self.cols)),
+  ])
+}
+
+///|
+pub fn terminal_resize_from_json(
+  json : @json.Json,
+) -> TerminalResizeResult? {
+  let object = match as_object(json) {
+    Some(value) => value
+    None => return None
+  }
+  let session_id = match string_field(object, "session_id") {
+    Some(value) if value != "" => value
+    _ => return None
+  }
+  let rows = match int_field(object, "rows") {
+    Some(value) => value
+    None => return None
+  }
+  let cols = match int_field(object, "cols") {
+    Some(value) => value
+    None => return None
+  }
+  if !terminal_size_is_valid(rows, cols) {
+    return None
+  }
+  Some({ session_id, rows, cols })
+}
+
 // ---------------------------------------------------------------------------
 // Param builders and parsers
 // ---------------------------------------------------------------------------
@@ -908,6 +971,21 @@ pub fn terminal_write_params(
 }
 
 ///|
+pub fn terminal_resize_params(
+  client_request_id : String,
+  session_id : String,
+  rows : Int,
+  cols : Int,
+) -> Map[String, @json.Json] {
+  Map([
+    ("client_request_id", json_string(client_request_id)),
+    ("session_id", json_string(session_id)),
+    ("rows", json_int(rows)),
+    ("cols", json_int(cols)),
+  ])
+}
+
+///|
 pub fn terminal_read_params(
   client_request_id : String,
   session_id : String,
@@ -1054,6 +1132,15 @@ pub fn workspace_ack_result(workspace_id : String, path : String) -> @json.Json 
     ("path", json_string(path)),
     ("ok", json_bool(true)),
   ])
+}
+
+///|
+pub fn terminal_resize_result(
+  session_id : String,
+  rows : Int,
+  cols : Int,
+) -> @json.Json {
+  TerminalResizeResult::{ session_id, rows, cols }.to_json()
 }
 
 ///|

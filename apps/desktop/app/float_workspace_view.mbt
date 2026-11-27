@@ -1194,18 +1194,7 @@ fn float_terminal_pane(
           ], spacing=8.0, align=@style.CrossAlign::Center).frame(width~),
         )
       } else {
-        let extra_height = (if model.project.terminal_error != "" {
-          20.0
-        } else {
-          0.0
-        }) +
-        (if model.project.terminal_state == TerminalEnded ||
-          model.project.terminal_state == TerminalFailed {
-          38.0
-        } else {
-          0.0
-        })
-        let transcript_height = (height - 115.0 - extra_height).max(36.0)
+        let transcript_height = terminal_float_transcript_height(model, height)
         let text = model.project.terminal_text
         if text == "" && model.project.terminal_state != TerminalRunning {
           children.push(
@@ -1276,18 +1265,20 @@ fn float_terminal_pane(
         }
         children.push(
           @views.column([
-            @views.text_field(
-              model.project.terminal_input,
-              on_input=fn(value) { ProjectTerminalInput(value) },
-              on_submit=Some(ProjectTerminalSend),
-              placeholder=tr(
-                model.lang,
-                "type a command, Enter sends",
-                "输入命令，Enter 发送",
+            terminal_input_field(
+              @views.text_field(
+                model.project.terminal_input,
+                on_input=fn(value) { ProjectTerminalInput(value) },
+                on_submit=Some(ProjectTerminalSend),
+                placeholder=tr(
+                  model.lang,
+                  "type a command, Enter sends",
+                  "输入命令，Enter 发送",
+                ),
+                style=ui_field_style(),
+                width~,
+                height=30.0,
               ),
-              style=ui_field_style(),
-              width~,
-              height=30.0,
             ).accessibility_label(
               tr(model.lang, "Terminal command", "终端命令"),
             ),

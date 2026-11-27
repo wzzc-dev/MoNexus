@@ -748,6 +748,17 @@ async fn runtime_terminal(
             _ => ()
           }
         }
+        @workspace.TerminalInput::Resize(rows, cols) => {
+          let resize_id = @contracts.new_id("ptyresize", @async.now())
+          match machine.pty_resize(
+            session_id~,
+            rows=rows.to_int(),
+            cols=cols.to_int(),
+            client_request_id=resize_id,
+          ) {
+            _ => ()
+          }
+        }
         @workspace.TerminalInput::Close => break
       }
     }

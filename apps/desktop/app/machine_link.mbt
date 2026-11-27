@@ -28,8 +28,9 @@ fn machine_notice(command : MachineCommand, detail : String) -> String {
     ProjectWriteFile(_, path, _) => "saved: " + path
     ProjectGitStatus(_) => "git status updated"
     ProjectGitDiff(_, _) => "diff updated"
-    ProjectOpenTerminal(_) => "terminal: " + detail
+    ProjectOpenTerminal(_, _, _) => "terminal: " + detail
     ProjectTerminalWrite(_, _) => "terminal input sent"
+    ProjectTerminalResize(_, _, _) => "terminal resized"
     ProjectTerminalRead(_, _) => "terminal output read"
     ProjectCloseTerminal(_) => "terminal closed"
     ProjectListWorktrees(_) => detail
@@ -487,13 +488,19 @@ async fn execute_machine_command(
       dispatch_project_status(client, workspace_id)
     ProjectGitDiff(workspace_id, path) =>
       dispatch_project_diff(client, workspace_id, path)
-    ProjectOpenTerminal(workspace_id) => {
+    ProjectOpenTerminal(workspace_id, rows, cols) => {
       let id = request_id("cmd")
       match
         client.call_json(
           id,
           @contracts.METHOD_TERMINAL_OPEN,
-          @contracts.terminal_open_params(id, workspace_id, "", 24, 80),
+          @contracts.terminal_open_params(
+            id,
+            workspace_id,
+            "",
+            rows.to_int(),
+            cols.to_int(),
+          ),
         ) {
         Ok(json) =>
           match @contracts.terminal_open_from_json(json) {
@@ -513,6 +520,37 @@ async fn execute_machine_command(
           }
         Err(message) =>
           dispatch(ProjectTerminalFailed("", "terminal.open: " + message))
+      }
+    }
+    ProjectTerminalResize(session_id, rows, cols) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_TERMINAL_RESIZE,
+          @contracts.terminal_resize_params(
+            id,
+            session_id,
+            rows.to_int(),
+            cols.to_int(),
+          ),
+        ) {
+        Ok(json) =>
+          match @contracts.terminal_resize_from_json(json) {
+            Some(_) => ()
+            None =>
+              dispatch(
+                ProjectTerminalFailed(
+                  session_id, "terminal.resize: malformed result",
+                ),
+              )
+          }
+        Err(message) =>
+          dispatch(
+            ProjectTerminalFailed(
+              session_id, "terminal.resize: " + message,
+            ),
+          )
       }
     }
     ProjectTerminalWrite(session_id, data) => {

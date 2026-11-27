@@ -434,6 +434,10 @@ pub(all) struct ProjectState {
   terminal_eof : Bool
   terminal_error : String
   terminal_read_in_flight : Bool
+  terminal_target_rows : Int32
+  terminal_target_cols : Int32
+  terminal_pty_rows : Int32
+  terminal_pty_cols : Int32
   terminal_history : Array[String]
   terminal_scroll_epoch : Int32
   worktree_branch : String
@@ -474,6 +478,10 @@ pub fn ProjectState::new() -> ProjectState {
     terminal_eof: false,
     terminal_error: "",
     terminal_read_in_flight: false,
+    terminal_target_rows: 0,
+    terminal_target_cols: 0,
+    terminal_pty_rows: 0,
+    terminal_pty_cols: 0,
     terminal_history: [],
     terminal_scroll_epoch: 0,
     worktree_branch: "",
@@ -1123,6 +1131,7 @@ pub(all) enum Msg {
   ProjectTerminalOutput(String, Int64, String, Bool)
   ProjectTerminalFailed(String, String)
   ProjectTerminalPoll
+  ProjectTerminalViewport(Int32, Int32)
   ProjectTerminalFocus
   ProjectTerminalBack
   ProjectTerminalReconnect
@@ -1249,8 +1258,9 @@ pub(all) enum MachineCommand {
   ProjectWriteFile(String, String, String)
   ProjectGitStatus(String)
   ProjectGitDiff(String, String)
-  ProjectOpenTerminal(String)
+  ProjectOpenTerminal(String, Int32, Int32)
   ProjectTerminalWrite(String, String)
+  ProjectTerminalResize(String, Int32, Int32)
   ProjectTerminalRead(String, Int64)
   ProjectCloseTerminal(String)
   ProjectListWorktrees(String)
@@ -4522,6 +4532,26 @@ pub fn update_full(
           } else {
             false
           },
+          terminal_target_rows: if same_workspace {
+            model.project.terminal_target_rows
+          } else {
+            0
+          },
+          terminal_target_cols: if same_workspace {
+            model.project.terminal_target_cols
+          } else {
+            0
+          },
+          terminal_pty_rows: if same_workspace {
+            model.project.terminal_pty_rows
+          } else {
+            0
+          },
+          terminal_pty_cols: if same_workspace {
+            model.project.terminal_pty_cols
+          } else {
+            0
+          },
           terminal_history: if same_workspace {
             model.project.terminal_history
           } else {
@@ -4781,10 +4811,19 @@ pub fn update_full(
         Some(record) => {
           let should_open = model.project.terminal_id == "" &&
             model.project.terminal_state == TerminalClosed
-          let commands : Array[MachineCommand] = if should_open {
-            [ProjectOpenTerminal(record.id)]
+          let (target_rows, target_cols) = terminal_target_size(model)
+          let resize = if should_open {
+            None
           } else {
-            none
+            terminal_resize_command(model, target_rows, target_cols)
+          }
+          let commands : Array[MachineCommand] = if should_open {
+            [ProjectOpenTerminal(record.id, target_rows, target_cols)]
+          } else {
+            match resize {
+              Some(command) => [command]
+              None => none
+            }
           }
           (
             {
@@ -4799,6 +4838,18 @@ pub fn update_full(
                   TerminalOpening
                 } else {
                   model.project.terminal_state
+                },
+                terminal_target_rows: target_rows,
+                terminal_target_cols: target_cols,
+                terminal_pty_rows: if should_open || resize is Some(_) {
+                  target_rows
+                } else {
+                  model.project.terminal_pty_rows
+                },
+                terminal_pty_cols: if should_open || resize is Some(_) {
+                  target_cols
+                } else {
+                  model.project.terminal_pty_cols
                 },
                 // Re-entering the focused view must not overlap a read that
                 // was already in flight when the user left the page.
@@ -4841,7 +4892,10 @@ pub fn update_full(
       }
       match model.project.workspace {
         Some(record) => {
-          commands.push(ProjectOpenTerminal(record.id))
+          let (target_rows, target_cols) = terminal_target_size(model)
+          commands.push(
+            ProjectOpenTerminal(record.id, target_rows, target_cols),
+          )
           (
             {
               ..model,
@@ -4857,6 +4911,10 @@ pub fn update_full(
                 terminal_eof: false,
                 terminal_error: "",
                 terminal_read_in_flight: false,
+                terminal_target_rows: target_rows,
+                terminal_target_cols: target_cols,
+                terminal_pty_rows: target_rows,
+                terminal_pty_cols: target_cols,
                 terminal_scroll_epoch: model.project.terminal_scroll_epoch + 1,
               },
             },
@@ -4911,6 +4969,10 @@ pub fn update_full(
             terminal_error: "",
             terminal_read_in_flight: false,
             terminal_state: TerminalClosed,
+            terminal_target_rows: 0,
+            terminal_target_cols: 0,
+            terminal_pty_rows: 0,
+            terminal_pty_cols: 0,
             terminal_scroll_epoch: model.project.terminal_scroll_epoch + 1,
           },
         },
@@ -4941,6 +5003,36 @@ pub fn update_full(
       } else {
         (model, none)
       }
+    ProjectTerminalViewport(rows, cols) =>
+      if !@contracts.terminal_size_is_valid(rows, cols) {
+        (model, none)
+      } else {
+        let resize = terminal_resize_command(model, rows, cols)
+        (
+          {
+            ..model,
+            project: {
+              ..model.project,
+              terminal_target_rows: rows,
+              terminal_target_cols: cols,
+              terminal_pty_rows: if resize is Some(_) {
+                rows
+              } else {
+                model.project.terminal_pty_rows
+              },
+              terminal_pty_cols: if resize is Some(_) {
+                cols
+              } else {
+                model.project.terminal_pty_cols
+              },
+            },
+          },
+          match resize {
+            Some(command) => [command]
+            None => none
+          },
+        )
+      }
     ProjectTerminalOpened(session_id, text, cursor, eof) =>
       if session_id == "" {
         (
@@ -4951,11 +5043,23 @@ pub fn update_full(
               terminal_state: TerminalFailed,
               terminal_error: "terminal.open: missing session_id",
               terminal_read_in_flight: false,
+              terminal_pty_rows: 0,
+              terminal_pty_cols: 0,
             },
           },
           none,
         )
       } else {
+        let target_rows = model.project.terminal_target_rows
+        let target_cols = model.project.terminal_target_cols
+        let target_valid = @contracts.terminal_size_is_valid(
+          target_rows,
+          target_cols,
+        )
+        let needs_resize = !eof &&
+          target_valid &&
+          (target_rows != model.project.terminal_pty_rows ||
+            target_cols != model.project.terminal_pty_cols)
         (
           {
             ..model,
@@ -4972,11 +5076,25 @@ pub fn update_full(
               terminal_eof: eof,
               terminal_error: "",
               terminal_read_in_flight: false,
+              terminal_pty_rows: if needs_resize {
+                target_rows
+              } else {
+                model.project.terminal_pty_rows
+              },
+              terminal_pty_cols: if needs_resize {
+                target_cols
+              } else {
+                model.project.terminal_pty_cols
+              },
               terminal_scroll_epoch: model.project.terminal_scroll_epoch + 1,
               busy: false,
             },
           },
-          none,
+          if needs_resize {
+            [ProjectTerminalResize(session_id, target_rows, target_cols)]
+          } else {
+            none
+          },
         )
       }
     ProjectTerminalOutput(session_id, cursor, text, eof) =>
@@ -5031,6 +5149,8 @@ pub fn update_full(
               terminal_state: TerminalFailed,
               terminal_error: error,
               terminal_read_in_flight: false,
+              terminal_pty_rows: 0,
+              terminal_pty_cols: 0,
             },
           },
           none,
@@ -6310,11 +6430,28 @@ pub fn update_full(
     FloatSelectTab(tab_id) =>
       match float_tab_by_id(model.float, tab_id) {
         Some(tab) => {
-          let project = if tab.kind == FloatTerminal &&
-            model.project.workspace is Some(_) {
+          let terminal_tab = tab.kind == FloatTerminal &&
+            model.project.workspace is Some(_)
+          let (target_rows, target_cols) = if terminal_tab {
+            terminal_float_pty_size(model)
+          } else {
+            (
+              model.project.terminal_target_rows,
+              model.project.terminal_target_cols,
+            )
+          }
+          let project = if terminal_tab {
             { ..model.project, terminal_focus: true }
           } else {
             model.project
+          }
+          let commands : Array[MachineCommand] = if terminal_tab {
+            match terminal_resize_command(model, target_rows, target_cols) {
+              Some(command) => [command]
+              None => none
+            }
+          } else {
+            none
           }
           (
             {
@@ -6324,9 +6461,23 @@ pub fn update_full(
                 active_tab: tab_id,
                 menu_open: false,
               },
-              project,
+              project: {
+                ..project,
+                terminal_target_rows: target_rows,
+                terminal_target_cols: target_cols,
+                terminal_pty_rows: if commands.is_empty() {
+                  project.terminal_pty_rows
+                } else {
+                  target_rows
+                },
+                terminal_pty_cols: if commands.is_empty() {
+                  project.terminal_pty_cols
+                } else {
+                  target_cols
+                },
+              },
             },
-            none,
+            commands,
           )
         }
         None => (model, none)
@@ -6359,8 +6510,16 @@ pub fn update_full(
         Some(record) => {
           let should_open = model.project.terminal_id == "" &&
             model.project.terminal_state == TerminalClosed
+          let (target_rows, target_cols) = terminal_float_pty_size(model)
           if should_open {
-            commands.push(ProjectOpenTerminal(record.id))
+            commands.push(
+              ProjectOpenTerminal(record.id, target_rows, target_cols),
+            )
+          } else {
+            match terminal_resize_command(model, target_rows, target_cols) {
+              Some(command) => commands.push(command)
+              None => ()
+            }
           }
           {
             ..model.project,
@@ -6369,6 +6528,18 @@ pub fn update_full(
               TerminalOpening
             } else {
               model.project.terminal_state
+            },
+            terminal_target_rows: target_rows,
+            terminal_target_cols: target_cols,
+            terminal_pty_rows: if should_open || !commands.is_empty() {
+              target_rows
+            } else {
+              model.project.terminal_pty_rows
+            },
+            terminal_pty_cols: if should_open || !commands.is_empty() {
+              target_cols
+            } else {
+              model.project.terminal_pty_cols
             },
           }
         }
@@ -6566,14 +6737,73 @@ pub fn update_full(
               width,
               height,
             })
-            ({ ..model, float }, none)
+            let (target_rows, target_cols) = if float_terminal_visible(model) {
+              terminal_float_pty_size({
+                ..model,
+                float,
+              })
+            } else {
+              (
+                model.project.terminal_target_rows,
+                model.project.terminal_target_cols,
+              )
+            }
+            (
+              {
+                ..model,
+                float,
+                project: {
+                  ..model.project,
+                  terminal_target_rows: target_rows,
+                  terminal_target_cols: target_cols,
+                },
+              },
+              none,
+            )
           } else {
             (model, none)
           }
-        @core.DragGesturePhase::Ended | @core.DragGesturePhase::Cancelled => (
-          { ..model, float: { ..model.float, resizing: false } },
-          none,
-        )
+        @core.DragGesturePhase::Ended | @core.DragGesturePhase::Cancelled => {
+          let visible = float_terminal_visible(model)
+          let (target_rows, target_cols) = if visible {
+            terminal_float_pty_size(model)
+          } else {
+            (
+              model.project.terminal_target_rows,
+              model.project.terminal_target_cols,
+            )
+          }
+          let resize = if visible {
+            terminal_resize_command(model, target_rows, target_cols)
+          } else {
+            None
+          }
+          (
+            {
+              ..model,
+              float: { ..model.float, resizing: false },
+              project: {
+                ..model.project,
+                terminal_target_rows: target_rows,
+                terminal_target_cols: target_cols,
+                terminal_pty_rows: if resize is Some(_) {
+                  target_rows
+                } else {
+                  model.project.terminal_pty_rows
+                },
+                terminal_pty_cols: if resize is Some(_) {
+                  target_cols
+                } else {
+                  model.project.terminal_pty_cols
+                },
+              },
+            },
+            match resize {
+              Some(command) => [command]
+              None => none
+            },
+          )
+        }
         _ => (model, none)
       }
     FloatOpenTerminal => {
@@ -6582,8 +6812,16 @@ pub fn update_full(
         Some(record) => {
           let should_open = model.project.terminal_id == "" &&
             model.project.terminal_state == TerminalClosed
+          let (target_rows, target_cols) = terminal_float_pty_size(model)
           if should_open {
-            commands.push(ProjectOpenTerminal(record.id))
+            commands.push(
+              ProjectOpenTerminal(record.id, target_rows, target_cols),
+            )
+          } else {
+            match terminal_resize_command(model, target_rows, target_cols) {
+              Some(command) => commands.push(command)
+              None => ()
+            }
           }
           {
             ..model.project,
@@ -6592,6 +6830,18 @@ pub fn update_full(
               TerminalOpening
             } else {
               model.project.terminal_state
+            },
+            terminal_target_rows: target_rows,
+            terminal_target_cols: target_cols,
+            terminal_pty_rows: if should_open || !commands.is_empty() {
+              target_rows
+            } else {
+              model.project.terminal_pty_rows
+            },
+            terminal_pty_cols: if should_open || !commands.is_empty() {
+              target_cols
+            } else {
+              model.project.terminal_pty_cols
             },
           }
         }
@@ -6618,7 +6868,10 @@ pub fn update_full(
       }
       match model.project.workspace {
         Some(record) => {
-          commands.push(ProjectOpenTerminal(record.id))
+          let (target_rows, target_cols) = terminal_float_pty_size(model)
+          commands.push(
+            ProjectOpenTerminal(record.id, target_rows, target_cols),
+          )
           (
             {
               ..model,
@@ -6632,6 +6885,10 @@ pub fn update_full(
                 terminal_eof: false,
                 terminal_error: "",
                 terminal_read_in_flight: false,
+                terminal_target_rows: target_rows,
+                terminal_target_cols: target_cols,
+                terminal_pty_rows: target_rows,
+                terminal_pty_cols: target_cols,
                 terminal_scroll_epoch: model.project.terminal_scroll_epoch + 1,
               },
             },

@@ -126,6 +126,78 @@ async test "flag-off trigger RPC answers unsupported and creates nothing" {
 }
 
 ///|
+async test "terminal.resize validates dimensions and queues a provider resize" {
+  let state = host_test_state("/tmp/monexus-host-terminal-resize-test", false)
+    catch {
+      error => fail(error.to_string())
+    }
+  @async.with_task_group(async fn(group) {
+    let input : @aqueue.Queue[@workspace.TerminalInput] = @aqueue.Queue(
+      kind=Unbounded,
+    )
+    let output : @aqueue.Queue[@workspace.TerminalEvent] = @aqueue.Queue(
+      kind=Unbounded,
+    )
+    let task = group.spawn(fn() { () })
+    let session : TerminalSession = {
+      id: "term_resize",
+      workspace_id: "wsp_resize",
+      input,
+      output,
+      transcript: Ref(""),
+      cursor: Ref(0),
+      eof: Ref(false),
+      task,
+    }
+    state.mutex.acquire()
+    state.terminals.set(session.id, session)
+    state.mutex.release()
+
+    let sink = host_test_sink()
+    let valid = @contracts.RpcRequest::new(
+      "req_resize",
+      @contracts.METHOD_TERMINAL_RESIZE,
+      @contracts.terminal_resize_params("cid_resize", "term_resize", 40, 120),
+    )
+    handle_terminal_resize(state, sink, valid, "cid_resize")
+    let response = sink.queue.get() catch { _ => fail("no resize response") }
+    assert_true(response.contains("\"rows\":40"))
+    assert_true(response.contains("\"cols\":120"))
+    match input.get() {
+      @workspace.TerminalInput::Resize(rows, cols) => {
+        assert_eq(rows, 40)
+        assert_eq(cols, 120)
+      }
+      _ => fail("expected TerminalInput::Resize")
+    }
+
+    let invalid_sink = host_test_sink()
+    let invalid = @contracts.RpcRequest::new(
+      "req_resize_bad",
+      @contracts.METHOD_TERMINAL_RESIZE,
+      @contracts.terminal_resize_params("cid_resize_bad", "term_resize", 0, 120),
+    )
+    handle_terminal_resize(state, invalid_sink, invalid, "cid_resize_bad")
+    let invalid_response = invalid_sink.queue.get() catch {
+      _ => fail("no invalid resize response")
+    }
+    assert_true(invalid_response.contains("\"invalid\""))
+
+    let missing_sink = host_test_sink()
+    let missing = @contracts.RpcRequest::new(
+      "req_resize_missing",
+      @contracts.METHOD_TERMINAL_RESIZE,
+      @contracts.terminal_resize_params("cid_missing", "term_missing", 24, 80),
+    )
+    handle_terminal_resize(state, missing_sink, missing, "cid_missing")
+    let missing_response = missing_sink.queue.get() catch {
+      _ => fail("no missing-session response")
+    }
+    assert_true(missing_response.contains("\"not_found\""))
+  })
+}
+
+///|
 async test "webhook secret file is 0600 inside a 0700 directory and returned once" {
   let dir = "/tmp/monexus-host-secret-test"
   let state = host_test_state(dir, true) catch {

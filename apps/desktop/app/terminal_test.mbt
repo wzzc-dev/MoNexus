@@ -42,7 +42,7 @@ test "the focused terminal draws its controls and workspace context" {
   assert_true(harness.has_text("$"))
   assert_true(
     harness.has_text(
-      "Enter sends · Ctrl+Shift+C or Stop interrupts · fixed PTY 24x80",
+      "Enter sends · Ctrl+C, Ctrl+Shift+C or Stop interrupts",
     ),
   )
   assert_true(harness.has_text("Send"))
