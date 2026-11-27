@@ -113,6 +113,53 @@ fn workspace_menu_items(
 }
 
 ///|
+fn project_catalog_menu_items(
+  model : Model,
+  select : (String) -> Msg,
+) -> Array[@views.MenuItem[Msg]] {
+  let items : Array[@views.MenuItem[Msg]] = []
+  for record in model.project.projects {
+    items.push(
+      @views.MenuItem::new(
+        id=record.id,
+        label=project_name(record),
+        message=select(record.id),
+      ),
+    )
+  }
+  items
+}
+
+///|
+/// Project Chat filter. Only Bots with active membership evidence in the
+/// selected Project are offered, so filtering never invents membership.
+fn project_chat_bot_menu_items(
+  model : Model,
+  select : (String) -> Msg,
+) -> Array[@views.MenuItem[Msg]] {
+  let items : Array[@views.MenuItem[Msg]] = [
+    @views.MenuItem::new(
+      id="",
+      label=tr(model.lang, "All Bots", "全部 Bot"),
+      message=select(""),
+    ),
+  ]
+  let project_id = model.project.selected_project
+  if project_id != "" {
+    for record in bots_in_project(model, project_id) {
+      items.push(
+        @views.MenuItem::new(
+          id=record.id,
+          label=bot_name(record),
+          message=select(record.id),
+        ),
+      )
+    }
+  }
+  items
+}
+
+///|
 fn agent_menu_items(model : Model) -> Array[@views.MenuItem[Msg]] {
   let default_label = tr(model.lang, "Default agent", "默认智能体")
   let items : Array[@views.MenuItem[Msg]] = [
@@ -205,6 +252,16 @@ fn agent_name_for(model : Model, agent_id : String) -> String {
     }
   }
   tr(model.lang, "Custom agent", "自定义智能体")
+}
+
+///|
+fn agent_by_id_for_label(model : Model, agent_id : String) -> String? {
+  for item in agent_menu_items(model) {
+    if item.id == agent_id {
+      return Some(item.label)
+    }
+  }
+  None
 }
 
 ///|
@@ -1507,6 +1564,169 @@ fn project_detail(model : Model) -> Array[@moui.View[Msg]] {
 }
 
 ///|
+fn project_chat_row(
+  model : Model,
+  record : ChatProjection,
+) -> @moui.View[Msg] {
+  let chat = chat_identity_for(model, record)
+  let bot_name_label = bot_name_for_chat(model, chat)
+  let agent_label = if chat.agent_name == "" {
+    tr(model.lang, "No Agent bound", "未绑定 Agent")
+  } else {
+    chat.agent_name +
+    (if chat.agent_state == "" { "" } else { " · " + chat.agent_state })
+  }
+  container(
+    padding_edges(
+      @views.row([
+        @views.column([
+          @views.text(
+            chat.title,
+            width=360.0,
+            align=@core.TextAlign::TextStart,
+            wrap=false,
+          ).font(ui_font(11.5, 560)).foreground(ui_text_color()),
+          @views.text(
+            bot_name_label,
+            width=360.0,
+            align=@core.TextAlign::TextStart,
+            wrap=false,
+          ).font(ui_font(9.0, 400)).foreground(ui_dim()),
+        ], spacing=2.0, align=@style.CrossAlign::Start).frame(width=360.0),
+        @views.text(
+          agent_label,
+          width=250.0,
+          align=@core.TextAlign::TextStart,
+          wrap=false,
+        ).font(ui_font(9.0, 400)).foreground(ui_muted()),
+        ui_tag(if chat.status == "" {
+          tr(model.lang, "idle", "空闲")
+        } else {
+          chat.status
+        }),
+        @views.spacer(weight=1.0),
+        @views.text(
+          compact_time(chat.updated_at),
+          align=@core.TextAlign::TextEnd,
+        ).font(mono_font(8.5, 400)).foreground(ui_dim()),
+        ui_ghost_small(
+          tr(model.lang, "Open", "打开"),
+          SelectChat(chat.id),
+        ),
+      ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
+      top=8.0,
+      right=12.0,
+      bottom=8.0,
+      left=12.0,
+    ),
+    width=992.0,
+    background=if chat.id == model.selected_chat {
+      ui_selected()
+    } else {
+      clear_color()
+    },
+    corner_radius=3.0,
+    padding=0.0,
+  )
+}
+
+///|
+/// Project context inside Manage/Projects: choose a Project by name, filter its
+/// Chats by Bot membership, and open a Chat without typing a cht_ id.
+fn project_chat_directory(model : Model) -> @moui.View[Msg] {
+  let project = model.project
+  let project_id = project.selected_project
+  let chats = if project_id == "" {
+    []
+  } else {
+    project_chats_filtered(model, project_id, project.chat_bot_filter)
+  }
+  let rows : Array[@moui.View[Msg]] = [
+    @views.row([
+      ui_section(tr(model.lang, "Project", "项目")),
+      @views.spacer(weight=1.0),
+      ui_select_field(
+        tr(model.lang, "Project", "项目"),
+        project_catalog_menu_items(model, fn(value) { SelectProject(value) }),
+        project_id,
+        project.project_picker_open,
+        ProjectCatalogPicker(!project.project_picker_open),
+        if project.projects_loaded {
+          tr(model.lang, "Select a Project", "选择项目")
+        } else {
+          tr(model.lang, "Loading projects...", "正在加载项目...")
+        },
+        300.0,
+      ),
+      if project_id == "" {
+        @views.empty()
+      } else {
+        ui_primary(tr(model.lang, "New Chat", "新对话"), NewChat)
+      },
+    ], spacing=10.0, align=@style.CrossAlign::End).frame(width=960.0),
+    @views.row([
+      @views.text(
+        tr(model.lang, "Chats in this Project", "此项目的对话"),
+        align=@core.TextAlign::TextStart,
+      ).font(ui_font(12.0, 620)).foreground(ui_text_color()),
+      ui_tag(project_filter_label(model, project_id)),
+      @views.spacer(weight=1.0),
+      ui_select_field(
+        tr(model.lang, "Bot", "Bot"),
+        project_chat_bot_menu_items(model, fn(value) {
+          ProjectChatBotFilter(value)
+        }),
+        project.chat_bot_filter,
+        project.chat_bot_picker_open,
+        ProjectChatBotPicker(!project.chat_bot_picker_open),
+        tr(model.lang, "All Bots", "全部 Bot"),
+        210.0,
+      ),
+    ], spacing=10.0, align=@style.CrossAlign::End).frame(width=960.0),
+  ]
+  if project_id == "" {
+    rows.push(
+      ui_muted_wrapped(
+        tr(
+          model.lang,
+          "Choose a Project above to see its Chats. No-project Chats stay in the Bot view and never enter this Project list.",
+          "请在上方选择项目以查看其对话。无项目对话只保留在 Bot 视图，不会进入此项目列表。",
+        ),
+        960.0,
+      ),
+    )
+  } else if !model.chats_loaded {
+    rows.push(
+      ui_muted_wrapped(
+        tr(
+          model.lang,
+          "Loading Chats from the host...",
+          "正在从主机加载对话...",
+        ),
+        960.0,
+      ),
+    )
+  } else if chats.is_empty() {
+    rows.push(
+      ui_muted_wrapped(
+        tr(
+          model.lang,
+          "No Chat matches this Project and Bot filter yet.",
+          "此项目和 Bot 筛选下尚无对话。",
+        ),
+        960.0,
+      ),
+    )
+  } else {
+    for record in chats {
+      rows.push(project_chat_row(model, record))
+      rows.push(ui_divider_soft())
+    }
+  }
+  ui_card(rows, width=992.0)
+}
+
+///|
 fn projects_page(model : Model) -> @moui.View[Msg] {
   let project = model.project
   let open_form : Array[@moui.View[Msg]] = [
@@ -1600,6 +1820,7 @@ fn projects_page(model : Model) -> @moui.View[Msg] {
     }
   }
   column([
+    project_chat_directory(model),
     ui_card(open_form, width=992.0),
     column(workspaces, spacing=10.0),
     column(project_detail(model), spacing=16.0),
@@ -2017,15 +2238,25 @@ fn inbox_decision_card(
 ) -> @moui.View[Msg] {
   let bucket = inbox_bucket_of(decision)
   let actionable = bucket == @contracts.INBOX_NEEDS_YOU
+  let chat = chat_for_session(model, decision.session_id)
+  let chat_title = match chat {
+    Some(record) => record.title
+    None =>
+      if decision.session_id == "" {
+        tr(model.lang, "(no Chat)", "（无对话）")
+      } else {
+        tr(model.lang, "Chat not loaded", "对话未加载")
+      }
+  }
+  let agent_name = match agent_by_id_for_label(model, decision.agent_id) {
+    Some(name) => name
+    None => tr(model.lang, "Agent", "智能体")
+  }
   let meta =
-    tr(model.lang, "session ", "会话 ") +
-    (if decision.session_id == "" {
-      tr(model.lang, "(none)", "（无）")
-    } else {
-      decision.session_id
-    }) +
+    tr(model.lang, "Chat · ", "对话 · ") +
+    chat_title +
     tr(model.lang, " · agent ", " · 智能体 ") +
-    decision.agent_id +
+    agent_name +
     (if decision.run_id == "" {
       ""
     } else {
@@ -2059,6 +2290,16 @@ fn inbox_decision_card(
     body.push(ui_code_block(decision.detail, 964.0))
   }
   let answers : Array[@moui.View[Msg]] = []
+  match chat {
+    Some(record) =>
+      answers.push(
+        ui_ghost_small(
+          tr(model.lang, "Open Chat", "打开对话"),
+          SelectChat(record.id),
+        ),
+      )
+    None => ()
+  }
   if actionable {
     for option in decision.options {
       answers.push(
@@ -2844,6 +3085,25 @@ fn search_page(model : Model) -> @moui.View[Msg] {
     )
   } else {
     for hit in state.hits {
+      let chat_id = match chat_by_id(model.chats, hit.ref_id) {
+        Some(record) => Some(record.id)
+        None =>
+          match chat_for_session(model, hit.ref_id) {
+            Some(record) => Some(record.id)
+            None => None
+          }
+      }
+      let actions : Array[@moui.View[Msg]] = []
+      match chat_id {
+        Some(id) =>
+          actions.push(
+            ui_ghost_small(
+              tr(model.lang, "Open Chat", "打开对话"),
+              SelectChat(id),
+            ),
+          )
+        None => ()
+      }
       results.push(
         ui_card([
           row([
@@ -2851,7 +3111,11 @@ fn search_page(model : Model) -> @moui.View[Msg] {
             text(hit.title, width=700.0, align=@core.TextAlign::TextStart, wrap=true)
             .font(ui_font(14.0, 600)).foreground(ui_text_color()),
             spacer(weight=1.0),
-            ui_mono(hit.ref_id, 10.5),
+            if actions.is_empty() {
+              ui_meta(tr(model.lang, "no Chat link", "无对话链接"))
+            } else {
+              row(actions, spacing=8.0, align=@style.CrossAlign::Center)
+            },
           ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=960.0),
           ui_code_block(hit.snippet, 960.0),
           ui_meta(hit.ts),

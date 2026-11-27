@@ -97,16 +97,14 @@ test "the Settings language control switches the whole shell" {
   assert_true(harness.has_text("语言"))
   assert_true(harness.has_text("令牌：未知（主机未连接）"))
   harness.tap_text("新对话")
-  assert_true(
-    harness.has_text("尚无回复。回复会在这里以连续正文显示。"),
-  )
+  assert_true(harness.has_text("创建对话"))
+  assert_true(harness.has_text("对话标题"))
   harness.tap_text("设置")
   harness.tap_text("English")
   assert_true(harness.has_text("Connection"))
   harness.tap_text("New Chat")
-  assert_true(
-    harness.has_text("No reply yet. Replies appear here as continuous text."),
-  )
+  assert_true(harness.has_text("Create Chat"))
+  assert_true(harness.has_text("Chat title"))
 }
 
 ///|

@@ -40,6 +40,20 @@ fn machine_notice(command : MachineCommand, detail : String) -> String {
     AgentStop(_) => "session stopped"
     AgentResume(_) => "session resumed"
     AgentRead(session_id) => "transcript loaded: " + session_id
+    BotList => "bots loaded"
+    ChatList(_, _) => "chats loaded"
+    ChatGet(_) => "chat loaded"
+    ChatMessages(_, _, _) => "chat messages loaded"
+    ChatRead(_, _) => "chat read"
+    ChatCreate(_, title, _, _, _, _) => "chat created: " + title
+    ChatAgentSessionStart(_, _, _) => "chat agent session started"
+    ChatSend(_, _) => "chat message sent"
+    ChatStop(_, _) => "chat stopped"
+    BotAgentList(_) => "bot agents loaded"
+    BotAgentCreate(_, _, name, _, _, _, _) => "agent created: " + name
+    BotAgentSuspend(_, _) => "agent suspended"
+    BotAgentRetire(_, _) => "agent retired"
+    ProjectCatalog => "projects loaded"
     CopyText(_, _) => "clipboard updated"
     AgentList => detail
     DecisionList(_) => detail
@@ -733,6 +747,371 @@ async fn execute_machine_command(
             None => dispatch(AgentError("agent.read: malformed result"))
           }
         Err(message) => dispatch(AgentError("agent.read: " + message))
+      }
+    }
+    BotList => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_BOT_LIST,
+          @contracts.bot_list_params(id),
+        ) {
+        Ok(json) =>
+          match @contracts.bots_from_result(json) {
+            Ok(records) => dispatch(BotsLoaded(records))
+            Err(message) => dispatch(ChatError("", "bot.list: " + message))
+          }
+        Err(message) => dispatch(ChatError("", "bot.list: " + message))
+      }
+    }
+    ChatList(project_id, bot_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_CHAT_LIST,
+          @contracts.chat_list_params(id, project_id, bot_id),
+        ) {
+        Ok(json) =>
+          match @contracts.chats_from_result(json) {
+            Ok(records) => dispatch(ChatsLoaded(records))
+            Err(message) => dispatch(ChatError("", "chat.list: " + message))
+          }
+        Err(message) => dispatch(ChatError("", "chat.list: " + message))
+      }
+    }
+    ChatGet(chat_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_CHAT_GET,
+          @contracts.chat_get_params(id, chat_id),
+        ) {
+        Ok(json) =>
+          match @contracts.chat_from_result(json) {
+            Ok(detail) => dispatch(ChatOpened(detail))
+            Err(message) =>
+              dispatch(ChatError(chat_id, "chat.get: " + message))
+          }
+        Err(message) =>
+          dispatch(ChatError(chat_id, "chat.get: " + message))
+      }
+    }
+    ChatMessages(chat_id, after, limit) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_CHAT_MESSAGES,
+          @contracts.chat_messages_params(
+            id,
+            chat_id,
+            after=after,
+            limit=limit,
+          ),
+        ) {
+        Ok(json) =>
+          match @contracts.chat_messages_from_result(json) {
+            Ok(records) =>
+              dispatch(
+                ChatMessagesLoaded(
+                  chat_id,
+                  records,
+                  last_chat_message_id(records),
+                  records.length() >= limit.to_int(),
+                ),
+              )
+            Err(message) =>
+              dispatch(ChatError(chat_id, "chat.messages: " + message))
+          }
+        Err(message) =>
+          dispatch(ChatError(chat_id, "chat.messages: " + message))
+      }
+    }
+    ChatRead(chat_id, cursor) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_CHAT_READ,
+          @contracts.chat_read_params(id, chat_id, cursor),
+        ) {
+        Ok(json) =>
+          match @contracts.chat_read_result_from_json(json) {
+            Some(read) => dispatch(ChatReadLoaded(chat_id, read))
+            None => dispatch(ChatError(chat_id, "chat.read: malformed result"))
+          }
+        Err(message) => dispatch(ChatError(chat_id, "chat.read: " + message))
+      }
+    }
+    ChatCreate(
+      bot_id,
+      title,
+      project_id,
+      agent_id,
+      workspace_id,
+      org_id,
+    ) => {
+      let now_ms = @async.now()
+      let now = @contracts.format_rfc3339(now_ms)
+      let chat = @contracts.ChatRecord::new(
+        id=@contracts.new_chat_id(now_ms),
+        org_id~,
+        title~,
+        created_at=now,
+        project_id~,
+      )
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_CHAT_CREATE,
+          @contracts.chat_create_params(id, chat, bot_id),
+        ) {
+        Ok(json) =>
+          match @contracts.chat_from_result(json) {
+            Ok(detail) => {
+              dispatch(ChatOpened(detail))
+              if agent_id != "" && workspace_id != "" {
+                let start_id = request_id("cmd")
+                match
+                  client.call_json(
+                    start_id,
+                    @contracts.METHOD_CHAT_AGENT_SESSION_START,
+                    @contracts.chat_agent_session_start_params(
+                      start_id,
+                      detail.chat.id,
+                      agent_id,
+                      workspace_id,
+                      "",
+                    ),
+                  ) {
+                  Ok(start_json) =>
+                    match @contracts.chat_agent_session_from_result(start_json) {
+                      Ok(session) => dispatch(ChatAgentSessionStarted(session))
+                      Err(message) =>
+                        dispatch(
+                          ChatError(
+                            detail.chat.id,
+                            "chat.agent_session.start: " + message,
+                          ),
+                        )
+                    }
+                  Err(message) =>
+                    dispatch(
+                      ChatError(
+                        detail.chat.id,
+                        "chat.agent_session.start: " + message,
+                      ),
+                    )
+                }
+              }
+            }
+            Err(message) => dispatch(ChatError("", "chat.create: " + message))
+          }
+        Err(message) => dispatch(ChatError("", "chat.create: " + message))
+      }
+    }
+    ChatAgentSessionStart(chat_id, agent_id, workspace_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_CHAT_AGENT_SESSION_START,
+          @contracts.chat_agent_session_start_params(
+            id,
+            chat_id,
+            agent_id,
+            workspace_id,
+            "",
+          ),
+        ) {
+        Ok(json) =>
+          match @contracts.chat_agent_session_from_result(json) {
+            Ok(session) => dispatch(ChatAgentSessionStarted(session))
+            Err(message) =>
+              dispatch(
+                ChatError(chat_id, "chat.agent_session.start: " + message),
+              )
+          }
+        Err(message) =>
+          dispatch(ChatError(chat_id, "chat.agent_session.start: " + message))
+      }
+    }
+    ChatSend(chat_id, text) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_CHAT_SEND,
+          @contracts.chat_send_params(id, chat_id, text),
+        ) {
+        Ok(json) =>
+          match @contracts.chat_send_result_from_json(json) {
+            Some(result) =>
+              dispatch(ChatSent(result.message, result.session))
+            None => dispatch(ChatError(chat_id, "chat.send: malformed result"))
+          }
+        Err(message) => dispatch(ChatError(chat_id, "chat.send: " + message))
+      }
+    }
+    ChatStop(chat_id, session_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_CHAT_STOP,
+          @contracts.chat_stop_params(id, chat_id, session_id=session_id),
+        ) {
+        Ok(json) =>
+          match @contracts.chat_stop_result_from_json(json) {
+            Some(result) =>
+              dispatch(ChatStopped(result.session, result.stopped))
+            None => dispatch(ChatError(chat_id, "chat.stop: malformed result"))
+          }
+        Err(message) => dispatch(ChatError(chat_id, "chat.stop: " + message))
+      }
+    }
+    BotAgentList(bot_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_BOT_AGENT_LIST,
+          @contracts.bot_agent_list_params(id, bot_id),
+        ) {
+        Ok(json) =>
+          match @contracts.agents_from_result(json) {
+            Ok(records) => dispatch(BotAgentsLoaded(bot_id, records))
+            Err(message) =>
+              dispatch(ChatError("", "bot.agent.list: " + message))
+          }
+        Err(message) => dispatch(ChatError("", "bot.agent.list: " + message))
+      }
+    }
+    BotAgentCreate(
+      bot_id,
+      org_id,
+      name,
+      software,
+      launch_kind,
+      args,
+      command,
+    ) => {
+      let now_ms = @async.now()
+      let binding = @contracts.RuntimeBinding::new(
+        software_id=software,
+        adapter_id="acp",
+        launch_kind~,
+        command~,
+        args~,
+        model_profile="",
+        hash="",
+      )
+      let binding = {
+        ..binding,
+        hash: @contracts.bots_canonical_hash(binding.to_json()),
+      }
+      let agent = @contracts.AgentRecord::new(
+        id=@contracts.new_agent_id(now_ms),
+        org_id~,
+        bot_id~,
+        name~,
+        runtime_binding=binding,
+        created_at=@contracts.format_rfc3339(now_ms),
+        state=@contracts.AGENT_LIFECYCLE_PROVISIONING,
+      )
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_BOT_AGENT_CREATE,
+          @contracts.bot_agent_create_params(id, bot_id, agent),
+        ) {
+        Ok(json) =>
+          match @contracts.agent_from_result(json) {
+            Ok(record) => {
+              dispatch(BotAgentMutated(record))
+              dispatch(ChatNotice("Agent created: " + record.name))
+            }
+            Err(message) =>
+              dispatch(ChatError("", "bot.agent.create: " + message))
+          }
+        Err(message) =>
+          dispatch(ChatError("", "bot.agent.create: " + message))
+      }
+    }
+    BotAgentSuspend(agent_id, reason) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_BOT_AGENT_SUSPEND,
+          @contracts.bot_agent_suspend_params(id, agent_id, reason),
+        ) {
+        Ok(json) =>
+          match @contracts.agent_from_result(json) {
+            Ok(record) => dispatch(BotAgentMutated(record))
+            Err(message) =>
+              dispatch(ChatError("", "bot.agent.suspend: " + message))
+          }
+        Err(message) =>
+          dispatch(ChatError("", "bot.agent.suspend: " + message))
+      }
+    }
+    BotAgentRetire(agent_id, reason) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_BOT_AGENT_RETIRE,
+          @contracts.bot_agent_retire_params(id, agent_id, reason),
+        ) {
+        Ok(json) =>
+          match @contracts.agent_from_result(json) {
+            Ok(record) => dispatch(BotAgentMutated(record))
+            Err(message) =>
+              dispatch(ChatError("", "bot.agent.retire: " + message))
+          }
+        Err(message) =>
+          dispatch(ChatError("", "bot.agent.retire: " + message))
+      }
+    }
+    ProjectCatalog => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_PROJECT_LIST,
+          rpc_params(id, Map([])),
+        ) {
+        Ok(json) => {
+          let object = match @contracts.as_object(json) {
+            Some(value) => value
+            None => {
+              dispatch(ChatError("", "project.list: malformed result"))
+              return
+            }
+          }
+          let items = match object.get("projects") {
+            Some(@json.Json::Array(values)) => values
+            _ => {
+              dispatch(ChatError("", "project.list: result has no projects"))
+              return
+            }
+          }
+          let records : Array[@contracts.ProjectRecord] = []
+          for item in items {
+            match @contracts.project_from_json(item) {
+              Some(record) => records.push(record)
+              None => ()
+            }
+          }
+          dispatch(ProjectCatalogLoaded(records))
+        }
+        Err(message) => dispatch(ChatError("", "project.list: " + message))
       }
     }
     AgentList => {

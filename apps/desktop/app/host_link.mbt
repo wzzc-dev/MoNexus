@@ -91,6 +91,12 @@ pub async fn host_link_loop(state_dir : String) -> Unit {
     // The Projects page lists every open workspace, not just the one this
     // window last selected; load it on every (re)connect.
     enqueue_machine_command(ProjectList)
+    // The Chat-first shell reads its identities and threads from the P0.3
+    // projections, so a reconnect refreshes both lists and the Project names
+    // the filters use.
+    enqueue_machine_command(BotList)
+    enqueue_machine_command(ChatList("", ""))
+    enqueue_machine_command(ProjectCatalog)
     // Tasks board and Activity replay after a reconnect; EventsLoaded dedupes
     // on seq so a stale cursor is safe.
     enqueue_machine_command(TaskRefresh(0L))
