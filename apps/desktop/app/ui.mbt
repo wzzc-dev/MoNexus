@@ -443,6 +443,59 @@ fn ui_text_area_field(
 }
 
 ///|
+/// Human-name selector backed by host projections. The selected value is the
+/// stable id, but the visible label is always the projection's display name.
+fn ui_select_field(
+  label : String,
+  items : Array[@views.MenuItem[Msg]],
+  selected : String,
+  expanded : Bool,
+  on_toggle : Msg,
+  placeholder : String,
+  width : Double,
+) -> @moui.View[Msg] {
+  let state = @views.DropdownState::new(expanded~, selected~)
+  @views.dropdown(
+    label,
+    items,
+    state~,
+    on_toggle=on_toggle,
+    placeholder~,
+    theme=app_theme(),
+    width~,
+    max_height=180.0,
+  )
+}
+
+///|
+/// Explicit disclosure for raw-id fallback fields. The normal path stays on
+/// human names; operators who need an unprojected id can reveal it here.
+fn ui_advanced_control(lang : Lang, open : Bool, msg : Msg) -> @moui.View[Msg] {
+  ui_choice_segment(tr(lang, "Advanced", "高级"), open, msg)
+}
+
+///|
+/// Secondary id row: muted mono text plus a copy affordance. Ids are never the
+/// primary control in a form.
+fn ui_id_meta(lang : Lang, label : String, id : String) -> @moui.View[Msg] {
+  let shown = if id == "" {
+    tr(lang, "(local / default)", "（本地 / 默认）")
+  } else {
+    id
+  }
+  let children : Array[@moui.View[Msg]] = [
+    ui_field_label(label),
+    ui_mono_wrapped(shown, 11.0, 520.0, ui_dim()),
+  ]
+  if id != "" {
+    children.push(
+      ui_ghost_small(tr(lang, "Copy", "复制"), CopyId(label, id)),
+    )
+  }
+  @views.row(children, spacing=8.0, align=@style.CrossAlign::Center)
+}
+
+///|
 /// One segment of a two-way Settings control. The active option is
 /// accent-tinted; the other option is a quiet outline.
 fn ui_choice_segment(
