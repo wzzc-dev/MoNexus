@@ -413,7 +413,7 @@ scripts/recovery_smoke.sh   # M6 recovery matrix, fake ssh faults
 `scripts/native_packages.sh`, the loopback-sshd smokes (`machine`,
 `workspace`, `task`, `agent_ssh`), the headless `agent_smoke.sh`, and
 `scripts/acceptance.sh` — all under throwaway `HOME`/state dirs, with no real
-remote or credential. On `macos-14` (Apple Silicon), **`build-test-macos`**
+remote or credential. On `macos-15` (Apple Silicon), **`build-test-macos`**
 runs the same platform-scoped build/test, `scripts/package.sh`,
 `scripts/host_smoke.sh` and the installed launcher's headless
 start/status/stop check. Require both checks for merges to `main`.

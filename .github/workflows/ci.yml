@@ -95,7 +95,8 @@ jobs:
 
   test-macos:
     name: build-test-macos
-    runs-on: macos-14
+    # GitHub retired the macOS 14 hosted-runner image on 2026-11-02.
+    runs-on: macos-15
     timeout-minutes: 90
     steps:
       - name: Checkout
