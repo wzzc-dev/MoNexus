@@ -20,8 +20,11 @@ need Node):
 ```bash
 export PATH="$HOME/.nvm/versions/node/v26.13.0/bin:$HOME/.moon/bin:$PATH"
 node --version
-moon build --target native --release
+moon build --target native --release $(bash scripts/native_packages.sh)
 ```
+
+Build through `scripts/native_packages.sh`; a root-wide build also compiles
+the other platform's desktop entry and fails on Linux/macOS respectively.
 
 If the skia prebuild download stalls, retry on a working network; the
 prebuild cache lives under `.mooncakes/wzzc-dev/moui_skia/.skia-cache`. A
@@ -40,7 +43,7 @@ both, then re-run. `--skip-build` does not skip this check.
 **Release products not found at fixed paths.** Run the full build first:
 
 ```bash
-moon build --target native --release
+moon build --target native --release $(bash scripts/native_packages.sh)
 ls _build/native/release/build/monexus/host/host.exe
 ls _build/native/release/build/monexus/desktop/linux_skia/linux_skia.exe  # Linux
 ls _build/native/release/build/monexus/desktop/macos_skia/macos_skia.exe  # macOS

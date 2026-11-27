@@ -66,11 +66,18 @@ jobs:
           # Non-root sshd still needs the privilege-separation directory.
           sudo mkdir -p /run/sshd
 
+      # A root-wide native build also compiles macos_skia's AppKit/Foundation
+      # stubs on Linux, which fails before tests run.
       - name: Build
-        run: moon build --target native
+        run: |
+          packages="$(bash scripts/native_packages.sh)"
+          moon build --target native $packages
 
+      # Keep tests to the same host packages; macos_skia is not buildable here.
       - name: Test
-        run: moon test --target native
+        run: |
+          packages="$(bash scripts/native_packages.sh)"
+          moon test --target native $packages
 
       - name: Smoke
         run: |
@@ -124,11 +131,18 @@ jobs:
           brew install -q tmux openssl@3
           echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
 
+      # A root-wide native build also compiles linux_skia and its Linux-only
+      # dependencies on macOS.
       - name: Build
-        run: moon build --target native
+        run: |
+          packages="$(bash scripts/native_packages.sh)"
+          moon build --target native $packages
 
+      # Keep tests to the same host packages; linux_skia is not buildable here.
       - name: Test
-        run: moon test --target native
+        run: |
+          packages="$(bash scripts/native_packages.sh)"
+          moon test --target native $packages
 
       - name: Package
         run: bash scripts/package.sh
