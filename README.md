@@ -96,10 +96,15 @@ Prerequisites:
 
 ```bash
 export PATH="$HOME/.moon/bin:$HOME/.nvm/versions/node/v26.13.0/bin:$PATH"
-moon build --target native --release
-moon test  --target native
+moon build --target native --release $(bash scripts/native_packages.sh)
+moon test  --target native $(bash scripts/native_packages.sh)
 scripts/package.sh            # tarball + checksum in dist/
 ```
+
+`scripts/native_packages.sh` prints the workspace packages for the current
+host OS. Build/test through it rather than root-wide: a root-wide native build
+also compiles the other platform's desktop entry, whose AppKit/Foundation or
+Linux-only dependencies cannot be built on this host.
 
 `scripts/package.sh` verifies that the repo `VERSION` file and
 `packages/contracts/version.mbt` agree (`0.1.0`), builds
@@ -404,14 +409,14 @@ scripts/recovery_smoke.sh   # M6 recovery matrix, fake ssh faults
 
 `.github/workflows/ci.yml` (workflow **CI**) runs on pull requests, pushes to
 `main` and manual dispatch. On `ubuntu-latest`, **`build-test-acceptance`**
-(timeout 60 minutes) runs `moon build --target native`, `moon test --target
-native`, the loopback-sshd smokes (`machine`, `workspace`, `task`,
-`agent_ssh`), the headless `agent_smoke.sh`, and `scripts/acceptance.sh` —
-all under throwaway `HOME`/state dirs, with no real remote or credential. On
-`macos-14` (Apple Silicon), **`build-test-macos`** runs the native build, the
-full native test suite, `scripts/package.sh`, `scripts/host_smoke.sh` and the
-installed launcher's headless start/status/stop check. Require both checks
-for merges to `main`.
+(timeout 60 minutes) runs the platform-scoped `moon build`/`moon test` via
+`scripts/native_packages.sh`, the loopback-sshd smokes (`machine`,
+`workspace`, `task`, `agent_ssh`), the headless `agent_smoke.sh`, and
+`scripts/acceptance.sh` — all under throwaway `HOME`/state dirs, with no real
+remote or credential. On `macos-14` (Apple Silicon), **`build-test-macos`**
+runs the same platform-scoped build/test, `scripts/package.sh`,
+`scripts/host_smoke.sh` and the installed launcher's headless
+start/status/stop check. Require both checks for merges to `main`.
 
 ## Layout
 

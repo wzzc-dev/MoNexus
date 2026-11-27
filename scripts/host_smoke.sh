@@ -28,7 +28,10 @@ fail() {
 cd "$ROOT"
 export PATH="$HOME/.moon/bin:${PATH}"
 echo "[1/6] build host"
-moon build --target native >/dev/null
+# Scope this build to the host OS; a root-wide build also compiles the other
+# platform's desktop entry and fails on Linux/macOS respectively.
+packages="$(bash "$ROOT/scripts/native_packages.sh")" || exit 1
+moon build --target native $packages >/dev/null
 
 BIN="$(find "$ROOT/_build/native" -type f -path '*monexus/host/host.exe' | head -n 1)"
 [[ -n "$BIN" && -x "$BIN" ]] || fail "host binary not found; run moon build --target native"

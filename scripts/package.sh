@@ -56,8 +56,9 @@ STAGE="$OUT/$NAME"
 TARBALL="$OUT/$NAME.tar.gz"
 
 if [[ "$SKIP_BUILD" == "0" ]]; then
-  echo "[1/5] moon build --target native --release"
-  (cd "$ROOT" && moon build --target native --release) || exit 1
+  packages="$(bash "$ROOT/scripts/native_packages.sh")" || exit 1
+  echo "[1/5] moon build --target native --release (platform-scoped)"
+  (cd "$ROOT" && moon build --target native --release $packages) || exit 1
 else
   echo "[1/5] reusing existing release build"
 fi
@@ -68,7 +69,7 @@ if [[ ! -x "$HOST_EXE" || ! -x "$DESKTOP_EXE" ]]; then
   echo "package.sh: release products not found at fixed paths:" >&2
   echo "  $HOST_EXE" >&2
   echo "  $DESKTOP_EXE" >&2
-  echo "run: moon build --target native --release" >&2
+  echo "run: moon build --target native --release \$(bash scripts/native_packages.sh)" >&2
   exit 1
 fi
 

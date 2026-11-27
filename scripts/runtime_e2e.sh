@@ -47,7 +47,8 @@ mkdir -p "$HOME" "$WORK/primary-home" "$WORK/node-home" "$WS" "$WORK/pki"
 HOST_BIN="$(find "$ROOT/_build/native" -type f -path '*/build/monexus/host/host.exe' 2>/dev/null | head -n 1)"
 if [ -z "$HOST_BIN" ]; then
   if command -v moon >/dev/null 2>&1; then
-    ( cd "$ROOT" && moon build --target native >/dev/null )
+    packages="$(bash "$ROOT/scripts/native_packages.sh")" || exit 1
+    ( cd "$ROOT" && moon build --target native $packages >/dev/null ) || exit 1
   fi
   HOST_BIN="$(find "$ROOT/_build/native" -type f -path '*/build/monexus/host/host.exe' 2>/dev/null | head -n 1)"
 fi
