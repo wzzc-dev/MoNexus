@@ -103,14 +103,14 @@ pub fn credential_fingerprint(secret : String) -> String {
 }
 
 ///|
+extern "c" fn credential_is_macos_raw() -> Int32 = "monexus_credentials_is_macos"
+
+///|
 /// Whether the requested backend is usable on this host. `auto` prefers the
-/// Keychain on macOS and the file backend elsewhere.
+/// Keychain on macOS and the file backend elsewhere. This is the binary's
+/// target, not `OSTYPE`: GUI applications do not inherit shell variables.
 pub fn platform_is_macos() -> Bool {
-  let ostype = match @env.get_env_var("OSTYPE") {
-    Some(value) => value.to_lower()
-    None => ""
-  }
-  ostype.contains("darwin") || ostype.contains("macos")
+  credential_is_macos_raw() == 1
 }
 
 ///|

@@ -25,7 +25,10 @@ async fn local_machine_profile() -> @ssh.MachineProfile {
     Some(value) if value != "" => value
     _ => "/bin/sh"
   }
-  let has_gui = match @env.get_env_var("DISPLAY") {
+  // macOS applications always run in an Aqua session and do not export
+  // DISPLAY/WAYLAND_DISPLAY; the local machine is the one running the host
+  // GUI, so the platform itself is the capability there.
+  let session_has_display = match @env.get_env_var("DISPLAY") {
     Some(value) if value != "" => true
     _ =>
       match @env.get_env_var("WAYLAND_DISPLAY") {
@@ -33,6 +36,7 @@ async fn local_machine_profile() -> @ssh.MachineProfile {
         _ => false
       }
   }
+  let has_gui = @credentials.platform_is_macos() || session_has_display
   {
     os,
     arch,

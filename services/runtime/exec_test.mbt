@@ -71,7 +71,16 @@ async fn file_mode(path : String) -> String {
   }
   let (code, output, _) = code_and_output
   if code != 0 {
-    return "stat-failed"
+    // BSD/macOS stat spelling; GNU stat exits non-zero above.
+    let fallback = @process.collect_output(stat, ["-f", "%Lp", path]) catch {
+      _ => return "stat-failed"
+    }
+    let (fallback_code, fallback_output, _) = fallback
+    if fallback_code != 0 {
+      return "stat-failed"
+    }
+    let fallback_text = fallback_output.text() catch { _ => "" }
+    return fallback_text.trim().to_owned()
   }
   let text = output.text() catch { _ => "" }
   text.trim().to_owned()
@@ -83,6 +92,20 @@ async fn file_text(path : String) -> String {
   data.text() catch {
     _ => ""
   }
+}
+
+///|
+/// Portable liveness probe: Linux `/proc` does not exist on macOS.
+async fn exec_test_pid_alive(pid : Int) -> Bool {
+  if pid <= 0 {
+    return false
+  }
+  let has_usr_bin = @fs.exists("/usr/bin/kill") catch { _ => false }
+  let kill = if has_usr_bin { "/usr/bin/kill" } else { "/bin/kill" }
+  let (code, _, _) = @process.collect_output(kill, ["-0", pid.to_string()]) catch {
+    _ => return false
+  }
+  code == 0
 }
 
 ///|
@@ -250,9 +273,7 @@ async test "cancel terminates the process tree and never reports success" {
     let terminal = await_terminal(executor, "run-cancel")
     assert_eq(terminal.status, @contracts.RUN_STATUS_CANCELLED)
     let gone = wait_until(
-      async fn() -> Bool {
-        !(@fs.exists("/proc/" + pid.to_string()) catch { _ => true })
-      },
+      async fn() -> Bool { !exec_test_pid_alive(pid) },
       3_000,
     )
     assert_true(gone)
@@ -279,9 +300,7 @@ async test "timeout is reported as cancelled, never success" {
     let pid = @string.parse_int(file_text(pid_path)) catch { _ => -1 }
     assert_true(pid > 0)
     let gone = wait_until(
-      async fn() -> Bool {
-        !(@fs.exists("/proc/" + pid.to_string()) catch { _ => true })
-      },
+      async fn() -> Bool { !exec_test_pid_alive(pid) },
       3_000,
     )
     assert_true(gone)
@@ -421,7 +440,7 @@ async test "state root, run log dir and stream logs have private modes" {
   defer test_cleanup(root)
   let executor = open_test_executor(root)
   @async.with_task_group(async fn(group : @async.TaskGroup[Unit]) -> Unit {
-    let spec = CommandSpec::new(argv=["/bin/true"])
+    let spec = CommandSpec::new(argv=["/usr/bin/true"])
     let _ = start_run(executor, group, "req-mode", "run-mode", spec)
     let _ = await_terminal(executor, "run-mode")
     assert_eq(file_mode(executor.state_root()), "700")

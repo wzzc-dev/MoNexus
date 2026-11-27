@@ -431,11 +431,15 @@ async fn resolve_remote_home(
 /// properties (plus ownership by the executing user) after the write, and
 /// remove the secret on any mismatch. Exit 1 is a refused hand-off.
 fn ssh_env_file_verify_script() -> String {
+  // GNU `stat -c` on Linux, BSD `stat -f` on macOS; an empty result (both
+  // forms failed) mismatches and is refused.
+  "mode() { stat -c %a -- \"$1\" 2>/dev/null || stat -f %Lp -- \"$1\" 2>/dev/null; }; " +
+  "owner() { stat -c %u -- \"$1\" 2>/dev/null || stat -f %u -- \"$1\" 2>/dev/null; }; " +
   "uid=$(id -u); " +
-  "if [ \"$(stat -c %a -- \"$1\")\" != \"700\" ] || " +
-  "[ \"$(stat -c %u -- \"$1\")\" != \"$uid\" ] || " +
-  "[ \"$(stat -c %a -- \"$1/env\")\" != \"600\" ] || " +
-  "[ \"$(stat -c %u -- \"$1/env\")\" != \"$uid\" ]; then " +
+  "if [ \"$(mode \"$1\")\" != \"700\" ] || " +
+  "[ \"$(owner \"$1\")\" != \"$uid\" ] || " +
+  "[ \"$(mode \"$1/env\")\" != \"600\" ] || " +
+  "[ \"$(owner \"$1/env\")\" != \"$uid\" ]; then " +
   "rm -f -- \"$1/env\"; " +
   "echo \"env file mode or ownership verification failed\" >&2; exit 1; fi"
 }

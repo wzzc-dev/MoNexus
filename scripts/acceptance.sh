@@ -9,9 +9,12 @@
 # Output: one PASS/FAIL/SKIP row per requirement (a)-(h), plus packaging (P0),
 # and a SUMMARY line. Exit code is non-zero when any row FAILs.
 #
-# Requirements: bash, jq, git, python3, sha256sum, tar. SSH parts need
+# Requirements: Linux, bash, jq, git, python3, sha256sum, tar. SSH parts need
 # sshd/ssh-keygen (a loopback sshd). Recovery needs tmux. Desktop reconnect
-# needs xvfb-run; it is reported SKIP (with a reason) when unavailable.
+# needs xvfb-run; it is reported SKIP (with a reason) when unavailable. The
+# script exits early on macOS: its loopback-sshd/xvfb substitutes are
+# Linux-only; use scripts/package.sh, scripts/host_smoke.sh and the macOS CI
+# job for the macOS checks instead.
 #
 # Usage:
 #   scripts/acceptance.sh
@@ -20,6 +23,12 @@
 set -u -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ "$(uname -s)" != "Linux" ]; then
+  printf 'acceptance.sh: this acceptance path is Linux-only (loopback sshd + xvfb).\n' >&2
+  printf 'On macOS use scripts/package.sh, scripts/host_smoke.sh, and the\n' >&2
+  printf 'build-test-macos CI job; see docs/m7.md.\n' >&2
+  exit 3
+fi
 REAL_HOME="${HOME:?HOME is required to run the build toolchain}"
 REAL_USER="$(id -un)"
 

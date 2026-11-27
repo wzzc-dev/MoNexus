@@ -52,6 +52,9 @@ async fn git_setup_repo(prefix : String) -> (String, String, String) {
   let dir = @fs.tmpdir(prefix=prefix)
   let root = dir + "/repo"
   @fs.mkdir(root, permission=0o700, recursive=true, allow_exist=true)
+  // `GitRuntime::new` canonicalizes the workspace root; use the same spelling
+  // so absolute-path assertions hold on macOS (/var -> /private/var).
+  let root = @fs.realpath(root) catch { _ => root }
   git_must(dir, ["init", "-q", root])
   @fs.write_file(
     root + "/a.txt",
@@ -147,7 +150,16 @@ async fn git_file_mode(path : String) -> String {
   }
   let (code, output, _) = code_and_output
   if code != 0 {
-    return "stat-failed"
+    // BSD/macOS stat spelling; GNU stat exits non-zero above.
+    let fallback = @process.collect_output(stat, ["-f", "%Lp", path]) catch {
+      _ => return "stat-failed"
+    }
+    let (fallback_code, fallback_output, _) = fallback
+    if fallback_code != 0 {
+      return "stat-failed"
+    }
+    let fallback_text = fallback_output.text() catch { _ => "" }
+    return fallback_text.trim().to_owned()
   }
   let text = output.text() catch { _ => "" }
   text.trim().to_owned()

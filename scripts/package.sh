@@ -41,8 +41,8 @@ if [[ "$VERSION" != "$CONTRACT_VERSION" ]]; then
 fi
 
 case "$(uname -s)" in
-  Linux) OS=linux ;;
-  Darwin) OS=macos ;;
+  Linux) OS=linux; DESKTOP_DIR=linux_skia ;;
+  Darwin) OS=macos; DESKTOP_DIR=macos_skia ;;
   *) echo "package.sh: unsupported OS $(uname -s)" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in
@@ -63,7 +63,7 @@ else
 fi
 
 HOST_EXE="$ROOT/_build/native/release/build/monexus/host/host.exe"
-DESKTOP_EXE="$ROOT/_build/native/release/build/monexus/desktop/linux_skia/linux_skia.exe"
+DESKTOP_EXE="$ROOT/_build/native/release/build/monexus/desktop/$DESKTOP_DIR/$DESKTOP_DIR.exe"
 if [[ ! -x "$HOST_EXE" || ! -x "$DESKTOP_EXE" ]]; then
   echo "package.sh: release products not found at fixed paths:" >&2
   echo "  $HOST_EXE" >&2
@@ -111,8 +111,17 @@ echo "[3/5] verify the staged launcher"
 
 echo "[4/5] tar $TARBALL"
 mkdir -p "$OUT"
-tar -C "$OUT" -czf "$TARBALL" "$NAME"
-(cd "$OUT" && sha256sum "$NAME.tar.gz" >"$NAME.tar.gz.sha256")
+if [[ "$OS" == "macos" ]]; then
+  # Avoid AppleDouble metadata sidecars in the archive.
+  COPYFILE_DISABLE=1 tar -C "$OUT" -czf "$TARBALL" "$NAME"
+else
+  tar -C "$OUT" -czf "$TARBALL" "$NAME"
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$OUT" && sha256sum "$NAME.tar.gz" >"$NAME.tar.gz.sha256")
+else
+  (cd "$OUT" && shasum -a 256 "$NAME.tar.gz" >"$NAME.tar.gz.sha256")
+fi
 
 echo "[5/5] artifacts"
 echo "stage:    $STAGE"

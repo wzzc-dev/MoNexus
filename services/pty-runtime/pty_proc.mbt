@@ -1,9 +1,12 @@
 ///|
-/// Linux `/proc` inspection used to report residual processes after a
+/// Process-table inspection used to report residual processes after a
 /// session is finalized. Only processes still in the PTY child's process
 /// group are attributable to the session; descendants which call
 /// `setsid()`/`setpgid()` leave that group and are documented as outside
 /// this runtime's cleanup guarantee.
+///
+/// `ps -A -o pid=,pgid=,stat=` is used instead of Linux `/proc`: macOS has
+/// no `/proc`, and both BSD and GNU `ps` understand this fixed form.
 
 ///|
 priv struct ProcStat {
@@ -29,48 +32,46 @@ fn pty_parse_pid(view : StringView) -> Int? {
 }
 
 ///|
-fn pty_parse_stat(pid : Int, text : String) -> ProcStat? {
-  let close = match text.rev_find(")") {
-    Some(index) => index
-    None => return None
-  }
-  let rest = text.substring(start=close + 2)
-  let tokens : Array[StringView] = []
-  for token in rest.split(" ") {
-    if token.length() > 0 {
-      tokens.push(token)
-    }
-  }
-  if tokens.length() < 3 {
-    return None
-  }
-  let state = tokens[0].to_string()
-  let pgrp = match pty_parse_pid(tokens[2]) {
-    Some(value) => value
-    None => return None
-  }
-  Some({ pid, pgrp, zombie: state == "Z" || state == "X", })
-}
-
-///|
 async fn pty_proc_list() -> Array[ProcStat] {
-  let entries = @fs.readdir("/proc", include_hidden=true) catch {
+  let ps = if (@fs.exists("/bin/ps") catch { _ => false }) {
+    "/bin/ps"
+  } else {
+    "/usr/bin/ps"
+  }
+  let (code, output, _) = @process.collect_output(ps, [
+    "-A", "-o", "pid=,pgid=,stat=",
+  ]) catch {
     _ => return []
   }
+  if code != 0 {
+    return []
+  }
+  let text = output.text() catch { _ => return [] }
   let result : Array[ProcStat] = []
-  for entry in entries {
-    let pid = match pty_parse_pid(entry[:]) {
+  for line in text.split("\n") {
+    let parts : Array[String] = []
+    for piece in line.split(" ") {
+      if piece != "" {
+        parts.push(piece.to_string())
+      }
+    }
+    if parts.length() < 3 {
+      continue
+    }
+    let pid = match pty_parse_pid(parts[0][:]) {
       Some(value) => value
       None => continue
     }
-    let data = @fs.read_file("/proc/" + entry + "/stat") catch {
-      _ => continue
+    let pgrp = match pty_parse_pid(parts[1][:]) {
+      Some(value) => value
+      None => continue
     }
-    let text = @utf8.decode_lossy(data.binary()[:])
-    match pty_parse_stat(pid, text) {
-      Some(info) => result.push(info)
-      None => ()
-    }
+    let state = parts[2]
+    result.push({
+      pid,
+      pgrp,
+      zombie: state.has_prefix("Z") || state.has_prefix("X"),
+    })
   }
   result
 }

@@ -61,14 +61,18 @@ async test "agent child receives scoped proxy env and no host secret" {
     assert_true(!env_text.contains("sk-host-secret-value"))
     assert_true(!env_text.contains("sk-host-other-secret"))
     // The OS-visible environment is the same map: no model key survives in
-    // `/proc/<pid>/environ`.
-    let proc_path = "/proc/" + pid.to_string() + "/environ"
-    let proc_env = @fs.read_file(proc_path) catch {
-      _ => fail("cannot read " + proc_path)
+    // `/proc/<pid>/environ`. macOS has no `/proc`; the child-written env file
+    // above already proves what the process received there.
+    let proc_available = @fs.exists("/proc") catch { _ => false }
+    if proc_available {
+      let proc_path = "/proc/" + pid.to_string() + "/environ"
+      let proc_env = @fs.read_file(proc_path) catch {
+        _ => fail("cannot read " + proc_path)
+      }
+      let proc_text = proc_env.text() catch { _ => "" }
+      assert_true(!proc_text.contains("sk-host-secret-value"))
+      assert_true(!proc_text.contains("sk-host-other-secret"))
+      assert_true(proc_text.contains("mxp_agent_env_token"))
     }
-    let proc_text = proc_env.text() catch { _ => "" }
-    assert_true(!proc_text.contains("sk-host-secret-value"))
-    assert_true(!proc_text.contains("sk-host-other-secret"))
-    assert_true(proc_text.contains("mxp_agent_env_token"))
   })
 }

@@ -682,6 +682,7 @@ pub async fn ProcessRuntime::start(
   }
   let setsid = first_existing(["/usr/bin/setsid", "/bin/setsid"])
   let kill = first_existing(["/bin/kill", "/usr/bin/kill"])
+  let ps = first_existing(["/bin/ps", "/usr/bin/ps"])
   match kill {
     Some(path) => kill_path_global.val = path
     None => kill_path_global.val = ""
@@ -727,7 +728,9 @@ pub async fn ProcessRuntime::start(
   )
   self.runs.set(run_id, slot)
   self.by_request.set(client_request_id, run_id)
-  let tree_cancel_available = setsid is Some(_) && kill is Some(_)
+  // macOS has no `setsid` binary; there the tree is walked with `ps` instead.
+  let tree_cancel_available = kill is Some(_) &&
+    (setsid is Some(_) || ps is Some(_))
   group.spawn_bg(allow_failure=true, async fn() {
     self.supervise(
       slot,
@@ -804,7 +807,10 @@ async fn ProcessRuntime::supervise(
           None => (program, args)
         }
         let cancel_handler : @process.CancellationHandler = if tree_cancel_available {
-          cancel_process_group
+          match setsid {
+            Some(_) => cancel_process_group
+            None => cancel_process_tree
+          }
         } else {
           @process.hard_cancel()
         }

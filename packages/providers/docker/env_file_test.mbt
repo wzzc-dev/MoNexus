@@ -11,7 +11,16 @@ async fn mode_of(path : String) -> String {
   }
   let (code, stdout, _stderr) = result
   if code != 0 {
-    return "stat-failed"
+    // BSD/macOS stat spelling; GNU stat exits non-zero above.
+    let fallback = @process.collect_output(tool, ["-f", "%Lp", path]) catch {
+      _ => return "stat-failed"
+    }
+    let (fallback_code, fallback_stdout, _) = fallback
+    if fallback_code != 0 {
+      return "stat-failed"
+    }
+    let fallback_text = fallback_stdout.text() catch { _ => "" }
+    return fallback_text.trim().to_owned()
   }
   let text = stdout.text() catch { _ => "" }
   text.trim().to_owned()

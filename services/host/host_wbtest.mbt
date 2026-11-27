@@ -78,10 +78,19 @@ async fn host_test_mode(path : String) -> String {
   let (code, out, _) = @process.collect_output("stat", ["-c", "%a", path]) catch {
     _ => return ""
   }
-  if code != 0 {
+  if code == 0 {
+    return out.text().trim().to_owned()
+  }
+  // BSD/macOS stat spelling; GNU stat exits non-zero above.
+  let (fallback_code, fallback_out, _) = @process.collect_output("stat", [
+    "-f", "%Lp", path,
+  ]) catch {
+    _ => return ""
+  }
+  if fallback_code != 0 {
     return ""
   }
-  out.text().trim().to_owned()
+  fallback_out.text().trim().to_owned()
 }
 
 ///|

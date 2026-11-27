@@ -2,11 +2,11 @@
 
 MoNexus is a local-first desktop workbench for machines, workspaces, tasks and
 agent sessions. One `monexus` command starts (or reuses) a `monexus-host`
-single-instance process and opens the MoUI desktop window. The host keeps the
-authoritative state — machines, workspaces/worktrees, agent sessions,
-decisions, projects/tasks/runs/evidence, artifacts and the append-only event
-log — in SQLite under `~/.monexus`, and serves it over authenticated
-WebSocket JSON-RPC on loopback.
+single-instance process and opens the MoUI desktop window on Linux or macOS.
+The host keeps the authoritative state — machines, workspaces/worktrees,
+agent sessions, decisions, projects/tasks/runs/evidence, artifacts and the
+append-only event log — in SQLite under `~/.monexus`, and serves it over
+authenticated WebSocket JSON-RPC on loopback.
 
 V0.1 is the M1–M7 vertical slice. Its recovery rule is **silence is not
 exit**: a Run settles only from an observed exit code or a verified result.
@@ -28,8 +28,10 @@ build from this worktree.
 
 ### Packaged tarball (no MoonBit toolchain needed)
 
-The release artifact is `dist/monexus-0.1.0-linux-x86_64.tar.gz` plus its
-`.sha256` file. On a Linux x86_64 machine:
+Release artifacts are built per OS/architecture:
+`dist/monexus-0.1.0-linux-x86_64.tar.gz` and
+`dist/monexus-0.1.0-macos-aarch64.tar.gz` (Apple Silicon), each with a
+`.sha256` file. On Linux:
 
 ```bash
 sha256sum -c monexus-0.1.0-linux-x86_64.tar.gz.sha256
@@ -37,10 +39,18 @@ tar -xzf monexus-0.1.0-linux-x86_64.tar.gz
 ./monexus-0.1.0-linux-x86_64/bin/monexus version
 ```
 
-Install layout:
+On macOS (Apple Silicon):
+
+```bash
+shasum -a 256 -c monexus-0.1.0-macos-aarch64.tar.gz.sha256
+tar -xzf monexus-0.1.0-macos-aarch64.tar.gz
+./monexus-0.1.0-macos-aarch64/bin/monexus version
+```
+
+Install layout (the directory name follows `<os>-<arch>`):
 
 ```
-monexus-0.1.0-linux-x86_64/
+monexus-0.1.0-<os>-<arch>/
   bin/monexus             launcher (single entry point)
   bin/monexus-host        host executable
   bin/monexus-desktop     native desktop executable
@@ -54,7 +64,7 @@ Move the directory anywhere (for example `~/opt/monexus-0.1.0`) and add its
 `bin/` to `PATH`:
 
 ```bash
-mv monexus-0.1.0-linux-x86_64 ~/opt/monexus-0.1.0
+mv monexus-0.1.0-macos-aarch64 ~/opt/monexus-0.1.0
 export PATH="$HOME/opt/monexus-0.1.0/bin:$PATH"
 monexus version
 ```
@@ -63,10 +73,13 @@ Keep `bin/` and `share/` together: the launcher resolves its resources
 relative to its own path. Add the real `bin/` directory to `PATH` instead of
 symlinking a single file elsewhere.
 
-Runtime dependencies are deliberately small: glibc, a Vulkan runtime
-(`libvulkan.so.1`) and, for a window, Wayland or X11. `tmux` is optional but
-required for durable/crash-recoverable command Runs; `ssh` is only needed for
-SSH machines. Node.js is **not** needed to run the packaged binaries.
+Runtime dependencies are deliberately small. On Linux: glibc, a Vulkan
+runtime (`libvulkan.so.1`) and, for a window, Wayland or X11. On macOS the
+desktop uses the native AppKit backend; the window needs a logged-in GUI
+session (SSH-only sessions should use `--headless`), and no Vulkan, X11 or
+Xvfb is involved. `tmux` is optional but required for
+durable/crash-recoverable command Runs; `ssh` is only needed for SSH
+machines. Node.js is **not** needed to run the packaged binaries.
 
 ### From source
 
@@ -76,8 +89,10 @@ Prerequisites:
 - **Node.js on `PATH`** — the MoUI skia package runs a node prebuild step.
 - Linux: a Vulkan runtime (`libvulkan.so.1`). The desktop package links
   through a repo-local `libvulkan.so` shim, so `libvulkan-dev` is not needed.
-- A display server (Wayland or X11) for the window; headless verification
-  works without one.
+  The window also needs Wayland or X11.
+- macOS: Xcode command-line tools (for the native build) and a GUI login
+  session for the window. SSH-only use `monexus start --headless`.
+- Headless verification works without a display on either OS.
 
 ```bash
 export PATH="$HOME/.moon/bin:$HOME/.nvm/versions/node/v26.13.0/bin:$PATH"
@@ -92,7 +107,8 @@ scripts/package.sh            # tarball + checksum in dist/
 
 ```
 _build/native/release/build/monexus/host/host.exe
-_build/native/release/build/monexus/desktop/linux_skia/linux_skia.exe
+_build/native/release/build/monexus/desktop/linux_skia/linux_skia.exe   # Linux
+_build/native/release/build/monexus/desktop/macos_skia/macos_skia.exe   # macOS
 ```
 
 It then writes `dist/monexus-<version>-<os>-<arch>.tar.gz` and
@@ -119,8 +135,9 @@ alive after the window closes (`keepAlive`), so reopening the window is fast
 and background Runs keep going. Single-instance protection comes from
 `host.status` plus the host's `host.lock` flock.
 
-On a machine without a display, the launcher exits with code 3 and a clear
-message instead of failing inside the window backend. Use:
+On Linux without Wayland/X11 the launcher exits with code 3 and a clear
+message instead of failing inside the window backend. On macOS, run from a
+logged-in GUI session; an SSH-only session should use `--headless`. Use:
 
 ```bash
 monexus start --headless       # start/reuse the host, print endpoint, no window
@@ -141,7 +158,9 @@ scripts/start.sh                              # equivalent to scripts/monexus.sh
 
 The desktop Settings page shows the connection state, host `ws_url`, token
 status (present/missing, never the token), product version, data directory,
-host id, launcher hint and last error.
+host id, launcher hint and last error. It also has Light/Dark appearance and
+English/中文 language controls; both choices are saved locally and applied on
+the next launch (`MONEXUS_THEME` / `MONEXUS_LANG` cover the first run).
 
 ### First run
 
@@ -353,6 +372,18 @@ succeeded` with all evidence verified. **Ubuntu has not been separately
 verified; do not read the Debian result as Ubuntu.** RISC-V is out of V0.1
 scope.
 
+macOS support was verified separately on 2026-11-27 on **macOS aarch64**
+(Apple Silicon): `moon build --target native` (debug and release; both the
+Linux and macOS desktop entries), `moon test --target native` 524/524,
+`scripts/package.sh` (13 MB tarball + SHA-256), `scripts/host_smoke.sh`, and
+the installed launcher's `start --headless` / `status` / `stop` lifecycle. The
+installed `monexus-desktop` was also launched from a GUI login session: the
+process stayed alive and traced `link online` to the headless host (the
+window's interactive controls were not driven automatically).
+`scripts/acceptance.sh` still relies on a loopback sshd and `xvfb-run`, so its
+in-script run remains Linux-only; macOS packaging is covered by
+`scripts/package.sh` and the macOS CI job.
+
 The script prints one `PASS`/`FAIL`/`SKIP` row per requirement (packaging plus
 items a–h) and a `SUMMARY checks=... failed=... result=...` line; it exits
 non-zero on any failure. The verified run and the per-item architecture §14
@@ -372,12 +403,15 @@ scripts/recovery_smoke.sh   # M6 recovery matrix, fake ssh faults
 ## CI
 
 `.github/workflows/ci.yml` (workflow **CI**) runs on pull requests, pushes to
-`main` and manual dispatch. On `ubuntu-latest` it runs `moon build --target
-native`, `moon test --target native`, the loopback-sshd smokes (`machine`,
-`workspace`, `task`, `agent_ssh`), the headless `agent_smoke.sh`, and
-`scripts/acceptance.sh` — all under throwaway `HOME`/state dirs, with no real
-remote or credential. The job/check is **`build-test-acceptance`** (timeout
-60 minutes); require it for merges to `main`.
+`main` and manual dispatch. On `ubuntu-latest`, **`build-test-acceptance`**
+(timeout 60 minutes) runs `moon build --target native`, `moon test --target
+native`, the loopback-sshd smokes (`machine`, `workspace`, `task`,
+`agent_ssh`), the headless `agent_smoke.sh`, and `scripts/acceptance.sh` —
+all under throwaway `HOME`/state dirs, with no real remote or credential. On
+`macos-14` (Apple Silicon), **`build-test-macos`** runs the native build, the
+full native test suite, `scripts/package.sh`, `scripts/host_smoke.sh` and the
+installed launcher's headless start/status/stop check. Require both checks
+for merges to `main`.
 
 ## Layout
 
@@ -391,6 +425,7 @@ packages/host-client/         host.json discovery + WebSocket JSON-RPC client
 services/host/                monexus-host executable + handlers + recovery
 apps/desktop/app/             MoUI model/update/view, host-link/workers, tests
 apps/desktop/linux_skia/      Linux native entry + Vulkan linker shim
+apps/desktop/macos_skia/      macOS native entry (AppKit backend)
 scripts/monexus.sh, start.sh  single-command launcher
 scripts/package.sh            release build, install layout, tar.gz + SHA-256
 scripts/acceptance.sh         fresh-HOME PASS/FAIL acceptance
@@ -427,15 +462,18 @@ spikes/m0/                    frozen M0 spike
 
 ## Known limitations (V0.1)
 
-- Packaging is verified for Linux x86_64 only. The launcher is a POSIX shell
-  script; there is no Windows build, installer, auto-update or code signing.
+- Packaging is verified for Linux x86_64 and macOS aarch64. The launcher is a
+  POSIX shell script; there is no Windows build, installer, auto-update or
+  code signing. macOS x86_64 is buildable by the same scripts but was not
+  separately exercised.
 - Remote machine verification covers a real **Debian 13 x86_64** machine
   (machine add/probe online, remote workspace read/write/git/terminal,
   parallel local + remote Runs `2/2` with evidence verified). Ubuntu has not
   been separately verified — Debian is not Ubuntu — and RISC-V is out of V0.1
   scope.
-- The window needs Wayland/X11. Headless machines use `--headless`, tests, or
-  `xvfb-run`; there is no built-in virtual display.
+- The Linux window needs Wayland/X11; headless Linux machines use `--headless`,
+  tests, or `xvfb-run` (there is no built-in virtual display). The macOS
+  window needs a logged-in GUI session; use `--headless` over SSH.
 - Building from source needs MoonBit + Node; the packaged binaries do not
   need Node at runtime.
 - A real ACP session needs Node, a first-run npx download and a logged-in

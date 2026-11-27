@@ -242,6 +242,13 @@ fn ui_code_bg() -> @core.Color {
 fn ui_family() -> @core.FontFamilyStack {
   @core.FontFamilyStack::new([
     @core.FontFamily::Name("Inter"),
+    // CJK fallbacks for the Chinese UI. A missing family is skipped by the
+    // renderer, so these do not change the English stack on machines without
+    // them.
+    @core.FontFamily::Name("PingFang SC"),
+    @core.FontFamily::Name("Hiragino Sans GB"),
+    @core.FontFamily::Name("Noto Sans CJK SC"),
+    @core.FontFamily::Name("Noto Sans SC"),
     @core.FontFamily::SystemUi,
     @core.FontFamily::SansSerif,
   ])
@@ -259,6 +266,8 @@ fn mono_font(size : Double, weight : Int32) -> @core.FontSpec {
   @core.FontSpec::new(
     families=@core.FontFamilyStack::new([
       @core.FontFamily::Name("DejaVu Sans Mono"),
+      @core.FontFamily::Name("PingFang SC"),
+      @core.FontFamily::Name("Noto Sans CJK SC"),
       @core.FontFamily::Monospace,
     ]),
     size~,
@@ -275,6 +284,8 @@ fn mono_font_lh(
   @core.FontSpec::new(
     families=@core.FontFamilyStack::new([
       @core.FontFamily::Name("DejaVu Sans Mono"),
+      @core.FontFamily::Name("PingFang SC"),
+      @core.FontFamily::Name("Noto Sans CJK SC"),
       @core.FontFamily::Monospace,
     ]),
     size~,

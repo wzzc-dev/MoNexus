@@ -122,7 +122,16 @@ async fn pty_file_mode(path : String) -> String {
   }
   let (code, output, _) = code_and_output
   if code != 0 {
-    return "stat-failed"
+    // BSD/macOS stat spelling; GNU stat exits non-zero above.
+    let fallback = @process.collect_output(stat, ["-f", "%Lp", path]) catch {
+      _ => return "stat-failed"
+    }
+    let (fallback_code, fallback_output, _) = fallback
+    if fallback_code != 0 {
+      return "stat-failed"
+    }
+    let fallback_text = fallback_output.text() catch { _ => "" }
+    return fallback_text.trim().to_owned()
   }
   let text = output.text() catch { _ => "" }
   text.trim().to_owned()

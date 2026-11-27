@@ -239,12 +239,15 @@ async fn skh_fixture(
 
 ///|
 fn skh_read_commands() -> String {
-  "[{\"id\":\"status\",\"argv\":[\"git\",\"status\",\"--porcelain\"],\"mode\":\"read_only\",\"timeout_ms\":5000,\"max_output_bytes\":8192}]"
+  // Generous timeout: the full native suite runs packages concurrently, and
+  // process spawn can take longer than 5 s under that load on macOS.
+  "[{\"id\":\"status\",\"argv\":[\"git\",\"status\",\"--porcelain\"],\"mode\":\"read_only\",\"timeout_ms\":30000,\"max_output_bytes\":8192}]"
 }
 
 ///|
 fn skh_write_commands() -> String {
-  "[{\"id\":\"note\",\"argv\":[\"git\",\"commit\",\"--allow-empty\",\"-m\",\"release 1.0.0\"],\"mode\":\"write\",\"timeout_ms\":5000,\"max_output_bytes\":8192}]"
+  // Same contention allowance as skh_read_commands.
+  "[{\"id\":\"note\",\"argv\":[\"git\",\"commit\",\"--allow-empty\",\"-m\",\"release 1.0.0\"],\"mode\":\"write\",\"timeout_ms\":30000,\"max_output_bytes\":8192}]"
 }
 
 ///|

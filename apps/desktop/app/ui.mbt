@@ -443,14 +443,13 @@ fn ui_text_area_field(
 }
 
 ///|
-/// One segment of the Light/Dark control. The current mode is accent-tinted;
-/// the other option is a quiet outline.
-fn ui_segment(
+/// One segment of a two-way Settings control. The active option is
+/// accent-tinted; the other option is a quiet outline.
+fn ui_choice_segment(
   label : String,
-  mode : ThemeMode,
-  current : ThemeMode,
+  active : Bool,
+  msg : Msg,
 ) -> @moui.View[Msg] {
-  let active = mode == current
   let view = @views.container(
     @views.padding_xy(
       @views.text(label, align=@core.TextAlign::TextStart).font(ui_font(12.0, 500)).foreground(
@@ -476,7 +475,25 @@ fn ui_segment(
     ),
     padding=0.0,
   )
-  view.on_tap(SetTheme(mode)).cursor(
+  view.on_tap(msg).cursor(
     @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
   )
+}
+
+///|
+fn ui_segment(
+  label : String,
+  mode : ThemeMode,
+  current : ThemeMode,
+) -> @moui.View[Msg] {
+  ui_choice_segment(label, mode == current, SetTheme(mode))
+}
+
+///|
+fn ui_language_segment(
+  label : String,
+  lang : Lang,
+  current : Lang,
+) -> @moui.View[Msg] {
+  ui_choice_segment(label, lang == current, SetLanguage(lang))
 }

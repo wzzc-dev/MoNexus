@@ -137,18 +137,32 @@ async fn pty_test_mode(path : String) -> String {
   let (code, out, _) = @process.collect_output("stat", ["-c", "%a", path]) catch {
     _ => return ""
   }
-  if code != 0 {
+  if code == 0 {
+    return out.text().trim().to_owned()
+  }
+  // BSD/macOS stat spelling; GNU stat exits non-zero above.
+  let (fallback_code, fallback_out, _) = @process.collect_output("stat", [
+    "-f", "%Lp", path,
+  ]) catch {
+    _ => return ""
+  }
+  if fallback_code != 0 {
     return ""
   }
-  out.text().trim().to_owned()
+  fallback_out.text().trim().to_owned()
 }
 
 ///|
 async fn pty_test_proc_exists(pid : Int) -> Bool {
-  let _ = @fs.kind("/proc/" + pid.to_string()) catch {
+  if pid <= 0 {
+    return false
+  }
+  let has_usr_bin = @fs.exists("/usr/bin/kill") catch { _ => false }
+  let kill = if has_usr_bin { "/usr/bin/kill" } else { "/bin/kill" }
+  let (code, _, _) = @process.collect_output(kill, ["-0", pid.to_string()]) catch {
     _ => return false
   }
-  true
+  code == 0
 }
 
 ///|
@@ -526,7 +540,7 @@ async test "environment, cwd and argv are validated and secrets are redacted" {
       group,
       PtyOpenRequest::new(
         session_id="sess-ssh-cwd",
-        argv=["/bin/true"],
+        argv=["/usr/bin/true"],
         cwd=dir + "/.ssh",
         env=base,
       ),
@@ -545,7 +559,7 @@ async test "environment, cwd and argv are validated and secrets are redacted" {
       group,
       PtyOpenRequest::new(
         session_id="sess-ssh-env",
-        argv=["/bin/true"],
+        argv=["/usr/bin/true"],
         cwd=dir,
         env=ssh_env,
       ),
@@ -560,7 +574,7 @@ async test "environment, cwd and argv are validated and secrets are redacted" {
       group,
       PtyOpenRequest::new(
         session_id="sess-dup-env",
-        argv=["/bin/true"],
+        argv=["/usr/bin/true"],
         cwd=dir,
         env=duplicate_env,
       ),

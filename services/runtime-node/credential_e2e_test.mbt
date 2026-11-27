@@ -191,14 +191,19 @@ async test "node credentials stay node-local across lease and revoke" {
         ),
       )
       assert_true(!env_text.contains(secret))
-      let proc_env = @fs.read_file(
-        "/proc/" + process.pid.to_string() + "/environ",
-      ) catch {
-        _ => fail("cannot read the credential process environment")
+      // Linux also exposes the child environment through `/proc`; macOS has
+      // no `/proc`, and the child-written env file is the same observation.
+      let proc_available = @fs.exists("/proc") catch { _ => false }
+      if proc_available {
+        let proc_env = @fs.read_file(
+          "/proc/" + process.pid.to_string() + "/environ",
+        ) catch {
+          _ => fail("cannot read the credential process environment")
+        }
+        let proc_text = proc_env.text() catch { _ => "" }
+        assert_true(proc_text.contains(@contracts.CREDENTIAL_NODE_TOKEN_PREFIX))
+        assert_true(!proc_text.contains(secret))
       }
-      let proc_text = proc_env.text() catch { _ => "" }
-      assert_true(proc_text.contains(@contracts.CREDENTIAL_NODE_TOKEN_PREFIX))
-      assert_true(!proc_text.contains(secret))
       // The secret is absent from every node surface except its own 0600
       // store file, and from the workspace.
       credential_e2e_scan_dir(state_dir, [secret_file], secret)

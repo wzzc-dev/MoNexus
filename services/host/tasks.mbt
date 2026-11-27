@@ -404,7 +404,9 @@ async fn probe_local_capabilities() -> (String, String, Map[String, String]) {
       lines.push(line)
     }
   }
-  let os = if lines.length() > 0 { lines[0] } else { "" }
+  // Requirement matching uses lower-case names; `uname -s` reports Darwin.
+  let raw_os = if lines.length() > 0 { lines[0] } else { "" }
+  let os = if raw_os.to_lower() == "darwin" { "macos" } else { raw_os }
   let arch = if lines.length() > 1 { lines[1] } else { "" }
   for index in 2..<lines.length() {
     let name = lines[index]

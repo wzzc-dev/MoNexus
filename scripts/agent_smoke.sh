@@ -20,7 +20,13 @@ set -u -o pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST_BIN="${HOST_BIN:-$ROOT/_build/native/debug/build/monexus/host/host.exe}"
 REAL_USER="$(id -un)"
-REAL_HOME="$(getent passwd "$REAL_USER" | cut -d: -f6)"
+REAL_HOME="${M4_REAL_HOME:-${HOME:-}}"
+if [ -z "$REAL_HOME" ]; then
+  REAL_HOME="$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)"
+fi
+if [ -z "$REAL_HOME" ] && command -v dscl >/dev/null 2>&1; then
+  REAL_HOME="$(dscl . -read "/Users/$REAL_USER" NFSHomeDirectory 2>/dev/null | sed 's/^NFSHomeDirectory: //')"
+fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/monexus-m4-smoke.XXXXXX")"
 mkdir -p "$WORK/home"
@@ -62,6 +68,9 @@ not_contains() { # label needle haystack
 }
 eq() { # label expected actual
   if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected: $2, got: $3)"; fi
+}
+mode_of() { # path
+  stat -c %a "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null || echo '?'
 }
 
 cleanup() {
@@ -212,7 +221,7 @@ printf '\n== 2. agent home: AGENTS.md read-only, MEMORY.md audited write ==\n'
 # ---------------------------------------------------------------------------
 AGENTS_READ="$(rpc agent.memory.read '{"agent_id":"mock","file":"AGENTS.md"}')"
 contains 'AGENTS.md exists with the read-only contract' 'read-only operating contract' "$AGENTS_READ"
-eq 'AGENTS.md is mode 0444' '444' "$(stat -c %a "$STATE/agents/mock/AGENTS.md" 2>/dev/null)"
+eq 'AGENTS.md is mode 0444' '444' "$(mode_of "$STATE/agents/mock/AGENTS.md")"
 rpc_call agent.memory.write '{"agent_id":"mock","file":"AGENTS.md","content":"hacked","actor":"owner"}'
 [ "$RPC_CODE" -ne 0 ] && pass 'writing AGENTS.md is refused' || fail 'writing AGENTS.md is refused' "$RPC_OUT"
 contains 'AGENTS.md refusal is readable' 'Unsupported' "$RPC_OUT"
@@ -285,7 +294,7 @@ eq 'stop produced one memory artifact' '1' "$(printf '%s' "$STOPPED" | jq -r '.a
 ART_PATH="$STATE/agents/mock/artifacts/$SID-memory.diff"
 [ -f "$ART_PATH" ] && pass 'memory diff artifact exists on disk' || fail 'memory artifact exists' "$ART_PATH"
 contains 'artifact contains the changed memory line' 'SMOKE-MEMORY: updated during the M4 session' "$(cat "$ART_PATH" 2>/dev/null)"
-eq 'artifact file is mode 0600' '600' "$(stat -c %a "$ART_PATH" 2>/dev/null)"
+eq 'artifact file is mode 0600' '600' "$(mode_of "$ART_PATH")"
 
 # ---------------------------------------------------------------------------
 printf '\n== 6. resume via session/load ==\n'

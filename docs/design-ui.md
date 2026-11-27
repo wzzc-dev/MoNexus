@@ -69,6 +69,28 @@ A missing file is silent. An unreadable, corrupt or unknown-valued file is
 ignored, falls through to the next precedence rule and is reported as a
 diagnostic on the Settings page; reading never rewrites it.
 
+Language uses the same directory and rules: the saved choice
+(`language.json`, `{"schema_version":1,"language":"en"|"zh"}`) wins, then a
+legal `MONEXUS_LANG=en|zh`, then English. The file is also 0600 and atomic,
+and a bad value is reported on Settings instead of changing the UI.
+`theme_config_dir()` resolves the shared directory once for both preferences.
+
+### Language switching
+
+Every visible shell string is chosen at paint time through `tr(lang, en, zh)`
+in `i18n.mbt`; ids, commands and host/agent diagnostics are not translated.
+Page labels have a stable English form (`Page::label()`, used by scene
+selection and tests) and a localized form (`Page::label_in(lang)`). The
+Settings English/中文 segments dispatch `SetLanguage(lang)`; the model update
+is pure and the explicit choice is queued to the preference worker, which
+atomically rewrites `language.json` (0600). A fresh launch seeds `Model` from
+`startup_language()` before the first frame.
+
+The UI family stack adds PingFang SC, Hiragino Sans GB and Noto Sans CJK SC
+after Inter so Chinese text has a CJK fallback on macOS and Linux; the mono
+stack uses the same fallback after DejaVu Sans Mono. Host-returned messages are
+shown verbatim, even in Chinese mode.
+
 ### Status tone mapping
 
 Status is text and a hairline edge in its tone, never a filled badge:
@@ -172,7 +194,7 @@ island.
 | Inbox | Needs you / Waiting / Handled stat cards, Approvals summary card, then decision cards: tone dot, kind, status tags, title, meta, body, and answer options (Waive/Retry/Fail/Answer with text) plus the free-text answer card. |
 | Tasks | Create card (Title, Workspace id, Goal, multi-line Verify commands), Board header with count, task row-cards with status tag and Select/Cancel, selected state, runs for the task, run detail (command well, evidence, artifacts, diff), Activity list. |
 | Search | Query field and button, hits as cards, empty-state copy from the host search semantics. |
-| Settings | Connection spec card (state/address/token/version/data dir/host id), Appearance card with a Light/Dark segmented control, and a Local host note. |
+| Settings | Connection spec card (state/address/token/version/data dir/host id), Appearance card with a Light/Dark segmented control, Language card with an English/中文 segmented control, and a Local host note. |
 
 ## Appearance switching
 
@@ -195,15 +217,17 @@ radius scale of 6/7/10/pill and control height 30.
   Machines `server`, Projects `folder`, Agents `message-circle`, Inbox `mail`,
   Tasks `list`, Search `search`, Settings `settings`.
 - MoUI 0.9.2 ships `segmented_control`, but the shell keeps its hand-painted
-  Light/Dark pair (`ui_segment`): two tappable containers whose active segment
-  is accent-tinted, so the control matches the surrounding cards rather than
+  pairs (`ui_choice_segment`, wrapped by `ui_segment` and
+  `ui_language_segment`): two tappable containers whose active segment is
+  accent-tinted, so the controls match the surrounding cards rather than
   importing another control style.
-- No MoUI package changes were made for this redesign. Appearance persistence
-  is desktop-local (`theme.json`, see above), not a MoUI feature.
+- No MoUI package changes were made for this redesign. Appearance and language
+  persistence are desktop-local (`theme.json`/`language.json`, see above), not
+  MoUI features.
 
 ## Verification
 
-`moon build --target native`, `moon test --target native` (108/108) and
+`moon build --target native`, `moon test --target native` (524/524) and
 `scripts/acceptance.sh` (69 PASS / 0 FAIL) cover the build and M1–M7 behaviour;
 the redesign touched only `apps/desktop` presentation. Review screenshots were
 taken from a real host under Xvfb at 1360×900 with the window at 1280×800:

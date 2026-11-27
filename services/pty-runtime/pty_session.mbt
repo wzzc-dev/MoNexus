@@ -140,6 +140,14 @@ async fn pty_is_final(rt : PtyRuntime, session : PtySession) -> Bool {
 }
 
 ///|
+async fn pty_is_finalizing(rt : PtyRuntime, session : PtySession) -> Bool {
+  rt.mutex.acquire()
+  let finalizing = session.finalizing.val
+  rt.mutex.release()
+  finalizing
+}
+
+///|
 async fn pty_wait_final(
   rt : PtyRuntime,
   session : PtySession,
@@ -472,10 +480,15 @@ async fn pty_terminate(
   mark_timed_out : Bool,
 ) -> Unit {
   rt.mutex.acquire()
-  if session.finalized.val || session.finalizing.val {
+  if session.finalized.val {
     rt.mutex.release()
     return
   }
+  // A child can exit (or the session task can begin its finalizer) just as
+  // close/wait arrives. Finalization is not finished until `finalized` flips,
+  // so record the caller's intent and wait for it instead of returning a
+  // half-finalized status with no terminal event.
+  let already_finalizing = session.finalizing.val
   if mark_cancelled {
     session.cancel_requested.val = true
   }
@@ -485,7 +498,7 @@ async fn pty_terminate(
   let pgid = session.pgid.val
   let task = session.task.val
   rt.mutex.release()
-  if pgid > 1 {
+  if !already_finalizing && pgid > 1 {
     pty_kill_group(pgid, 15)
     let grace_deadline = @async.now() + rt.limits.close_grace_ms.to_int64()
     while !pty_is_final(rt, session) && @async.now() < grace_deadline {
@@ -510,10 +523,19 @@ async fn pty_terminate(
     }
   }
   if !pty_is_final(rt, session) {
-    // A session whose task will not unwind within the bound still must not
-    // be left in a half-finalized state. Finalize it ourselves so status is
-    // truthful; the task's own finalizer becomes a no-op.
-    pty_finalize(rt, session, -1, "session termination did not complete")
+    if pty_is_finalizing(rt, session) {
+      // The session task's protected finalizer is already past the point
+      // where `pty_finalize` would accept a second caller. Waiting for it is
+      // the only way to return a truthful status; its cleanup is bounded (kill
+      // the group, scan residuals) and it cannot be cancelled here.
+      let _ = pty_wait_final(rt, session, 0)
+    } else {
+      // No finalizer is running, so force one instead of leaving a
+      // half-finalized session. A finalizer that starts concurrently is a
+      // no-op through the `finalizing` guard.
+      pty_finalize(rt, session, -1, "session termination did not complete")
+      let _ = pty_wait_final(rt, session, 0)
+    }
   }
 }
 

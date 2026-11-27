@@ -62,6 +62,25 @@ pub fn PolicyGate::allow_workspace(workspace_root : String) -> PolicyGate {
 }
 
 ///|
+/// Resolve legacy root grants before they are compared with the runtime's
+/// execution root. The runtime root is already `realpath`-canonical, while a
+/// caller may spell the same directory through a symlinked alias (macOS
+/// `/var/folders/...` vs `/private/var/folders/...`). A root that does not
+/// resolve keeps its original spelling, so an unknown root still fails
+/// closed rather than silently matching.
+pub async fn PolicyGate::canonicalized(self : PolicyGate) -> PolicyGate {
+  if self.roots.is_empty() {
+    return self
+  }
+  let roots : Array[String] = []
+  for root in self.roots {
+    let real = @fs.realpath(root) catch { _ => root }
+    roots.push(real)
+  }
+  { ..self, roots }
+}
+
+///|
 /// Install a legacy JSON snapshot. Malformed snapshots are rejected; callers
 /// must keep the previous gate or fail closed rather than half-applying one.
 pub fn PolicyGate::from_snapshot(snapshot : @json.Json) -> Result[PolicyGate, String] {

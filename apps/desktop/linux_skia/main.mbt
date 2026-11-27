@@ -52,10 +52,11 @@ async fn main {
   // default. A missing/corrupt file is reported on the Settings page, never a
   // startup failure.
   let startup_theme = @app.startup_theme()
+  let startup_language = @app.startup_language()
   // 1280x800 keeps the Tasks/Inbox/Agents bodies and buttons on screen; long
   // pages scroll inside the shell viewport (see app/view.mbt).
   let runtime = @runtime.new_program_with_dimensions(
-    program=@app.program_with_startup(startup_theme),
+    program=@app.program_with_preferences(startup_theme, startup_language),
     width=1280.0,
     height=800.0,
   )
@@ -79,6 +80,9 @@ async fn main {
   let theme_task : async () -> Unit = async fn() {
     @app.theme_choice_loop()
   }
+  let language_task : async () -> Unit = async fn() {
+    @app.language_choice_loop()
+  }
   @async.with_task_group(async fn(group) {
     group.spawn_bg(
       no_wait=true,
@@ -99,6 +103,11 @@ async fn main {
       no_wait=true,
       allow_failure=true,
       theme_task,
+    )
+    group.spawn_bg(
+      no_wait=true,
+      allow_failure=true,
+      language_task,
     )
     window_task()
   })

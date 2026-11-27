@@ -227,9 +227,11 @@ pub fn NodeHost::policy(self : NodeHost) -> PolicyGate {
 ///|
 /// Replace the policy gate (A1.3b snapshot injection). The caller decides
 /// whether the snapshot is trustworthy; a malformed snapshot must be rejected
-/// before this call, leaving the previous gate in place.
-pub fn NodeHost::set_policy(self : NodeHost, policy : PolicyGate) -> Unit {
-  self.policy = policy
+/// before this call, leaving the previous gate in place. Legacy root grants
+/// are canonicalized so `/var/...` and `/private/var/...` compare equal to
+/// the execution root on macOS.
+pub async fn NodeHost::set_policy(self : NodeHost, policy : PolicyGate) -> Unit {
+  self.policy = policy.canonicalized()
 }
 
 ///|
@@ -698,6 +700,9 @@ pub async fn NodeHost::open(
         None => PolicyGate::fail_closed()
       }
   }
+  // The execution root is canonical; align legacy root grants with it so a
+  // caller-supplied alias (macOS `/var` vs `/private/var`) is not denied.
+  let effective_policy = effective_policy.canonicalized()
   // Restore crash-safe replay memory. Both files are 0600 in the 0700 state
   // dir; a malformed store fails the open instead of silently forgetting a
   // consumed nonce or an accepted-but-unanswered mutation.

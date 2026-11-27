@@ -265,8 +265,10 @@ async fn stat_tool_path() -> String? {
 }
 
 ///|
-/// `stat -c %a` output must be exactly `600` or `400`. The tool is invoked
-/// with an argv array (never a shell) and a bounded timeout.
+/// The reported mode must be exactly `600` or `400`. GNU `stat -c %a` is
+/// tried first and BSD/macOS `stat -f %Lp` second, so the check works on
+/// both Linux and macOS without a shell. The tool is invoked with an argv
+/// array and a bounded timeout.
 pub async fn check_private_mode(path : String) -> Result[Unit, RecipeError] {
   let tool = match stat_tool_path() {
     Some(value) => value
@@ -278,52 +280,58 @@ pub async fn check_private_mode(path : String) -> Result[Unit, RecipeError] {
       )
   }
   let budget_ms = 2_000
-  let collected = @async.with_timeout_opt(budget_ms, async fn() {
-    let result = @process.collect_output(tool, ["-c", "%a", path]) catch {
-      _ => return None
+  let formats : Array[Array[String]] = [
+    ["-c", "%a", path],
+    ["-f", "%Lp", path],
+  ]
+  for args in formats {
+    let collected = @async.with_timeout_opt(budget_ms, async fn() {
+      let result = @process.collect_output(tool, args) catch {
+        _ => return None
+      }
+      Some(result)
+    })
+    let (code, stdout, _stderr) = match collected {
+      Some(Some(value)) => value
+      Some(None) =>
+        return Err(
+          RecipeError::new(TrustStoreUnverifiable).with_detail(
+            "stat tool could not be spawned",
+          ),
+        )
+      None =>
+        return Err(
+          RecipeError::new(TrustStoreUnverifiable).with_detail(
+            "stat tool timed out",
+          ),
+        )
     }
-    Some(result)
-  })
-  let (code, stdout, _stderr) = match collected {
-    Some(Some(value)) => value
-    Some(None) =>
-      return Err(
-        RecipeError::new(TrustStoreUnverifiable).with_detail(
-          "stat tool could not be spawned",
-        ),
-      )
-    None =>
-      return Err(
-        RecipeError::new(TrustStoreUnverifiable).with_detail(
-          "stat tool timed out",
-        ),
-      )
-  }
-  if code != 0 {
+    if code != 0 {
+      continue
+    }
+    let mode = stdout.text() catch {
+      _ =>
+        return Err(
+          RecipeError::new(TrustStoreUnverifiable).with_detail(
+            "stat output was not readable",
+          ),
+        )
+    }
+    let trimmed = mode.trim()
+    if trimmed == "600" || trimmed == "400" {
+      return Ok(())
+    }
     return Err(
-      RecipeError::new(TrustStoreUnverifiable).with_detail(
-        "stat tool failed",
-      ),
-    )
-  }
-  let mode = stdout.text() catch {
-    _ =>
-      return Err(
-        RecipeError::new(TrustStoreUnverifiable).with_detail(
-          "stat output was not readable",
-        ),
-      )
-  }
-  let trimmed = mode.trim()
-  if trimmed == "600" || trimmed == "400" {
-    Ok(())
-  } else {
-    Err(
       RecipeError::new(TrustStoreInsecure).with_detail(
         "permissions must be 0600 or 0400",
       ),
     )
   }
+  Err(
+    RecipeError::new(TrustStoreUnverifiable).with_detail(
+      "stat tool failed",
+    ),
+  )
 }
 
 ///|
