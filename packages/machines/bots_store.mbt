@@ -183,6 +183,23 @@ fn bots_store_migrate(
   )
   exec_raise(
     conn,
+    "CREATE TABLE IF NOT EXISTS chat_messages (" +
+    "id TEXT PRIMARY KEY, " +
+    "chat_id TEXT NOT NULL, " +
+    "role TEXT NOT NULL, " +
+    "agent_session_id TEXT NOT NULL DEFAULT '', " +
+    "body_ref TEXT NOT NULL DEFAULT '', " +
+    "record_json TEXT NOT NULL, " +
+    "created_at TEXT NOT NULL" +
+    ")",
+  )
+  exec_raise(
+    conn,
+    "CREATE INDEX IF NOT EXISTS chat_messages_chat_idx " +
+    "ON chat_messages(chat_id,id)",
+  )
+  exec_raise(
+    conn,
     "CREATE TABLE IF NOT EXISTS project_memberships (" +
     "project_id TEXT NOT NULL, " +
     "bot_id TEXT NOT NULL, " +
@@ -411,6 +428,30 @@ fn chat_participant_put_raw(
   stmt.bind(index=5, record.added_at)
   stmt.bind(index=6, record.removed_at)
   stmt.bind(index=7, record.to_json().stringify())
+  let _ = stmt.step()
+  stmt.finalize()
+}
+
+///|
+fn chat_message_put_raw(
+  conn : @sqlite3.Connection,
+  record : @contracts.ChatMessage,
+) -> Unit raise @sqlite3.SqliteError {
+  let stmt = conn.prepare(
+    "INSERT INTO chat_messages (id,chat_id,role,agent_session_id,body_ref," +
+    "record_json,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7) " +
+    "ON CONFLICT(id) DO UPDATE SET chat_id=excluded.chat_id," +
+    "role=excluded.role,agent_session_id=excluded.agent_session_id," +
+    "body_ref=excluded.body_ref,record_json=excluded.record_json," +
+    "created_at=excluded.created_at",
+  )
+  stmt.bind(index=1, record.id)
+  stmt.bind(index=2, record.chat_id)
+  stmt.bind(index=3, record.role)
+  stmt.bind(index=4, record.agent_session_id)
+  stmt.bind(index=5, record.body_ref)
+  stmt.bind(index=6, record.to_json().stringify())
+  stmt.bind(index=7, record.created_at)
   let _ = stmt.step()
   stmt.finalize()
 }
@@ -698,6 +739,71 @@ pub fn MachineStore::list_chat_participants(
 }
 
 ///|
+pub fn MachineStore::get_chat_message(
+  self : MachineStore,
+  message_id : String,
+) -> Result[@contracts.ChatMessage?, String] {
+  try {
+    let stmt = self.conn.prepare(
+      "SELECT record_json FROM chat_messages WHERE id=?1",
+    )
+    stmt.bind(index=1, message_id)
+    let mut found : @contracts.ChatMessage? = None
+    if stmt.step() {
+      let text : String = stmt.column(index=0)
+      found = @contracts.chat_message_from_json(bots_parse_json(text))
+    }
+    stmt.finalize()
+    Ok(found)
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
+pub fn MachineStore::list_chat_messages(
+  self : MachineStore,
+  chat_id : String,
+  after : String,
+  limit : Int,
+) -> Result[Array[@contracts.ChatMessage], String] {
+  try {
+    let bounded_limit = limit.max(1).min(200)
+    let stmt = if after == "" {
+      let prepared = self.conn.prepare(
+        "SELECT record_json FROM chat_messages WHERE chat_id=?1 " +
+        "ORDER BY rowid ASC LIMIT ?2",
+      )
+      prepared.bind(index=1, chat_id)
+      prepared.bind(index=2, bounded_limit.to_int64())
+      prepared
+    } else {
+      let prepared = self.conn.prepare(
+        "SELECT record_json FROM chat_messages WHERE chat_id=?1 " +
+        "AND rowid>(SELECT rowid FROM chat_messages WHERE id=?2 AND chat_id=?1) " +
+        "ORDER BY rowid ASC LIMIT ?3",
+      )
+      prepared.bind(index=1, chat_id)
+      prepared.bind(index=2, after)
+      prepared.bind(index=3, bounded_limit.to_int64())
+      prepared
+    }
+    let out : Array[@contracts.ChatMessage] = []
+    while stmt.step() {
+      let text : String = stmt.column(index=0)
+      match @contracts.chat_message_from_json(bots_parse_json(text)) {
+        Some(record) => out.push(record)
+        None => ()
+      }
+    }
+    stmt.finalize()
+    Ok(out)
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
 pub fn MachineStore::get_bot_agent_session(
   self : MachineStore,
   session_id : String,
@@ -906,6 +1012,13 @@ fn apply_bots_event_raw(
       Some(record) => chat_put_raw(conn, record)
       None => return Some(event_type + " payload has no complete Chat record")
     }
+  } else if event_type == @contracts.EVENT_CHAT_MESSAGE_APPENDED {
+    match @contracts.chat_message_appended_record(event.payload) {
+      Some(record) => chat_message_put_raw(conn, record)
+      None => return Some(
+        "chat.message.appended payload has no complete ChatMessage record",
+      )
+    }
   } else if event_type == @contracts.EVENT_CHAT_AGENT_SESSION_STARTED ||
     event_type == @contracts.EVENT_CHAT_AGENT_SESSION_UPDATED ||
     event_type == @contracts.EVENT_CHAT_AGENT_SESSION_ENDED {
@@ -1061,6 +1174,7 @@ pub fn MachineStore::reconcile_bots_projection(
     exec_raise(self.conn, "BEGIN IMMEDIATE")
     let events = load_bots_events(self.conn)
     exec_raise(self.conn, "DELETE FROM chat_participants")
+    exec_raise(self.conn, "DELETE FROM chat_messages")
     exec_raise(
       self.conn,
       "DELETE FROM agent_sessions WHERE record_kind='chat_agent_session'",
@@ -1385,6 +1499,17 @@ fn bots_normalized_chat(
 ) -> @contracts.ChatRecord {
   let created_at = if chat.created_at == "" { now } else { chat.created_at }
   { ..chat, created_at: created_at, updated_at: now }
+}
+
+///|
+fn bots_runtime_binding_valid(binding : @contracts.RuntimeBinding) -> Bool {
+  if binding.software_id == "" || binding.hash == "" {
+    return false
+  }
+  if binding.launch_kind == @contracts.RUNTIME_LAUNCH_COMMAND {
+    return binding.command.trim() != ""
+  }
+  binding.launch_kind == @contracts.RUNTIME_LAUNCH_ACP
 }
 
 ///|
@@ -1994,6 +2119,81 @@ pub fn MachineStore::create_chat(
 }
 
 ///|
+/// Append one user-visible Chat transcript message. Assistant messages must
+/// reference an AgentSession in the same Chat; raw stdout and hidden prompts
+/// are never written here.
+pub fn MachineStore::append_chat_message(
+  self : MachineStore,
+  message : @contracts.ChatMessage,
+  now : String,
+) -> Result[@contracts.ChatMessage, String] {
+  if !@contracts.prefixed_id_valid("msg", message.id) {
+    return Err("ChatMessage id is not canonical: " + message.id)
+  }
+  if message.role != @contracts.CHAT_MESSAGE_ROLE_USER &&
+    message.role != @contracts.CHAT_MESSAGE_ROLE_ASSISTANT &&
+    message.role != @contracts.CHAT_MESSAGE_ROLE_SYSTEM {
+    return Err("unknown ChatMessage role: " + message.role)
+  }
+  if message.body.length() > @contracts.CHAT_MESSAGE_BODY_CAP {
+    return Err("ChatMessage body exceeds the inline cap")
+  }
+  if message.role == @contracts.CHAT_MESSAGE_ROLE_USER &&
+    message.body.trim() == "" {
+    return Err("user ChatMessage body is required")
+  }
+  if message.role == @contracts.CHAT_MESSAGE_ROLE_ASSISTANT &&
+    message.body == "" &&
+    message.body_ref == "" {
+    return Err("assistant ChatMessage requires a body or body_ref")
+  }
+  let chat = match self.get_chat(message.chat_id) {
+    Ok(Some(value)) => value
+    Ok(None) => return Err("Chat not found: " + message.chat_id)
+    Err(err) => return Err(err)
+  }
+  if chat.state != @contracts.CHAT_STATE_ACTIVE {
+    return Err("archived Chat is read-only")
+  }
+  match self.get_chat_message(message.id) {
+    Ok(Some(_)) => return Err("ChatMessage already exists: " + message.id)
+    Ok(None) => ()
+    Err(err) => return Err(err)
+  }
+  if message.role == @contracts.CHAT_MESSAGE_ROLE_ASSISTANT {
+    let sessions = match self.list_chat_agent_sessions(chat.id) {
+      Ok(value) => value
+      Err(err) => return Err(err)
+    }
+    match @bots.validate_chat_message(message, sessions) {
+      Ok(_) => ()
+      Err(reason) => return Err(reason)
+    }
+  }
+  let created_at = if message.created_at == "" { now } else {
+    message.created_at
+  }
+  let digest = if message.digest == "" {
+    @contracts.chat_message_digest(message.body, message.body_ref)
+  } else {
+    message.digest
+  }
+  let record = { ..message, created_at, digest, }
+  let payload = @contracts.chat_message_appended_payload(record)
+  match
+    self.append_bots_event(
+      @contracts.EVENT_CHAT_MESSAGE_APPENDED,
+      @contracts.chat_event_subject(chat.id),
+      payload,
+      now,
+      chat.org_id,
+    ) {
+    Ok(_) => Ok(record)
+    Err(err) => Err(err)
+  }
+}
+
+///|
 /// Start the one non-terminal AgentSession allowed in a V1 Chat.
 pub fn MachineStore::start_chat_agent_session(
   self : MachineStore,
@@ -2024,8 +2224,11 @@ pub fn MachineStore::start_chat_agent_session(
     Ok(None) => return Err("Agent Bot not found: " + agent.bot_id)
     Err(message) => return Err(message)
   }
-  if bot.state == @contracts.BOT_STATE_ARCHIVED {
-    return Err("archived Bot is read-only")
+  if bot.state != @contracts.BOT_STATE_ACTIVE {
+    return Err("Bot is not active; AgentSession cannot start: " + bot.state)
+  }
+  if !bots_runtime_binding_valid(agent.runtime_binding) {
+    return Err("Agent runtime binding is invalid")
   }
   let bot_active_sessions = try {
     bot_nonterminal_session_count(self.conn, bot.id)

@@ -691,6 +691,7 @@ async fn skh_fake_runtime(
     pending: Map([]),
     active_prompts: Map([]),
     turn_text: Ref(""),
+    chat_text: Ref(""),
     home,
     memory_before: "",
     stderr_tail: Ref(""),

@@ -9,6 +9,7 @@ license = "Apache-2.0"
 description = "MoNexus host: local WebSocket JSON-RPC host and discovery file (M1)"
 
 import {
+  "monexus/bots@0.1.0",
   "monexus/contracts@0.1.0",
   "monexus/credentials@0.1.0",
   "monexus/host-client@0.1.0",

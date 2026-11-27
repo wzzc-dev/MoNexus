@@ -250,6 +250,18 @@ async fn append_turn_text(
 }
 
 ///|
+/// Collect assistant-visible ACP text for the Chat transcript projection.
+async fn append_chat_text(
+  state : HostState,
+  runtime : AgentSessionRuntime,
+  text : String,
+) -> Unit {
+  state.mutex.acquire()
+  runtime.chat_text.val = runtime.chat_text.val + text
+  state.mutex.release()
+}
+
+///|
 /// Write the MEMORY.md snapshot diff for a finished run. The artifact file is
 /// written before its event; the returned id is added to the final session
 /// record by `finalize_agent_session`.
@@ -604,6 +616,7 @@ async fn handle_agent_notification(
         "agent_message_chunk" => {
           append_transcript(state, runtime, text)
           append_turn_text(state, runtime, text)
+          append_chat_text(state, runtime, text)
         }
         "agent_thought_chunk" => {
           append_transcript(state, runtime, "\n[thought] " + text + "\n")
@@ -671,6 +684,8 @@ async fn handle_agent_response(
   runtime.active_prompts.remove(id)
   let turn_text = runtime.turn_text.val
   runtime.turn_text.val = ""
+  let chat_text = runtime.chat_text.val
+  runtime.chat_text.val = ""
   let error_text = match fields.get("error") {
     Some(value) => value.stringify()
     None => ""
@@ -710,6 +725,9 @@ async fn handle_agent_response(
       )
     }
     _ => ()
+  }
+  if chat_text != "" {
+    bots_record_assistant_message_locked(state, runtime.id, chat_text, timestamp)
   }
   state.mutex.release()
 }
@@ -1607,6 +1625,7 @@ async fn handle_agent_start(
     pending: Map([]),
     active_prompts: Map([]),
     turn_text: Ref(""),
+    chat_text: Ref(""),
     home,
     memory_before: memory_text,
     stderr_tail,
@@ -2290,6 +2309,7 @@ async fn handle_agent_resume(
     pending: Map([]),
     active_prompts: Map([]),
     turn_text: Ref(""),
+    chat_text: Ref(""),
     home,
     memory_before,
     stderr_tail,
