@@ -60,12 +60,13 @@ fn ui_panel(
   child : @moui.View[Msg],
   width? : Double,
   height? : Double,
+  fill? : @core.Color,
 ) -> @moui.View[Msg] {
   @views.container(
     child,
     width?,
     height?,
-    background=ui_surface(),
+    background=fill.unwrap_or(ui_surface()),
     corner_radius=ui_island_radius,
     border=Some(ui_edge(ui_border())),
     padding=0.0,
@@ -91,7 +92,7 @@ fn ui_card(
     @views.padding(inner, padding),
     width?,
     background=ui_surface(),
-    corner_radius=10.0,
+    corner_radius=5.0,
     border=Some(ui_edge(ui_border_soft())),
     padding=0.0,
   )
@@ -235,6 +236,17 @@ fn ui_divider_soft() -> @moui.View[Msg] {
 }
 
 ///|
+fn ui_vertical_rule(height : Double) -> @moui.View[Msg] {
+  @views.container(
+    @views.empty(),
+    width=1.0,
+    height~,
+    background=ui_border_soft(),
+    padding=0.0,
+  )
+}
+
+///|
 /// Six-pixel status dot.
 fn ui_dot(color : @core.Color) -> @moui.View[Msg] {
   @views.container(
@@ -254,10 +266,10 @@ fn ui_tag(label : String) -> @moui.View[Msg] {
   @views.container(
     @views.padding_xy(
       @views.text(label, align=@core.TextAlign::TextStart).font(ui_font(11.0, 500)).foreground(tone),
-      horizontal=8.0,
+      horizontal=6.0,
     ),
-    height=22.0,
-    corner_radius=11.0,
+    height=18.0,
+    corner_radius=3.0,
     border=Some(ui_edge(tone.multiply_alpha(0.5))),
     padding=0.0,
   )
@@ -277,9 +289,9 @@ fn ui_pill(label : String, active : Bool) -> @moui.View[Msg] {
       ),
       horizontal=6.0,
     ),
-    height=18.0,
+    height=16.0,
     background=if active { ui_accent_soft() } else { ui_surface_alt() },
-    corner_radius=9.0,
+    corner_radius=3.0,
     padding=0.0,
   )
 }
@@ -293,11 +305,11 @@ fn ui_state_pill(label : String, tone : @core.Color) -> @moui.View[Msg] {
         ui_dot(tone),
         @views.text(label, align=@core.TextAlign::TextStart).font(ui_font(11.0, 500)).foreground(ui_muted()),
       ], spacing=6.0, align=@style.CrossAlign::Center),
-      horizontal=9.0,
+      horizontal=7.0,
       vertical=0.0,
     ),
-    height=22.0,
-    corner_radius=11.0,
+    height=20.0,
+    corner_radius=3.0,
     border=Some(ui_edge(ui_border())),
     padding=0.0,
   )
@@ -340,12 +352,12 @@ fn ui_stat_card(
 }
 
 ///|
-/// Filled primary action in the one accent.
+/// Filled primary action: ink fill, paper label.
 fn ui_primary(label : String, msg : Msg) -> @moui.View[Msg] {
   @views.button(
     label,
     on_click=msg,
-    style=primary_button_style(ui_accent()),
+    style=primary_button_style(ui_ink()),
     height=30.0,
   )
 }
@@ -496,8 +508,8 @@ fn ui_id_meta(lang : Lang, label : String, id : String) -> @moui.View[Msg] {
 }
 
 ///|
-/// One segment of a two-way Settings control. The active option is
-/// accent-tinted; the other option is a quiet outline.
+/// One segment of a quiet segmented control. The active option uses the
+/// selected paper wash; the other option stays transparent.
 fn ui_choice_segment(
   label : String,
   active : Bool,
@@ -507,7 +519,7 @@ fn ui_choice_segment(
     @views.padding_xy(
       @views.text(label, align=@core.TextAlign::TextStart).font(ui_font(12.0, 500)).foreground(
         if active {
-          ui_accent()
+          ui_ink()
         } else {
           ui_muted()
         },
@@ -515,12 +527,12 @@ fn ui_choice_segment(
       horizontal=18.0,
     ),
     height=30.0,
-    background=if active { ui_accent_soft() } else { ui_surface() },
-    corner_radius=7.0,
+    background=if active { ui_selected() } else { ui_surface() },
+    corner_radius=4.0,
     border=Some(
       ui_edge(
         if active {
-          ui_accent().multiply_alpha(0.55)
+          ui_border()
         } else {
           ui_border()
         },

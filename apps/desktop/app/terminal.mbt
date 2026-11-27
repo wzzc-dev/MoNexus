@@ -28,7 +28,8 @@ fn terminal_state_label(state : TerminalState, lang : Lang) -> String {
 /// therefore stop host reads; the protocol cursor lets the next visit resume
 /// from the last byte instead of replaying the transcript.
 fn terminal_should_poll(model : Model) -> Bool {
-  model.page == Projects &&
+  model.page == Manage &&
+  model.manage_tab == ManageProjects &&
   model.project.terminal_focus &&
   model.project.terminal_id != "" &&
   model.project.terminal_state == TerminalRunning &&

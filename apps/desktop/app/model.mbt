@@ -1,14 +1,13 @@
 ///|
-/// Five shell pages. M1 only switches between them; the content is a
-/// placeholder for M2-M5 business screens.
+/// Primary desktop destinations. Chat is the opening surface; the Bot page is
+/// reached from a Bot/Chat identity and is deliberately not a nav item.
 #derive(Eq)
 pub(all) enum Page {
-  Home
-  Machines
-  Projects
-  Agents
+  Workroom
+  BotDetail
   Inbox
   Tasks
+  Manage
   Search
   Settings
 }
@@ -16,12 +15,11 @@ pub(all) enum Page {
 ///|
 pub fn Page::label(self : Page) -> String {
   match self {
-    Home => "Home"
-    Machines => "Machines"
-    Projects => "Projects"
-    Agents => "Agents"
+    Workroom => "Workroom"
+    BotDetail => "Bot"
     Inbox => "Inbox"
     Tasks => "Tasks"
+    Manage => "Manage"
     Search => "Search"
     Settings => "Settings"
   }
@@ -32,29 +30,153 @@ pub fn Page::label(self : Page) -> String {
 /// used by `MONEXUS_SCENE_PAGE` and tests; this is the one the shell paints.
 pub fn Page::label_in(self : Page, lang : Lang) -> String {
   match self {
-    Home => tr(lang, "Home", "主页")
-    Machines => tr(lang, "Machines", "机器")
-    Projects => tr(lang, "Projects", "项目")
-    Agents => tr(lang, "Agents", "智能体")
+    Workroom => tr(lang, "Chats", "对话")
+    BotDetail => tr(lang, "Bot", "Bot")
     Inbox => tr(lang, "Inbox", "收件箱")
     Tasks => tr(lang, "Tasks", "任务")
+    Manage => tr(lang, "Manage", "管理")
     Search => tr(lang, "Search", "搜索")
     Settings => tr(lang, "Settings", "设置")
   }
 }
 
 ///|
+/// Parse both the new destinations and the pre-workroom labels. Keeping the
+/// old spellings means existing scene/deep-link callers land on the closest
+/// workroom destination instead of silently opening a removed page.
 pub fn Page::from_label(value : String) -> Page {
   match value.to_lower() {
-    "machines" => Machines
-    "projects" => Projects
-    "agents" => Agents
+    "home" | "chat" | "chats" | "workroom" => Workroom
+    "agents" | "bot" | "bots" | "botdetail" | "bot-detail" => BotDetail
+    "machines" | "projects" | "manage" => Manage
     "inbox" => Inbox
     "tasks" => Tasks
     "search" => Search
     "settings" => Settings
-    _ => Home
+    _ => Workroom
   }
+}
+
+///|
+/// Secondary destination inside Manage. Projects and Machines are tabs of one
+/// tools page, not peer top-level destinations.
+#derive(Eq)
+pub(all) enum ManageTab {
+  ManageProjects
+  ManageMachines
+}
+
+///|
+pub fn ManageTab::label(self : ManageTab) -> String {
+  match self {
+    ManageProjects => "Projects"
+    ManageMachines => "Machines"
+  }
+}
+
+///|
+pub fn ManageTab::label_in(self : ManageTab, lang : Lang) -> String {
+  match self {
+    ManageProjects => tr(lang, "Projects", "项目")
+    ManageMachines => tr(lang, "Machines", "机器")
+  }
+}
+
+///|
+fn manage_tab_from_label(value : String) -> ManageTab {
+  match value.to_lower() {
+    "machines" => ManageMachines
+    _ => ManageProjects
+  }
+}
+
+///|
+/// Tabs on the Bot identity/work-ledger page.
+#derive(Eq)
+pub(all) enum BotTab {
+  BotHome
+  BotChats
+  BotAgents
+  BotFiles
+}
+
+///|
+pub fn BotTab::label_in(self : BotTab, lang : Lang) -> String {
+  match self {
+    BotHome => tr(lang, "Home", "主页")
+    BotChats => tr(lang, "Chats", "聊天")
+    BotAgents => tr(lang, "Agents", "Agents")
+    BotFiles => tr(lang, "Files", "文件")
+  }
+}
+
+///|
+/// Presentation-only grouping for Bot work items. The underlying records stay
+/// the existing Task projections; this only decides which ledger section a
+/// status belongs to.
+#derive(Eq)
+pub(all) enum BotWorkGroup {
+  BotWorkActive
+  BotWorkWaiting
+  BotWorkPlanned
+  BotWorkClosed
+}
+
+///|
+pub fn BotWorkGroup::label_in(self : BotWorkGroup, lang : Lang) -> String {
+  match self {
+    BotWorkActive => tr(lang, "In progress", "进行中")
+    BotWorkWaiting => tr(lang, "Waiting", "等待中")
+    BotWorkPlanned => tr(lang, "Planned", "已计划")
+    BotWorkClosed => tr(lang, "Closed", "已关闭")
+  }
+}
+
+///|
+/// Typed presentation projection for `bot.list`/`chat.list`. P0.2 exposes the
+/// records, but the host RPC methods do not exist yet; the model keeps these
+/// arrays empty until an adapter fills them. The workroom then falls back to
+/// the current Agent session rather than inventing histories.
+pub(all) struct ChatProjection {
+  id : String
+  bot_id : String
+  title : String
+  state : String
+  updated_at : String
+  project_id : String
+  agent_session_id : String
+}
+
+///|
+/// Typed seam for Bot automations. No host projection exists yet, so the Bot
+/// page paints a single honest empty row while keeping the shape ready.
+pub(all) struct BotAutomation {
+  id : String
+  title : String
+  cadence : String
+  hint : String
+}
+
+///|
+/// Small resolved identity used by the workroom header, sidebar and Bot page.
+pub(all) struct BotIdentity {
+  id : String
+  name : String
+  status : String
+  summary : String
+  is_fallback : Bool
+}
+
+///|
+/// Small resolved Chat summary used by the workroom header and Chat rows.
+pub(all) struct ChatIdentity {
+  id : String
+  bot_id : String
+  title : String
+  status : String
+  updated_at : String
+  agent_session_id : String
+  is_fallback : Bool
 }
 
 ///|
@@ -233,6 +355,13 @@ pub(all) struct AgentState {
   stop_reason : String
   pending_decision : String
   message : String
+  /// Prompt that actually started the active session in this window. It lets
+  /// the workroom show one truthful user entry without parsing the raw ACP
+  /// transcript into invented roles.
+  launch_prompt : String
+  /// Follow-ups submitted from this window. These are local UI facts, not a
+  /// reconstructed transcript.
+  sent_prompts : Array[String]
 }
 
 ///|
@@ -256,6 +385,8 @@ pub fn AgentState::new() -> AgentState {
     stop_reason: "",
     pending_decision: "",
     message: "",
+    launch_prompt: "",
+    sent_prompts: [],
   }
 }
 
@@ -356,6 +487,25 @@ pub fn SearchState::new() -> SearchState {
 ///|
 pub struct Model {
   page : Page
+  /// Selected Manage tab. The page stays one destination while Projects and
+  /// Machines switch as internal tabs.
+  manage_tab : ManageTab
+  /// Bot detail is a route inside the workroom, not an eighth primary entry.
+  bot_tab : BotTab
+  bots : Array[@contracts.BotRecord]
+  chats : Array[ChatProjection]
+  bots_loaded : Bool
+  chats_loaded : Bool
+  automations : Array[BotAutomation]
+  selected_bot : String
+  selected_chat : String
+  composer_bot_picker_open : Bool
+  composing_new_chat : Bool
+  bot_work_open : String
+  bot_show_all : Bool
+  bot_agent_manage : Bool
+  bot_comment : String
+  bot_comment_note : String
   host : HostProjection
   machines : Array[@contracts.MachineRecord]
   machines_loaded : Bool
@@ -416,7 +566,11 @@ pub fn Model::new_with_preferences(
   let state_dir = @client.default_state_dir()
   let page = match @env.get_env_var("MONEXUS_SCENE_PAGE") {
     Some(value) => Page::from_label(value)
-    None => Home
+    None => Workroom
+  }
+  let manage_tab = match @env.get_env_var("MONEXUS_SCENE_PAGE") {
+    Some(value) => manage_tab_from_label(value)
+    None => ManageProjects
   }
   let mut host = HostProjection::new(state_dir)
   // Scene overrides let `moui screenshot` capture deterministic online and
@@ -477,6 +631,22 @@ pub fn Model::new_with_preferences(
   }
   {
     page,
+    manage_tab,
+    bot_tab: BotHome,
+    bots: [],
+    chats: [],
+    bots_loaded: false,
+    chats_loaded: false,
+    automations: [],
+    selected_bot: "",
+    selected_chat: "",
+    composer_bot_picker_open: false,
+    composing_new_chat: false,
+    bot_work_open: "",
+    bot_show_all: false,
+    bot_agent_manage: false,
+    bot_comment: "",
+    bot_comment_note: "",
     host,
     machines,
     machines_loaded: machines.length() > 0,
@@ -557,6 +727,30 @@ pub(all) struct HostStatusSnapshot {
 ///|
 pub(all) enum Msg {
   SelectPage(Page)
+  SelectManageTab(ManageTab)
+  /// Open a Bot. A known latest Chat wins; otherwise the Bot page opens.
+  SelectBot(String)
+  /// Open the Bot identity/work-ledger page directly. Used by Bot rows and the
+  /// Bot identity in the Chat header so the Bot page is always reachable.
+  OpenBotDetail(String)
+  /// Select the Bot whose identity owns the next Chat from the composer.
+  SelectComposerBot(String)
+  ComposerBotPicker(Bool)
+  /// Open a known Chat. The current Agent session remains the fallback when no
+  /// Chat projection has been loaded yet.
+  SelectChat(String)
+  /// Start a fresh Chat flow without inventing a Chat record.
+  NewChat
+  SelectBotTab(BotTab)
+  ToggleBotWorkItem(String)
+  OpenBotWorkItem(String)
+  CloseBotWorkItem
+  ToggleBotShowAll
+  SetBotAgentManage(Bool)
+  BotCommentDraft(String)
+  BotCommentSave
+  BotsLoaded(Array[@contracts.BotRecord])
+  ChatsLoaded(Array[ChatProjection])
   /// Appearance flip from the Settings segmented control; repaints and asks
   /// the preference worker to persist the explicit choice.
   SetTheme(ThemeMode)
@@ -659,6 +853,9 @@ pub(all) enum Msg {
   AgentProbeNow
   AgentStartSession
   AgentSendInput
+  /// Composer send: starts the fallback Agent session when there is no active
+  /// Chat yet, otherwise submits a follow-up to the current session.
+  ComposerSend
   AgentStopSession
   AgentResumeSession
   AgentStarted(@contracts.AgentSessionRecord)
@@ -1131,6 +1328,279 @@ fn most_recent_session(
 }
 
 ///|
+fn bot_by_id(
+  records : Array[@contracts.BotRecord],
+  id : String,
+) -> @contracts.BotRecord? {
+  for record in records {
+    if record.id == id {
+      return Some(record)
+    }
+  }
+  None
+}
+
+///|
+fn chat_by_id(
+  records : Array[ChatProjection],
+  id : String,
+) -> ChatProjection? {
+  for record in records {
+    if record.id == id {
+      return Some(record)
+    }
+  }
+  None
+}
+
+///|
+fn latest_chat_for_bot(
+  records : Array[ChatProjection],
+  bot_id : String,
+) -> ChatProjection? {
+  let mut best : ChatProjection? = None
+  for record in records {
+    if record.bot_id != bot_id {
+      continue
+    }
+    let replace = match best {
+      None => true
+      Some(current) =>
+        record.updated_at > current.updated_at ||
+        (record.updated_at == current.updated_at && record.id < current.id)
+    }
+    if replace {
+      best = Some(record)
+    }
+  }
+  best
+}
+
+///|
+fn bot_name(record : @contracts.BotRecord) -> String {
+  if record.name.trim() == "" {
+    "Unnamed bot"
+  } else {
+    record.name
+  }
+}
+
+///|
+fn bot_identity_for(model : Model, record : @contracts.BotRecord) -> BotIdentity {
+  let summary =
+    tr(model.lang, "Bot identity", "Bot 身份") +
+    (if record.state == "" {
+      ""
+    } else {
+      " · " + record.state
+    }) +
+    (if record.home == "" {
+      ""
+    } else {
+      " · " + record.home
+    })
+  {
+    id: record.id,
+    name: bot_name(record),
+    status: record.state,
+    summary,
+    is_fallback: false,
+  }
+}
+
+///|
+fn session_bot_identity(
+  model : Model,
+  record : @contracts.AgentSessionRecord,
+) -> BotIdentity {
+  let name = if record.agent_name.trim() == "" {
+    tr(model.lang, "Default agent", "默认智能体")
+  } else {
+    record.agent_name
+  }
+  let summary =
+    (if record.workspace_id == "" {
+      tr(model.lang, "Current agent session", "当前智能体会话")
+    } else {
+      workspace_context_name(model, record.workspace_id)
+    }) +
+    (if record.mode == "" {
+      ""
+    } else {
+      " · " + record.mode
+    })
+  {
+    id: record.agent_id,
+    name,
+    status: model.agent.state_text,
+    summary,
+    is_fallback: true,
+  }
+}
+
+///|
+fn chat_identity_for(
+  model : Model,
+  record : ChatProjection,
+) -> ChatIdentity {
+  {
+    id: record.id,
+    bot_id: record.bot_id,
+    title: if record.title.trim() == "" {
+      tr(model.lang, "Untitled chat", "未命名对话")
+    } else {
+      record.title
+    },
+    status: record.state,
+    updated_at: record.updated_at,
+    agent_session_id: record.agent_session_id,
+    is_fallback: false,
+  }
+}
+
+///|
+/// Resolve the Chat the workroom is showing. A selected Chat projection wins;
+/// with none loaded, the current Agent session is the one honest active Chat.
+pub fn active_chat_identity(model : Model) -> ChatIdentity? {
+  if model.composing_new_chat {
+    return None
+  }
+  if model.selected_chat != "" {
+    match chat_by_id(model.chats, model.selected_chat) {
+      Some(record) => return Some(chat_identity_for(model, record))
+      None => ()
+    }
+  }
+  match model.agent.session {
+    Some(record) =>
+      Some({
+        id: record.id,
+        bot_id: if model.selected_bot == "" {
+          record.agent_id
+        } else {
+          model.selected_bot
+        },
+        title: tr(model.lang, "Current session", "当前会话"),
+        status: if model.agent.state_text == "" {
+          record.state
+        } else {
+          model.agent.state_text
+        },
+        updated_at: session_recency(record),
+        agent_session_id: record.id,
+        is_fallback: true,
+      })
+    None => None
+  }
+}
+
+///|
+/// Resolve the active Bot identity. Loaded Bot projections win; before P0.3
+/// data exists, the current Agent session supplies one truthful fallback row.
+pub fn active_bot_identity(model : Model) -> BotIdentity {
+  if model.selected_bot != "" {
+    match bot_by_id(model.bots, model.selected_bot) {
+      Some(record) => return bot_identity_for(model, record)
+      None => ()
+    }
+  }
+  match active_chat_identity(model) {
+    Some(chat) =>
+      if chat.bot_id != "" {
+        match bot_by_id(model.bots, chat.bot_id) {
+          Some(record) => return bot_identity_for(model, record)
+          None => ()
+        }
+      }
+    None => ()
+  }
+  match model.bots {
+    [record, ..] => return bot_identity_for(model, record)
+    [] => ()
+  }
+  match model.agent.session {
+    Some(record) => session_bot_identity(model, record)
+    None =>
+      {
+        id: "",
+        name: tr(model.lang, "MoNexus", "MoNexus"),
+        status: tr(model.lang, "waiting", "等待中"),
+        summary: tr(
+          model.lang,
+          "No Bot projection loaded",
+          "尚未加载 Bot 投影",
+        ),
+        is_fallback: true,
+      }
+  }
+}
+
+///|
+pub fn workspace_context_name(model : Model, workspace_id : String) -> String {
+  if workspace_id == "" {
+    return ""
+  }
+  match workspace_by_id(model.project.workspaces, workspace_id) {
+    Some(record) => workspace_display_name(record)
+    None => tr(model.lang, "Workspace not open", "工作区未打开")
+  }
+}
+
+///|
+pub fn chat_uses_current_session(model : Model, chat : ChatIdentity) -> Bool {
+  match model.agent.session {
+    Some(record) =>
+      chat.is_fallback ||
+      chat.agent_session_id == record.id ||
+      chat.id == record.id
+    None => false
+  }
+}
+
+///|
+fn compact_time(value : String) -> String {
+  if value == "" {
+    return ""
+  }
+  let spaced = value.replace(old="T", new=" ")
+  let stamp = if spaced.has_suffix("Z") {
+    spaced[:spaced.length() - 1].to_owned()
+  } else {
+    spaced
+  }
+  if stamp.length() >= 16 {
+    stamp[:16].to_owned()
+  } else {
+    stamp
+  }
+}
+
+///|
+fn task_group_of(status : String) -> BotWorkGroup {
+  match status {
+    @contracts.TASK_STATUS_RUNNING => BotWorkActive
+    @contracts.TASK_STATUS_WAITING_APPROVAL |
+    @contracts.TASK_STATUS_WAITING_OWNER |
+    @contracts.TASK_STATUS_BLOCKED =>
+      BotWorkWaiting
+    @contracts.TASK_STATUS_DRAFT |
+    @contracts.TASK_STATUS_PLANNED |
+    @contracts.TASK_STATUS_READY =>
+      BotWorkPlanned
+    _ => BotWorkClosed
+  }
+}
+
+///|
+fn short_metadata_id(value : String) -> String {
+  if value.length() <= 10 {
+    value
+  } else {
+    "…" + value[value.length() - 8:].to_owned()
+  }
+}
+
+///|
 /// Pure update: returns the next model plus the commands the command worker
 /// should run. `update` below is the model-only view used by tests.
 pub fn update_full(
@@ -1143,17 +1613,293 @@ pub fn update_full(
       {
         ..model,
         page,
+        selected_bot: if page == BotDetail && model.selected_bot == "" {
+          active_bot_identity(model).id
+        } else {
+          model.selected_bot
+        },
         hover_row: "",
         scroll_epoch: model.scroll_epoch + 1,
       },
       match page {
-        Agents => [AgentList, ProjectList, RefreshMachines]
+        Workroom => [
+          AgentList,
+          ProjectList,
+          RefreshMachines,
+          TaskRefresh(model.task.event_seq),
+          DecisionList(""),
+        ]
+        BotDetail => [
+          AgentList,
+          ProjectList,
+          RefreshMachines,
+          TaskRefresh(model.task.event_seq),
+        ]
         Inbox => [DecisionList("")]
-        Projects => [ProjectList, RefreshMachines]
         Tasks => [TaskRefresh(model.task.event_seq), ProjectList, RefreshMachines]
+        Manage =>
+          match model.manage_tab {
+            ManageProjects => [ProjectList, RefreshMachines]
+            ManageMachines => [RefreshMachines]
+          }
         _ => none
       },
     )
+    SelectManageTab(tab) => (
+      {
+        ..model,
+        page: Manage,
+        manage_tab: tab,
+        hover_row: "",
+        scroll_epoch: model.scroll_epoch + 1,
+      },
+      match tab {
+        ManageProjects => [ProjectList, RefreshMachines]
+        ManageMachines => [RefreshMachines]
+      },
+    )
+    SelectBot(bot_id) => {
+      let latest = latest_chat_for_bot(model.chats, bot_id)
+      match latest {
+        Some(chat) =>
+          (
+            {
+              ..model,
+              page: Workroom,
+              selected_bot: bot_id,
+              selected_chat: chat.id,
+              composing_new_chat: false,
+              hover_row: "",
+              scroll_epoch: model.scroll_epoch + 1,
+            },
+            none,
+          )
+        None =>
+          (
+            {
+              ..model,
+              page: BotDetail,
+              bot_tab: BotHome,
+              selected_bot: bot_id,
+              composing_new_chat: false,
+              hover_row: "",
+              scroll_epoch: model.scroll_epoch + 1,
+            },
+            [
+              AgentList,
+              ProjectList,
+              RefreshMachines,
+              TaskRefresh(model.task.event_seq),
+            ],
+          )
+      }
+    }
+    OpenBotDetail(bot_id) => (
+      {
+        ..model,
+        page: BotDetail,
+        bot_tab: BotHome,
+        selected_bot: if bot_id == "" {
+          active_bot_identity(model).id
+        } else {
+          bot_id
+        },
+        bot_work_open: "",
+        bot_agent_manage: false,
+        bot_comment_note: "",
+        composing_new_chat: false,
+        hover_row: "",
+        scroll_epoch: model.scroll_epoch + 1,
+      },
+      [AgentList, ProjectList, RefreshMachines, TaskRefresh(model.task.event_seq)],
+    )
+    SelectComposerBot(bot_id) => (
+      {
+        ..model,
+        selected_bot: bot_id,
+        composer_bot_picker_open: false,
+      },
+      none,
+    )
+    ComposerBotPicker(open) => (
+      { ..model, composer_bot_picker_open: open },
+      none,
+    )
+    SelectChat(chat_id) =>
+      match chat_by_id(model.chats, chat_id) {
+        Some(chat) => {
+          let commands : Array[MachineCommand] = []
+          let mut agent = model.agent
+          if chat.agent_session_id != "" {
+            for record in model.agent.sessions {
+              if record.id == chat.agent_session_id {
+                agent = {
+                  ..agent,
+                  session: Some(record),
+                  agent_id: if record.agent_id == "" {
+                    agent.agent_id
+                  } else {
+                    record.agent_id
+                  },
+                  workspace_id: if record.workspace_id == "" {
+                    agent.workspace_id
+                  } else {
+                    record.workspace_id
+                  },
+                  worktree_id: record.worktree_id,
+                  transcript: "",
+                  cursor: 0L,
+                  state_text: record.state,
+                  stop_reason: record.stop_reason,
+                  pending_decision: "",
+                }
+              }
+            }
+            commands.push(AgentRead(chat.agent_session_id))
+          }
+          (
+            {
+              ..model,
+              page: Workroom,
+              selected_bot: chat.bot_id,
+              selected_chat: chat.id,
+              composing_new_chat: false,
+              agent,
+              hover_row: "",
+              scroll_epoch: model.scroll_epoch + 1,
+            },
+            commands,
+          )
+        }
+        None => (model, none)
+      }
+    NewChat => (
+      {
+        ..model,
+        page: Workroom,
+        selected_chat: "",
+        selected_bot: active_bot_identity(model).id,
+        composer_bot_picker_open: false,
+        composing_new_chat: true,
+        bot_comment_note: "",
+        scroll_epoch: model.scroll_epoch + 1,
+      },
+      none,
+    )
+    SelectBotTab(tab) => (
+      {
+        ..model,
+        page: BotDetail,
+        bot_tab: tab,
+        selected_bot: if model.selected_bot == "" {
+          active_bot_identity(model).id
+        } else {
+          model.selected_bot
+        },
+        bot_agent_manage: false,
+        scroll_epoch: model.scroll_epoch + 1,
+      },
+      none,
+    )
+    ToggleBotWorkItem(task_id) => (
+      {
+        ..model,
+        bot_work_open: if model.bot_work_open == task_id {
+          ""
+        } else {
+          task_id
+        },
+      },
+      none,
+    )
+    OpenBotWorkItem(task_id) => (
+      { ..model, bot_work_open: task_id },
+      none,
+    )
+    CloseBotWorkItem => ({ ..model, bot_work_open: "" }, none)
+    ToggleBotShowAll => (
+      { ..model, bot_show_all: !model.bot_show_all },
+      none,
+    )
+    SetBotAgentManage(open) => (
+      { ..model, bot_agent_manage: open },
+      none,
+    )
+    BotCommentDraft(value) => (
+      { ..model, bot_comment: value, bot_comment_note: "" },
+      none,
+    )
+    BotCommentSave =>
+      if model.bot_comment.trim() == "" {
+        (
+          {
+            ..model,
+            bot_comment_note: tr(
+              model.lang,
+              "Write a comment first.",
+              "请先输入评论。",
+            ),
+          },
+          none,
+        )
+      } else if model.bot_comment.to_array().length() > 50 {
+        (
+          {
+            ..model,
+            bot_comment_note: tr(
+              model.lang,
+              "Comments are limited to 50 characters.",
+              "评论最多 50 个字符。",
+            ),
+          },
+          none,
+        )
+      } else {
+        (
+          {
+            ..model,
+            bot_comment: "",
+            bot_comment_note: tr(
+              model.lang,
+              "Comment kept in this window only; host comment persistence is not available yet.",
+              "评论仅保留在当前窗口；主机评论持久化尚未提供。",
+            ),
+          },
+          none,
+        )
+      }
+    BotsLoaded(records) => {
+      let bots : Array[@contracts.BotRecord] = []
+      for record in records {
+        bots.push(record)
+      }
+      let selected_bot = if model.selected_bot != "" {
+        model.selected_bot
+      } else if bots.is_empty() {
+        ""
+      } else {
+        bots[0].id
+      }
+      ({ ..model, bots, bots_loaded: true, selected_bot }, none)
+    }
+    ChatsLoaded(records) => {
+      let chats : Array[ChatProjection] = []
+      for record in records {
+        chats.push(record)
+      }
+      let mut selected_chat = model.selected_chat
+      if selected_chat == "" && !model.composing_new_chat && !chats.is_empty() {
+        let mut best = chats[0]
+        for record in chats {
+          if record.updated_at > best.updated_at ||
+            (record.updated_at == best.updated_at && record.id < best.id) {
+            best = record
+          }
+        }
+        selected_chat = best.id
+      }
+      ({ ..model, chats, chats_loaded: true, selected_chat }, none)
+    }
     SetTheme(mode) => ({ ..model, theme_mode: mode }, none)
     ThemeChoiceStored(status) => (
       {
@@ -1811,7 +2557,8 @@ pub fn update_full(
           (
             {
               ..model,
-              page: Projects,
+              page: Manage,
+              manage_tab: ManageProjects,
               scroll_epoch: model.scroll_epoch + 1,
               project: {
                 ..model.project,
@@ -1866,7 +2613,8 @@ pub fn update_full(
           (
             {
               ..model,
-              page: Projects,
+              page: Manage,
+              manage_tab: ManageProjects,
               project: {
                 ..model.project,
                 terminal_id: "",
@@ -2410,6 +3158,8 @@ pub fn update_full(
               pending_decision: "",
               state_text: "starting",
               stop_reason: "",
+              launch_prompt: model.agent.prompt,
+              sent_prompts: [],
               message: tr(model.lang, "starting ", "正在启动 ") +
               model.agent.agent_id +
               "...",
@@ -2432,12 +3182,15 @@ pub fn update_full(
           if model.agent.input == "" {
             (model, none)
           } else {
+            let sent = model.agent.sent_prompts.copy()
+            sent.push(model.agent.input)
             (
               {
                 ..model,
                 agent: {
                   ..model.agent,
                   input: "",
+                  sent_prompts: sent,
                   state_text: "running",
                   message: tr(model.lang, "prompt sent", "提示词已发送"),
                 },
@@ -2460,6 +3213,93 @@ pub fn update_full(
           none,
         )
       }
+    ComposerSend => {
+      let prompt = model.agent.input.trim().to_owned()
+      if prompt == "" {
+        (model, none)
+      } else {
+        match model.agent.session {
+          Some(record) =>
+            if model.composing_new_chat {
+              (
+                {
+                  ..model,
+                  composing_new_chat: false,
+                  selected_chat: "",
+                  agent: {
+                    ..model.agent,
+                    input: "",
+                    launch_prompt: prompt,
+                    sent_prompts: [],
+                    state_text: "starting",
+                    stop_reason: "",
+                    message: tr(
+                      model.lang,
+                      "starting a new Chat...",
+                      "正在启动新对话...",
+                    ),
+                  },
+                },
+                [
+                  AgentStart(
+                    model.agent.agent_id,
+                    model.agent.mode,
+                    model.agent.workspace_id,
+                    model.agent.worktree_id,
+                    prompt,
+                  ),
+                ],
+              )
+            } else {
+              let sent = model.agent.sent_prompts.copy()
+              sent.push(prompt)
+              (
+                {
+                  ..model,
+                  agent: {
+                    ..model.agent,
+                    input: "",
+                    sent_prompts: sent,
+                    state_text: "running",
+                    message: tr(model.lang, "prompt sent", "提示词已发送"),
+                  },
+                },
+                [AgentSend(record.id, prompt)],
+              )
+            }
+          None =>
+            (
+              {
+                ..model,
+                composing_new_chat: false,
+                selected_chat: "",
+                agent: {
+                  ..model.agent,
+                  input: "",
+                  launch_prompt: prompt,
+                  sent_prompts: [],
+                  state_text: "starting",
+                  stop_reason: "",
+                  message: tr(
+                    model.lang,
+                    "starting a new Chat...",
+                    "正在启动新对话...",
+                  ),
+                },
+              },
+              [
+                AgentStart(
+                  model.agent.agent_id,
+                  model.agent.mode,
+                  model.agent.workspace_id,
+                  model.agent.worktree_id,
+                  prompt,
+                ),
+              ],
+            )
+        }
+      }
+    }
     AgentStopSession =>
       match model.agent.session {
         Some(record) => (
@@ -2506,6 +3346,7 @@ pub fn update_full(
     AgentStarted(record) => (
       {
         ..model,
+        composing_new_chat: false,
         agent: {
           ..model.agent,
           session: Some(record),
@@ -2525,6 +3366,7 @@ pub fn update_full(
           state_text: record.state,
           stop_reason: record.stop_reason,
           pending_decision: "",
+          launch_prompt: model.agent.launch_prompt,
           message: tr(model.lang, "session started · ", "会话已启动 · ") +
           record.mode +
           " · " +

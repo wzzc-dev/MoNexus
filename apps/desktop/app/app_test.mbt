@@ -1,32 +1,36 @@
 ///|
-test "the shell renders the header and the Home page" {
+test "the shell renders the Chat-first workroom" {
   let harness = @test_support.WidgetHarness::from_program(
     program=program(),
     width=1280.0,
     height=800.0,
   )
   assert_true(harness.has_text("MoNexus"))
-  assert_true(harness.has_text("Welcome to MoNexus"))
-  assert_true(harness.has_text("host connecting"))
+  assert_true(harness.has_text("New Chat"))
+  assert_true(harness.has_text("Start a Chat"))
+  assert_true(harness.has_text("Details"))
+  assert_true(harness.has_text("connecting"))
 }
 
 ///|
-test "all eight pages can be switched by tapping navigation" {
+test "secondary tools and the Bot page are reachable without a top-level Bot item" {
   let harness = @test_support.WidgetHarness::from_program(
     program=program(),
     width=1280.0,
     height=800.0,
   )
-  harness.tap_text("Machines")
-  assert_true(harness.has_text("Add machine"))
-  assert_true(harness.has_text("Saved machines"))
-  harness.tap_text("Agents")
-  assert_true(harness.has_text("Agents / Sessions"))
-  assert_true(harness.has_text("Start session"))
   harness.tap_text("Inbox")
   assert_true(harness.has_text("No decisions yet."))
   harness.tap_text("Tasks")
   assert_true(harness.has_text("Board"))
+  harness.tap_text("Manage")
+  assert_true(harness.has_text("Open project"))
+  assert_true(harness.has_text("loading workspaces from the host..."))
+  harness.tap_text("Machines")
+  assert_true(harness.has_text("Add machine"))
+  assert_true(harness.has_text("Saved machines"))
+  harness.tap_text("Projects")
+  assert_true(harness.has_text("Open project"))
   harness.tap_text("Search")
   assert_true(
     harness.has_text(
@@ -37,8 +41,32 @@ test "all eight pages can be switched by tapping navigation" {
   assert_true(harness.has_text("Connection"))
   assert_true(harness.has_text("token: unknown (host not connected)"))
   assert_true(harness.has_text("host address: (waiting for host.json)"))
-  harness.tap_text("Home")
-  assert_true(harness.has_text("Welcome to MoNexus"))
+  harness.tap_text("New Chat")
+  assert_true(harness.has_text("Work thread"))
+  assert_true(
+    harness.has_text(
+      "No reply yet. Replies appear here as continuous text.",
+    ),
+  )
+}
+
+///|
+test "the Bot page is an identity work ledger with honest empty data" {
+  @env.set_env_var("MONEXUS_SCENE_PAGE", "bot")
+  defer @env.unset_env_var("MONEXUS_SCENE_PAGE")
+  let harness = @test_support.WidgetHarness::from_program(
+    program=program(),
+    width=1280.0,
+    height=800.0,
+  )
+  assert_true(harness.has_text("Work items"))
+  assert_true(harness.has_text("Automations"))
+  assert_true(harness.has_text("No automation projection yet."))
+  assert_true(harness.has_text("Select a work item"))
+  assert_true(harness.has_text("Shared memory · not projected"))
+  harness.tap_text("Agents")
+  assert_true(harness.has_text("Agents / Sessions"))
+  assert_true(harness.has_text("Start session"))
 }
 
 ///|
@@ -81,7 +109,135 @@ test "page selection is stable across link updates" {
     }),
   )
   assert_eq(online.page.label(), "Settings")
-  assert_eq(Model::new().page.label(), "Home")
+  assert_eq(Model::new().page.label(), "Workroom")
+}
+
+///|
+test "legacy deep-link labels map to the workroom destinations" {
+  assert_true(Page::from_label("home") == Workroom)
+  assert_true(Page::from_label("chat") == Workroom)
+  assert_true(Page::from_label("projects") == Manage)
+  assert_true(Page::from_label("machines") == Manage)
+  assert_true(Page::from_label("agents") == BotDetail)
+  assert_true(Page::from_label("bot-detail") == BotDetail)
+}
+
+///|
+test "Manage keeps Projects and Machines as tabs of one destination" {
+  let (projects, project_commands) = update_full(
+    Model::new(),
+    SelectPage(Manage),
+  )
+  assert_true(projects.page == Manage)
+  assert_true(projects.manage_tab == ManageProjects)
+  assert_eq(project_commands.length(), 2)
+  let (machines, machine_commands) = update_full(
+    projects,
+    SelectManageTab(ManageMachines),
+  )
+  assert_true(machines.page == Manage)
+  assert_true(machines.manage_tab == ManageMachines)
+  assert_eq(machine_commands.length(), 1)
+  match machine_commands[0] {
+    RefreshMachines => ()
+    _ => fail("expected RefreshMachines")
+  }
+}
+
+///|
+test "Bot selection opens its latest Chat or the Bot detail route" {
+  let bot = @contracts.BotRecord::new(
+    id="bot_a",
+    org_id="org_1",
+    name="Ada",
+    created_at="2026-01-01T00:00:00Z",
+  )
+  let older : ChatProjection = {
+    id: "chat_old",
+    bot_id: "bot_a",
+    title: "Older chat",
+    state: "idle",
+    updated_at: "2026-01-02T00:00:00Z",
+    project_id: "",
+    agent_session_id: "",
+  }
+  let newer : ChatProjection = {
+    id: "chat_new",
+    bot_id: "bot_a",
+    title: "Recent chat",
+    state: "running",
+    updated_at: "2026-01-03T00:00:00Z",
+    project_id: "",
+    agent_session_id: "",
+  }
+  let loaded = update(
+    update(Model::new(), BotsLoaded([bot])),
+    ChatsLoaded([older, newer]),
+  )
+  assert_true(loaded.bots_loaded)
+  assert_true(loaded.chats_loaded)
+  assert_eq(loaded.selected_bot, "bot_a")
+  assert_eq(loaded.selected_chat, "chat_new")
+  let (chat_route, chat_commands) = update_full(loaded, SelectBot("bot_a"))
+  assert_true(chat_route.page == Workroom)
+  assert_eq(chat_route.selected_chat, "chat_new")
+  assert_eq(chat_commands.length(), 0)
+  let no_chats = update(Model::new(), BotsLoaded([bot]))
+  let (bot_route, bot_commands) = update_full(no_chats, SelectBot("bot_a"))
+  assert_true(bot_route.page == BotDetail)
+  assert_eq(bot_route.selected_bot, "bot_a")
+  assert_eq(bot_commands.length(), 4)
+  match bot_commands[0] {
+    AgentList => ()
+    _ => fail("expected AgentList")
+  }
+  let (direct, direct_commands) = update_full(loaded, OpenBotDetail("bot_a"))
+  assert_true(direct.page == BotDetail)
+  assert_eq(direct_commands.length(), 4)
+  let tabbed = update(direct, SelectBotTab(BotChats))
+  assert_true(tabbed.page == BotDetail)
+  assert_true(tabbed.bot_tab == BotChats)
+  let (selected, selected_commands) = update_full(tabbed, SelectChat("chat_old"))
+  assert_true(selected.page == Workroom)
+  assert_eq(selected.selected_chat, "chat_old")
+  assert_eq(selected_commands.length(), 0)
+}
+
+///|
+test "the Bot page only offers a current Chat when one is projected" {
+  let bot = @contracts.BotRecord::new(
+    id="bot_a",
+    org_id="org_1",
+    name="Ada",
+    created_at="2026-01-01T00:00:00Z",
+  )
+  let empty = update(
+    update(Model::new(), BotsLoaded([bot])),
+    OpenBotDetail("bot_a"),
+  )
+  let empty_harness = test_harness_for_model(empty)
+  assert_false(empty_harness.has_text("Open current Chat"))
+  assert_true(empty_harness.has_text("No project projection for this Bot yet."))
+  assert_true(empty_harness.has_text("Open Manage"))
+  empty_harness.tap_text("Files")
+  assert_true(empty_harness.has_text("No artifacts mapped to this Bot yet."))
+  let chat = test_chat_projection(
+    "chat_a",
+    "bot_a",
+    "Mapped chat",
+    "2026-01-02T00:00:00Z",
+  )
+  let mapped = update(
+    update(
+      update(Model::new(), BotsLoaded([bot])),
+      ChatsLoaded([chat]),
+    ),
+    OpenBotDetail("bot_a"),
+  )
+  let mapped_harness = test_harness_for_model(mapped)
+  assert_true(mapped_harness.has_text("Open current Chat"))
+  mapped_harness.tap_text("Open current Chat")
+  assert_true(mapped_harness.has_text("Work thread"))
 }
 
 ///|
@@ -158,6 +314,37 @@ fn test_agent_session(
     updated_at,
     turns: 2,
   }
+}
+
+///|
+fn test_chat_projection(
+  id : String,
+  bot_id : String,
+  title : String,
+  updated_at : String,
+) -> ChatProjection {
+  {
+    id,
+    bot_id,
+    title,
+    state: "idle",
+    updated_at,
+    project_id: "",
+    agent_session_id: "",
+  }
+}
+
+///|
+fn test_harness_for_model(model : Model) -> @test_support.WidgetHarness {
+  @test_support.WidgetHarness::from_program(
+    program=@moui.Program::new(
+      init=() => (model, @moui.Effect::none()),
+      update=(current, msg) => (update(current, msg), @moui.Effect::none()),
+      view~,
+    ),
+    width=1280.0,
+    height=800.0,
+  )
 }
 
 ///|
@@ -272,10 +459,14 @@ test "projects page opens and drives the workspace command surface" {
     width=1280.0,
     height=800.0,
   )
-  harness.tap_text("Projects")
+  harness.tap_text("Manage")
   assert_true(harness.has_text("Open project"))
   assert_true(harness.has_text("Open workspaces"))
   assert_true(harness.has_text("loading workspaces from the host..."))
+  harness.tap_text("Machines")
+  assert_true(harness.has_text("Add machine"))
+  harness.tap_text("Projects")
+  assert_true(harness.has_text("Open project"))
 }
 
 ///|
@@ -475,8 +666,8 @@ test "rpc params carry the mandatory client_request_id" {
 }
 
 ///|
-test "selecting name-selector pages asks the worker for projections" {
-  let (_, commands) = update_full(Model::new(), SelectPage(Projects))
+test "selecting context pages asks the worker for projections" {
+  let (_, commands) = update_full(Model::new(), SelectPage(Manage))
   assert_eq(commands.length(), 2)
   match commands[0] {
     ProjectList => ()
@@ -486,11 +677,15 @@ test "selecting name-selector pages asks the worker for projections" {
     RefreshMachines => ()
     _ => fail("expected RefreshMachines")
   }
-  let (_, agent_commands) = update_full(Model::new(), SelectPage(Agents))
-  assert_eq(agent_commands.length(), 3)
+  let (_, agent_commands) = update_full(Model::new(), OpenBotDetail(""))
+  assert_eq(agent_commands.length(), 4)
+  match agent_commands[0] {
+    AgentList => ()
+    _ => fail("expected AgentList for the Bot page")
+  }
   match agent_commands[2] {
     RefreshMachines => ()
-    _ => fail("expected RefreshMachines for Agents")
+    _ => fail("expected RefreshMachines for the Bot page")
   }
   let (_, task_commands) = update_full(Model::new(), SelectPage(Tasks))
   assert_eq(task_commands.length(), 3)
@@ -823,7 +1018,9 @@ test "the Settings appearance note describes persistence" {
 }
 
 ///|
-test "Agents and Tasks use name selectors and hide raw ids by default" {
+test "Bot Agents and Tasks use name selectors and hide raw ids by default" {
+  @env.set_env_var("MONEXUS_SCENE_PAGE", "bot")
+  defer @env.unset_env_var("MONEXUS_SCENE_PAGE")
   let harness = @test_support.WidgetHarness::from_program(
     program=program(),
     width=1280.0,
@@ -848,4 +1045,77 @@ test "Agents and Tasks use name selectors and hide raw ids by default" {
   assert_false(harness.has_text("Machine id override"))
   harness.tap_text("Advanced")
   assert_true(harness.has_text("Workspace id override"))
+}
+
+///|
+test "New Chat trims the first prompt, starts once, then sends follow-ups" {
+  let model = update(Model::new(), NewChat)
+  assert_true(model.page == Workroom)
+  assert_true(model.composing_new_chat)
+  assert_eq(model.selected_chat, "")
+  let drafted = update(model, AgentInputDraft("  first prompt  "))
+  let (started, start_commands) = update_full(drafted, ComposerSend)
+  assert_eq(started.agent.launch_prompt, "first prompt")
+  assert_eq(started.agent.input, "")
+  assert_false(started.composing_new_chat)
+  assert_eq(start_commands.length(), 1)
+  match start_commands[0] {
+    AgentStart(_, _, _, _, prompt) => assert_eq(prompt, "first prompt")
+    _ => fail("expected AgentStart")
+  }
+  let session = @contracts.AgentSessionRecord::new(
+    id="sess_1",
+    agent_id="agent_1",
+    mode="default",
+    cwd="/tmp/demo",
+    started_at="2026-01-01T00:00:00Z",
+  )
+  let live = update(started, AgentStarted(session))
+  let follow = update(live, AgentInputDraft("  next prompt  "))
+  let (sent, follow_commands) = update_full(follow, ComposerSend)
+  assert_eq(sent.agent.sent_prompts.length(), 1)
+  assert_eq(sent.agent.sent_prompts[0], "next prompt")
+  assert_eq(follow_commands.length(), 1)
+  match follow_commands[0] {
+    AgentSend(session_id, prompt) => {
+      assert_eq(session_id, "sess_1")
+      assert_eq(prompt, "next prompt")
+    }
+    _ => fail("expected AgentSend")
+  }
+  let (blank, blank_commands) = update_full(
+    update(live, AgentInputDraft("   ")),
+    ComposerSend,
+  )
+  assert_eq(blank_commands.length(), 0)
+}
+
+///|
+test "Bot comments are guarded and stay local until persistence exists" {
+  let (blank, blank_commands) = update_full(
+    update(Model::new(), BotCommentDraft("   ")),
+    BotCommentSave,
+  )
+  assert_true(blank.bot_comment_note.contains("Write a comment first."))
+  assert_eq(blank_commands.length(), 0)
+  let (too_long, long_commands) = update_full(
+    update(
+      Model::new(),
+      BotCommentDraft("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"),
+    ),
+    BotCommentSave,
+  )
+  assert_true(
+    too_long.bot_comment_note.contains("limited to 50 characters"),
+  )
+  assert_eq(long_commands.length(), 0)
+  let (saved, save_commands) = update_full(
+    update(Model::new(), BotCommentDraft("ship it")),
+    BotCommentSave,
+  )
+  assert_eq(saved.bot_comment, "")
+  assert_true(
+    saved.bot_comment_note.contains("host comment persistence is not available"),
+  )
+  assert_eq(save_commands.length(), 0)
 }

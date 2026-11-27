@@ -4,14 +4,14 @@
 /// One resolved `Palette` carries every colour the shell paints; views read it
 /// through the `ui_*` accessors so a mode flip repaints the whole window from
 /// a single cell. Values follow Orca's dark workbench structure (near-black
-/// frame, glowing panels, hairline borders) and MoSpace's warm-paper light
-/// counterpart, with one dark-teal accent and restrained status colours.
+/// warm-paper workroom structure, hairline borders, an ink primary action and
+/// restrained status colours.
 ///
 /// Nothing outside this file names a hex value; `docs/design-ui.md` records the
 /// same tables.
 
 ///|
-/// Appearance mode. Dark is the product default; a saved Settings choice
+/// Appearance mode. Light is the product default; a saved Settings choice
 /// decides the startup mode when present, and `MONEXUS_THEME` decides it
 /// before any choice has been saved. The Settings page can flip it at runtime.
 #derive(Eq)
@@ -59,24 +59,24 @@ fn rgb8(r : Int32, g : Int32, b : Int32) -> @core.Color {
   )
 }
 
-///|
-fn white_a(alpha : Double) -> @core.Color {
-  @core.Color::rgba(r=1.0, g=1.0, b=1.0, a=alpha)
-}
-
-///|
 /// One resolved token set. Semantic roles only: a widget never invents its own
 /// shade, it picks `surface`, `hover`, `border`, `accent` and so on.
 priv struct Palette {
   frame : @core.Color
+  paper : @core.Color
+  rail : @core.Color
+  canvas : @core.Color
   surface : @core.Color
   surface_alt : @core.Color
   hover : @core.Color
+  selected : @core.Color
   text : @core.Color
   muted : @core.Color
   dim : @core.Color
   border : @core.Color
   border_soft : @core.Color
+  ink : @core.Color
+  on_ink : @core.Color
   accent : @core.Color
   accent_soft : @core.Color
   on_accent : @core.Color
@@ -92,50 +92,62 @@ priv struct Palette {
 fn palette_for(mode : ThemeMode) -> Palette {
   match mode {
     Dark => {
-      let surface = rgb8(22, 22, 22)
-      let accent = rgb8(111, 187, 165)
+      let surface = rgb8(33, 31, 26)
+      let ink = rgb8(236, 231, 220)
       {
-        frame: rgb8(11, 11, 11),
+        frame: rgb8(11, 11, 9),
+        paper: rgb8(24, 23, 19),
+        rail: rgb8(29, 27, 22),
+        canvas: rgb8(24, 23, 19),
         surface,
-        surface_alt: rgb8(30, 30, 30),
-        hover: rgb8(34, 34, 34),
-        text: rgb8(237, 234, 227),
-        muted: rgb8(163, 156, 145),
-        dim: rgb8(110, 106, 99),
-        border: white_a(0.08),
-        border_soft: white_a(0.05),
-        accent,
-        accent_soft: accent.mix(surface, 0.80),
-        on_accent: rgb8(11, 11, 11),
-        success: rgb8(87, 192, 140),
-        warning: rgb8(227, 179, 65),
-        danger: rgb8(230, 128, 114),
-        info: rgb8(96, 165, 250),
-        code_bg: rgb8(18, 18, 18),
+        surface_alt: rgb8(36, 34, 28),
+        hover: rgb8(39, 37, 31),
+        selected: rgb8(45, 42, 35),
+        text: ink,
+        muted: rgb8(163, 157, 145),
+        dim: rgb8(116, 112, 102),
+        border: rgb8(55, 52, 44),
+        border_soft: rgb8(42, 40, 34),
+        ink,
+        on_ink: rgb8(23, 22, 16),
+        accent: rgb8(128, 153, 170),
+        accent_soft: rgb8(128, 153, 170).mix(surface, 0.82),
+        on_accent: rgb8(16, 16, 13),
+        success: rgb8(127, 161, 132),
+        warning: rgb8(195, 154, 91),
+        danger: rgb8(193, 120, 107),
+        info: rgb8(128, 153, 170),
+        code_bg: rgb8(20, 19, 15),
         is_dark: true,
       }
     }
     Light => {
-      let white = rgb8(255, 255, 255)
-      let accent = rgb8(45, 106, 90)
+      let paper = rgb8(251, 250, 246)
+      let ink = rgb8(29, 31, 27)
       {
-        frame: rgb8(237, 234, 226),
-        surface: white,
+        frame: rgb8(231, 226, 215),
+        paper,
+        rail: rgb8(241, 238, 230),
+        canvas: paper,
+        surface: rgb8(255, 254, 251),
         surface_alt: rgb8(247, 244, 238),
-        hover: rgb8(241, 237, 229),
-        text: rgb8(35, 33, 29),
-        muted: rgb8(120, 113, 103),
-        dim: rgb8(156, 148, 135),
-        border: rgb8(225, 219, 209),
-        border_soft: rgb8(236, 231, 222),
-        accent,
-        accent_soft: accent.mix(white, 0.88),
-        on_accent: white,
-        success: rgb8(46, 125, 91),
-        warning: rgb8(166, 106, 18),
-        danger: rgb8(176, 74, 62),
-        info: rgb8(43, 102, 210),
-        code_bg: rgb8(250, 248, 242),
+        hover: rgb8(243, 240, 232),
+        selected: rgb8(234, 229, 219),
+        text: ink,
+        muted: rgb8(104, 109, 100),
+        dim: rgb8(151, 155, 145),
+        border: rgb8(221, 216, 205),
+        border_soft: rgb8(233, 229, 220),
+        ink,
+        on_ink: rgb8(255, 254, 251),
+        accent: rgb8(90, 113, 131),
+        accent_soft: rgb8(90, 113, 131).mix(paper, 0.88),
+        on_accent: rgb8(255, 254, 251),
+        success: rgb8(75, 115, 86),
+        warning: rgb8(152, 107, 36),
+        danger: rgb8(154, 71, 60),
+        info: rgb8(90, 113, 131),
+        code_bg: rgb8(247, 244, 238),
         is_dark: false,
       }
     }
@@ -143,7 +155,7 @@ fn palette_for(mode : ThemeMode) -> Palette {
 }
 
 ///|
-let palette_state : Ref[Palette] = Ref(palette_for(Dark))
+let palette_state : Ref[Palette] = Ref(palette_for(Light))
 
 ///|
 /// Swap the active palette. `view` calls this before building the tree, so the
@@ -159,6 +171,21 @@ fn ui_frame() -> @core.Color {
 }
 
 ///|
+fn ui_paper() -> @core.Color {
+  palette_state.val.paper
+}
+
+///|
+fn ui_rail() -> @core.Color {
+  palette_state.val.rail
+}
+
+///|
+fn ui_canvas() -> @core.Color {
+  palette_state.val.canvas
+}
+
+///|
 fn ui_surface() -> @core.Color {
   palette_state.val.surface
 }
@@ -171,6 +198,11 @@ fn ui_surface_alt() -> @core.Color {
 ///|
 fn ui_hover() -> @core.Color {
   palette_state.val.hover
+}
+
+///|
+fn ui_selected() -> @core.Color {
+  palette_state.val.selected
 }
 
 ///|
@@ -196,6 +228,16 @@ fn ui_border() -> @core.Color {
 ///|
 fn ui_border_soft() -> @core.Color {
   palette_state.val.border_soft
+}
+
+///|
+fn ui_ink() -> @core.Color {
+  palette_state.val.ink
+}
+
+///|
+fn ui_on_ink() -> @core.Color {
+  palette_state.val.on_ink
 }
 
 ///|
@@ -358,8 +400,8 @@ fn app_theme() -> @core.Theme {
     scheme~,
     palette~,
     radius_scale=@core.RadiusScale::{
-      sm: 6.0,
-      md: 7.0,
+      sm: 3.0,
+      md: 4.0,
       lg: 10.0,
       pill: 999.0,
     },
@@ -404,24 +446,24 @@ fn transparent_brush() -> @core.Brush {
 /// lift. `tone` lets destructive actions reuse the shape in danger red.
 fn primary_button_style(tone : @core.Color) -> @views.ButtonStyle {
   let normal = @views.new_control_state_style(
-    foreground=ui_on_accent(),
+    foreground=ui_on_ink(),
     background=@core.Brush::solid(tone),
-    radius=7.0,
+    radius=4.0,
   )
   let hovered = @views.new_control_state_style(
-    foreground=ui_on_accent(),
+    foreground=ui_on_ink(),
     background=@core.Brush::solid(tone.lighten(0.08)),
-    radius=7.0,
+    radius=4.0,
   )
   let pressed = @views.new_control_state_style(
-    foreground=ui_on_accent(),
+    foreground=ui_on_ink(),
     background=@core.Brush::solid(tone.darken(0.08)),
-    radius=7.0,
+    radius=4.0,
   )
   let disabled = @views.new_control_state_style(
     foreground=ui_dim(),
     background=@core.Brush::solid(tone.mix(ui_surface(), 0.6)),
-    radius=7.0,
+    radius=4.0,
   )
   @views.ButtonStyle::new(normal~, hovered~, pressed~, disabled~)
 }
@@ -439,25 +481,25 @@ fn ghost_button_style() -> @views.ButtonStyle {
     foreground=ui_muted(),
     background=transparent,
     border=edge,
-    radius=7.0,
+    radius=4.0,
   )
   let hovered = @views.new_control_state_style(
     foreground=ui_text_color(),
     background=@core.Brush::solid(ui_hover()),
     border=edge,
-    radius=7.0,
+    radius=4.0,
   )
   let pressed = @views.new_control_state_style(
     foreground=ui_text_color(),
     background=@core.Brush::solid(ui_surface_alt()),
     border=edge,
-    radius=7.0,
+    radius=4.0,
   )
   let disabled = @views.new_control_state_style(
     foreground=ui_dim(),
     background=transparent,
     border=edge,
-    radius=7.0,
+    radius=4.0,
   )
   @views.ButtonStyle::new(normal~, hovered~, pressed~, disabled~)
 }
@@ -474,25 +516,25 @@ fn danger_button_style() -> @views.ButtonStyle {
     foreground=ui_danger(),
     background=transparent,
     border=edge,
-    radius=7.0,
+    radius=4.0,
   )
   let hovered = @views.new_control_state_style(
     foreground=ui_danger(),
     background=@core.Brush::solid(ui_danger().multiply_alpha(0.10)),
     border=edge,
-    radius=7.0,
+    radius=4.0,
   )
   let pressed = @views.new_control_state_style(
     foreground=ui_danger(),
     background=@core.Brush::solid(ui_danger().multiply_alpha(0.16)),
     border=edge,
-    radius=7.0,
+    radius=4.0,
   )
   let disabled = @views.new_control_state_style(
     foreground=ui_dim(),
     background=transparent,
     border=edge,
-    radius=7.0,
+    radius=4.0,
   )
   @views.ButtonStyle::new(normal~, hovered~, pressed~, disabled~)
 }
@@ -507,7 +549,7 @@ fn ui_field_style() -> @style.TextFieldStyle {
       brush=@core.Brush::solid(ui_border()),
       width=1.0,
     ),
-    radius=7.0,
+    radius=4.0,
   )
   let focused = @views.new_control_state_style(
     foreground=ui_text_color(),
@@ -516,7 +558,7 @@ fn ui_field_style() -> @style.TextFieldStyle {
       brush=@core.Brush::solid(ui_accent()),
       width=1.0,
     ),
-    radius=7.0,
+    radius=4.0,
   )
   let disabled = @views.new_control_state_style(
     foreground=ui_dim(),
@@ -525,7 +567,7 @@ fn ui_field_style() -> @style.TextFieldStyle {
       brush=@core.Brush::solid(ui_border_soft()),
       width=1.0,
     ),
-    radius=7.0,
+    radius=4.0,
   )
   @style.TextFieldStyle::new(
     normal~,
@@ -538,8 +580,8 @@ fn ui_field_style() -> @style.TextFieldStyle {
 }
 
 ///|
-/// Status colour for a record state. Deliberately quiet: accent is the only
-/// loud colour in the shell, statuses stay inside four semantic tones.
+/// Status colour for a record state. Deliberately quiet: status is text and a
+/// hairline, while moss remains reserved for success/online states.
 fn status_tone(status : String) -> @core.Color {
   match status {
     "running" | "verifying" | "queued" | "starting" =>

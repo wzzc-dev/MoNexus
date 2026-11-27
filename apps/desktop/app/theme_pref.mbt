@@ -17,7 +17,7 @@
 ///
 /// 1. a valid saved choice;
 /// 2. a legal `MONEXUS_THEME=light|dark`;
-/// 3. dark, the product default.
+/// 3. light, the product default.
 ///
 /// A missing preference file is silent. An unreadable, corrupt or
 /// unknown-valued file is ignored (it never seeds the palette), falls through
@@ -208,17 +208,17 @@ fn resolve_env_theme(env_value : String?) -> StartupTheme {
       match theme_mode_from_value(value) {
         Some(mode) => { mode, source: "environment", note: "" }
         None => {
-          mode: Dark,
+          mode: Light,
           source: "default",
           note: "ignoring MONEXUS_THEME=" + value + ": expected light or dark",
         }
       }
-    None => { mode: Dark, source: "default", note: "" }
+    None => { mode: Light, source: "default", note: "" }
   }
 }
 
 ///|
-/// Pure startup precedence: saved choice, then `MONEXUS_THEME`, then dark.
+/// Pure startup precedence: saved choice, then `MONEXUS_THEME`, then light.
 pub fn resolve_startup_theme(
   choice : ThemeChoice,
   env_value : String?,
