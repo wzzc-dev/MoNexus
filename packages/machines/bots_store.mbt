@@ -1054,13 +1054,12 @@ fn bots_count_rows(
 pub fn MachineStore::reconcile_bots_projection(
   self : MachineStore,
 ) -> Result[BotsReconcileCounts, String] {
-  let events = try {
-    load_bots_events(self.conn)
-  } catch {
-    error => return Err(sqlite_text(error))
-  }
   try {
+    // Take the writer lock before reading the log. Appends and projection
+    // repair share this one SQLite connection, so the event snapshot and the
+    // delete/replay below cannot straddle an interleaved append.
     exec_raise(self.conn, "BEGIN IMMEDIATE")
+    let events = load_bots_events(self.conn)
     exec_raise(self.conn, "DELETE FROM chat_participants")
     exec_raise(
       self.conn,
@@ -1718,14 +1717,6 @@ pub fn MachineStore::create_agent(
   if live_agents >= bot.agent_count_cap {
     return Err("Bot Agent count cap reached")
   }
-  let active_sessions = try {
-    bot_nonterminal_session_count(self.conn, bot.id)
-  } catch {
-    error => return Err(sqlite_text(error))
-  }
-  if active_sessions >= bot.agent_concurrency_cap {
-    return Err("Bot Agent concurrency cap reached")
-  }
   match bot.create_policy {
     "off" => return Err("Bot create policy is off")
     "ask" =>
@@ -2036,6 +2027,14 @@ pub fn MachineStore::start_chat_agent_session(
   if bot.state == @contracts.BOT_STATE_ARCHIVED {
     return Err("archived Bot is read-only")
   }
+  let bot_active_sessions = try {
+    bot_nonterminal_session_count(self.conn, bot.id)
+  } catch {
+    error => return Err(sqlite_text(error))
+  }
+  if bot_active_sessions >= bot.agent_concurrency_cap {
+    return Err("Bot Agent concurrency cap reached")
+  }
   let participants = match self.list_chat_participants(chat.id) {
     Ok(value) => value
     Err(message) => return Err(message)
@@ -2265,7 +2264,8 @@ pub fn MachineStore::add_project_membership(
           return Err("ProjectMembership cannot be restored from " + current.state)
         }
         let record = {
-          ..membership,
+          ..current,
+          state: @contracts.MEMBERSHIP_STATE_ACTIVE,
           added_at: now,
           removed_at: "",
         }
@@ -2323,6 +2323,11 @@ pub fn MachineStore::remove_project_membership(
   if current.state != @contracts.MEMBERSHIP_STATE_ACTIVE {
     return Err("ProjectMembership is not active")
   }
+  let bot = match self.get_bot(bot_id) {
+    Ok(Some(value)) => value
+    Ok(None) => return Err("Bot not found: " + bot_id)
+    Err(message) => return Err(message)
+  }
   let active_sessions = try {
     project_bot_nonterminal_session_count(self.conn, project_id, bot_id)
   } catch {
@@ -2352,10 +2357,9 @@ pub fn MachineStore::remove_project_membership(
       @contracts.project_event_subject(project_id),
       payload,
       now,
-      @contracts.ORG_LOCAL,
+      bot.org_id,
     ) {
     Ok(_) => Ok(record)
     Err(message) => Err(message)
   }
 }
-

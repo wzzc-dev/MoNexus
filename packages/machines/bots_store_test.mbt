@@ -103,6 +103,11 @@ fn bots_test_membership(
 }
 
 ///|
+fn bots_test_sqlite_text(error : Error) -> String {
+  error.to_string()
+}
+
+///|
 fn bots_test_open() -> MachineStore raise {
   match MachineStore::open(":memory:") {
     Ok(value) => value
@@ -113,7 +118,8 @@ fn bots_test_open() -> MachineStore raise {
 ///|
 fn bots_test_reset_file(path : String) -> Unit raise {
   let conn = @sqlite3.Connection::open(path) catch {
-    error => fail("cannot open test database for reset: " + error.to_string())
+    error =>
+      fail("cannot open test database for reset: " + bots_test_sqlite_text(error))
   }
   try {
     for table in [
@@ -123,12 +129,14 @@ fn bots_test_reset_file(path : String) -> Unit raise {
       "legacy_aliases", "project_memberships", "chat_participants", "chats",
       "agents", "bots", "agent_sessions", "machines", "events", "meta",
     ] {
-      exec_raise(conn, "DROP TABLE IF EXISTS " + table)
+      let stmt = conn.prepare("DROP TABLE IF EXISTS " + table)
+      let _ = stmt.step()
+      stmt.finalize()
     }
   } catch {
     error => {
       conn.close() catch { _ => () }
-      fail("cannot reset test database: " + error.to_string())
+      fail("cannot reset test database: " + bots_test_sqlite_text(error))
     }
   }
   conn.close() catch { _ => () }
@@ -448,6 +456,34 @@ test "crash between event and projection is repaired by reconcile" {
     Err(message) => fail("get_bot failed: " + message)
   }
   assert_eq(restored.to_json().stringify(), bot.to_json().stringify())
+  // A later raw append must also be picked up by the next reconcile, which
+  // reads the full log after taking the writer lock.
+  let later_bot = bots_test_bot("Crash-safe 2", now)
+  let later_payload = @contracts.bot_created_payload(
+    later_bot,
+    @contracts.bots_permission_set_hash(later_bot.permission_ceiling),
+    "owner",
+    "crash-test",
+  )
+  let later_event = @contracts.EventEnvelope::new(
+    id=@contracts.new_id("evt", 2L),
+    org_id=@contracts.ORG_LOCAL,
+    event_type=@contracts.EVENT_BOT_CREATED,
+    ts=now,
+    subject=@contracts.bot_event_subject(later_bot.id),
+    seq=2L,
+    payload=later_payload,
+    idempotency_key="evt/crash-bot-2",
+  )
+  match store.append_event(later_event) {
+    Ok(inserted) => assert_true(inserted)
+    Err(message) => fail("second append_event failed: " + message)
+  }
+  let second_counts = match store.reconcile_bots_projection() {
+    Ok(value) => value
+    Err(message) => fail("second reconcile failed: " + message)
+  }
+  assert_eq(second_counts.bots, 2)
   store.close()
 }
 
@@ -987,5 +1023,259 @@ test "archived Bot is readable but immutable and unusable" {
     Ok(_) => fail("archived Bot created an Agent")
     Err(_) => ()
   }
+  store.close()
+}
+
+///|
+test "Bot Agent concurrency cap is enforced when a session starts" {
+  let store = bots_test_open()
+  let now = "2026-11-27T04:00:00Z"
+  let bot = match
+    store.create_bot(
+      { ..bots_test_bot("Concurrency", now), agent_concurrency_cap: 1 },
+      "owner",
+      "test",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("create_bot failed: " + message)
+  }
+  let first_agent = match
+    store.create_agent(
+      bots_test_agent(bot, "First", now),
+      "",
+      "owner",
+      "test",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("first create_agent failed: " + message)
+  }
+  let second_agent = match
+    store.create_agent(
+      bots_test_agent(bot, "Second", now),
+      "",
+      "owner",
+      "test",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("second create_agent failed: " + message)
+  }
+  let first_chat = match
+    store.create_chat(
+      bots_test_chat("", "First chat", now),
+      [bot.id],
+      "owner",
+      "test",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("first create_chat failed: " + message)
+  }
+  let second_chat = match
+    store.create_chat(
+      bots_test_chat("", "Second chat", now),
+      [bot.id],
+      "owner",
+      "test",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("second create_chat failed: " + message)
+  }
+  let first_session = match
+    store.start_chat_agent_session(
+      bots_test_session(first_chat, first_agent, now),
+      "owner",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("first session failed: " + message)
+  }
+  let rejection = match
+    store.start_chat_agent_session(
+      bots_test_session(second_chat, second_agent, now),
+      "owner",
+      now,
+    ) {
+    Ok(_) => fail("second Bot-wide AgentSession exceeded the concurrency cap")
+    Err(message) => message
+  }
+  assert_true(rejection.contains("concurrency"))
+  match
+    store.end_chat_agent_session(
+      first_session.id,
+      @contracts.AGENT_SESSION_STATE_FAILED,
+      @contracts.AGENT_SESSION_END_REASON_ERROR,
+      "",
+      "",
+      now,
+    ) {
+    Ok(_) => ()
+    Err(message) => fail("end first session failed: " + message)
+  }
+  let second_session = match
+    store.start_chat_agent_session(
+      bots_test_session(second_chat, second_agent, now),
+      "owner",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) =>
+      fail("session after a terminal session was rejected: " + message)
+  }
+  assert_eq(second_session.agent_id, second_agent.id)
+  store.close()
+}
+
+///|
+test "membership removal uses the Bot org and reactivation keeps access" {
+  let store = bots_test_open()
+  let now = "2026-11-27T04:10:00Z"
+  let bot = match
+    store.create_bot(
+      { ..bots_test_bot("Org Bot", now), org_id: "org_alpha" },
+      "owner",
+      "test",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("create_bot failed: " + message)
+  }
+  let project_id = @contracts.new_project_id(1_050L)
+  let membership = match
+    store.add_project_membership(
+      bots_test_membership(project_id, bot.id, now),
+      "owner",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("add_project_membership failed: " + message)
+  }
+  assert_eq(membership.access.length(), 1)
+  let removed = match
+    store.remove_project_membership(
+      project_id,
+      bot.id,
+      "owner revoke",
+      "owner",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("remove_project_membership failed: " + message)
+  }
+  let events = match store.load_recent_events(20) {
+    Ok(value) => value
+    Err(message) => fail("load_recent_events failed: " + message)
+  }
+  let mut removed_org = ""
+  for event in events {
+    if event.event_type == @contracts.EVENT_PROJECT_MEMBER_REMOVED {
+      removed_org = event.org_id
+    }
+  }
+  assert_eq(removed_org, "org_alpha")
+  let restored = match
+    store.add_project_membership(
+      @contracts.ProjectMembership::new(
+        project_id~,
+        bot_id=bot.id,
+        added_at=now,
+        access=[],
+        reason="",
+      ),
+      "owner",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("reactivating membership failed: " + message)
+  }
+  assert_eq(restored.state, @contracts.MEMBERSHIP_STATE_ACTIVE)
+  assert_eq(restored.access.length(), 1)
+  assert_eq(restored.access[0], "repo:read")
+  assert_eq(restored.reason, removed.reason)
+  assert_eq(restored.removed_at, "")
+  store.close()
+}
+
+///|
+test "project change and participant removal replay generic records" {
+  let store = bots_test_open()
+  let now = "2026-11-27T04:20:00Z"
+  let (bot, _, chat) = bots_test_seed(store, now)
+  let project_id = @contracts.new_project_id(1_060L)
+  match
+    store.add_project_membership(
+      bots_test_membership(project_id, bot.id, now),
+      "owner",
+      now,
+    ) {
+    Ok(_) => ()
+    Err(message) => fail("add_project_membership failed: " + message)
+  }
+  let moved_chat = { ..chat, project_id, updated_at: now }
+  let project_payload = @contracts.chat_project_changed_payload(
+    moved_chat,
+    chat.project_id,
+    "active membership",
+    "owner",
+  )
+  match
+    store.append_bots_event(
+      @contracts.EVENT_CHAT_PROJECT_CHANGED,
+      @contracts.chat_event_subject(chat.id),
+      project_payload,
+      now,
+      chat.org_id,
+    ) {
+    Ok(_) => ()
+    Err(message) => fail("chat.project.changed append failed: " + message)
+  }
+  let active_participant = @contracts.ChatParticipant::new(
+    chat_id=chat.id,
+    bot_id=bot.id,
+    added_at=now,
+  )
+  let removed_participant = {
+    ..active_participant,
+    state: @contracts.PARTICIPANT_STATE_REMOVED,
+    removed_at: now,
+  }
+  let removal_payload = @contracts.chat_participant_removed_payload(
+    removed_participant,
+    "owner removal",
+    false,
+    "owner",
+  )
+  match
+    store.append_bots_event(
+      @contracts.EVENT_CHAT_PARTICIPANT_REMOVED,
+      @contracts.chat_event_subject(chat.id),
+      removal_payload,
+      now,
+      chat.org_id,
+    ) {
+    Ok(_) => ()
+    Err(message) => fail("chat.participant.removed append failed: " + message)
+  }
+  match store.reconcile_bots_projection() {
+    Ok(_) => ()
+    Err(message) => fail("reconcile failed: " + message)
+  }
+  let replayed_chat = match store.get_chat(chat.id) {
+    Ok(Some(value)) => value
+    Ok(None) => fail("Chat missing after replay")
+    Err(message) => fail("get_chat failed: " + message)
+  }
+  assert_eq(replayed_chat.project_id, project_id)
+  let replayed_participant = match
+    store.get_chat_participant(chat.id, bot.id) {
+    Ok(Some(value)) => value
+    Ok(None) => fail("participant tombstone missing after replay")
+    Err(message) => fail("get_chat_participant failed: " + message)
+  }
+  assert_eq(replayed_participant.state, @contracts.PARTICIPANT_STATE_REMOVED)
+  assert_eq(replayed_participant.removed_at, now)
   store.close()
 }
