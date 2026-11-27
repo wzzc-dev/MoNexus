@@ -43,11 +43,8 @@ test "secondary tools and the Bot page are reachable without a top-level Bot ite
   assert_true(harness.has_text("host address: (waiting for host.json)"))
   harness.tap_text("New Chat")
   assert_true(harness.has_text("Work thread"))
-  assert_true(
-    harness.has_text(
-      "No reply yet. Replies appear here as continuous text.",
-    ),
-  )
+  assert_true(harness.has_text("Create Chat"))
+  assert_true(harness.has_text("Chat title"))
 }
 
 ///|
@@ -65,6 +62,10 @@ test "the Bot page is an identity work ledger with honest empty data" {
   assert_true(harness.has_text("Select a work item"))
   assert_true(harness.has_text("Shared memory · not projected"))
   harness.tap_text("Agents")
+  assert_true(
+    harness.has_text("Open a projected Bot before creating an Agent."),
+  )
+  harness.tap_text("Advanced")
   assert_true(harness.has_text("Agents / Sessions"))
   assert_true(harness.has_text("Start session"))
 }
@@ -130,7 +131,7 @@ test "Manage keeps Projects and Machines as tabs of one destination" {
   )
   assert_true(projects.page == Manage)
   assert_true(projects.manage_tab == ManageProjects)
-  assert_eq(project_commands.length(), 2)
+  assert_eq(project_commands.length(), 5)
   let (machines, machine_commands) = update_full(
     projects,
     SelectManageTab(ManageMachines),
@@ -152,24 +153,20 @@ test "Bot selection opens its latest Chat or the Bot detail route" {
     name="Ada",
     created_at="2026-01-01T00:00:00Z",
   )
-  let older : ChatProjection = {
-    id: "chat_old",
-    bot_id: "bot_a",
-    title: "Older chat",
-    state: "idle",
-    updated_at: "2026-01-02T00:00:00Z",
-    project_id: "",
-    agent_session_id: "",
-  }
-  let newer : ChatProjection = {
-    id: "chat_new",
-    bot_id: "bot_a",
-    title: "Recent chat",
-    state: "running",
-    updated_at: "2026-01-03T00:00:00Z",
-    project_id: "",
-    agent_session_id: "",
-  }
+  let older = test_chat_detail(
+    "chat_old",
+    "bot_a",
+    "Older chat",
+    "2026-01-02T00:00:00Z",
+    "",
+  )
+  let newer = test_chat_detail(
+    "chat_new",
+    "bot_a",
+    "Recent chat",
+    "2026-01-03T00:00:00Z",
+    "",
+  )
   let loaded = update(
     update(Model::new(), BotsLoaded([bot])),
     ChatsLoaded([older, newer]),
@@ -181,26 +178,34 @@ test "Bot selection opens its latest Chat or the Bot detail route" {
   let (chat_route, chat_commands) = update_full(loaded, SelectBot("bot_a"))
   assert_true(chat_route.page == Workroom)
   assert_eq(chat_route.selected_chat, "chat_new")
-  assert_eq(chat_commands.length(), 0)
+  assert_eq(chat_commands.length(), 1)
+  match chat_commands[0] {
+    ChatGet(chat_id) => assert_eq(chat_id, "chat_new")
+    _ => fail("expected ChatGet")
+  }
   let no_chats = update(Model::new(), BotsLoaded([bot]))
   let (bot_route, bot_commands) = update_full(no_chats, SelectBot("bot_a"))
   assert_true(bot_route.page == BotDetail)
   assert_eq(bot_route.selected_bot, "bot_a")
-  assert_eq(bot_commands.length(), 4)
+  assert_eq(bot_commands.length(), 8)
   match bot_commands[0] {
     AgentList => ()
     _ => fail("expected AgentList")
   }
   let (direct, direct_commands) = update_full(loaded, OpenBotDetail("bot_a"))
   assert_true(direct.page == BotDetail)
-  assert_eq(direct_commands.length(), 4)
+  assert_eq(direct_commands.length(), 8)
   let tabbed = update(direct, SelectBotTab(BotChats))
   assert_true(tabbed.page == BotDetail)
   assert_true(tabbed.bot_tab == BotChats)
   let (selected, selected_commands) = update_full(tabbed, SelectChat("chat_old"))
   assert_true(selected.page == Workroom)
   assert_eq(selected.selected_chat, "chat_old")
-  assert_eq(selected_commands.length(), 0)
+  assert_eq(selected_commands.length(), 1)
+  match selected_commands[0] {
+    ChatGet(chat_id) => assert_eq(chat_id, "chat_old")
+    _ => fail("expected ChatGet")
+  }
 }
 
 ///|
@@ -217,7 +222,11 @@ test "the Bot page only offers a current Chat when one is projected" {
   )
   let empty_harness = test_harness_for_model(empty)
   assert_false(empty_harness.has_text("Open current Chat"))
-  assert_true(empty_harness.has_text("No project projection for this Bot yet."))
+  assert_true(
+    empty_harness.has_text(
+      "No Project Chat membership evidence for this Bot yet.",
+    ),
+  )
   assert_true(empty_harness.has_text("Open Manage"))
   empty_harness.tap_text("Files")
   assert_true(empty_harness.has_text("No artifacts mapped to this Bot yet."))
@@ -322,16 +331,35 @@ fn test_chat_projection(
   bot_id : String,
   title : String,
   updated_at : String,
-) -> ChatProjection {
-  {
-    id,
-    bot_id,
-    title,
-    state: "idle",
-    updated_at,
-    project_id: "",
-    agent_session_id: "",
-  }
+) -> @contracts.ChatDetail {
+  test_chat_detail(id, bot_id, title, updated_at, "")
+}
+
+///|
+fn test_chat_detail(
+  id : String,
+  bot_id : String,
+  title : String,
+  updated_at : String,
+  project_id : String,
+) -> @contracts.ChatDetail {
+  let chat = @contracts.ChatRecord::new(
+    id~,
+    org_id="org_1",
+    title~,
+    created_at="2026-01-01T00:00:00Z",
+    project_id~,
+  )
+  @contracts.ChatDetail::new(
+    chat={ ..chat, updated_at },
+    participants=[
+      @contracts.ChatParticipant::new(
+        chat_id=id,
+        bot_id~,
+        added_at="2026-01-01T00:00:00Z",
+      ),
+    ],
+  )
 }
 
 ///|
@@ -668,22 +696,22 @@ test "rpc params carry the mandatory client_request_id" {
 ///|
 test "selecting context pages asks the worker for projections" {
   let (_, commands) = update_full(Model::new(), SelectPage(Manage))
-  assert_eq(commands.length(), 2)
+  assert_eq(commands.length(), 5)
   match commands[0] {
     ProjectList => ()
     _ => fail("expected ProjectList")
   }
-  match commands[1] {
+  match commands[4] {
     RefreshMachines => ()
     _ => fail("expected RefreshMachines")
   }
   let (_, agent_commands) = update_full(Model::new(), OpenBotDetail(""))
-  assert_eq(agent_commands.length(), 4)
+  assert_eq(agent_commands.length(), 8)
   match agent_commands[0] {
     AgentList => ()
     _ => fail("expected AgentList for the Bot page")
   }
-  match agent_commands[2] {
+  match agent_commands[6] {
     RefreshMachines => ()
     _ => fail("expected RefreshMachines for the Bot page")
   }
@@ -1019,14 +1047,41 @@ test "the Settings appearance note describes persistence" {
 
 ///|
 test "Bot Agents and Tasks use name selectors and hide raw ids by default" {
-  @env.set_env_var("MONEXUS_SCENE_PAGE", "bot")
-  defer @env.unset_env_var("MONEXUS_SCENE_PAGE")
-  let harness = @test_support.WidgetHarness::from_program(
-    program=program(),
-    width=1280.0,
-    height=800.0,
+  let bot = @contracts.BotRecord::new(
+    id="bot_a",
+    org_id="org_1",
+    name="Ada",
+    created_at="2026-01-01T00:00:00Z",
+    software_allowlist=["claude-code"],
   )
-  harness.tap_text("Agents")
+  let binding = @contracts.RuntimeBinding::new(
+    software_id="claude-code",
+    adapter_id="acp",
+    launch_kind=@contracts.RUNTIME_LAUNCH_ACP,
+    command="",
+    args=[],
+    model_profile="",
+    hash="sha256:test",
+  )
+  let agent = @contracts.AgentRecord::new(
+    id="agent_1",
+    org_id="org_1",
+    bot_id="bot_a",
+    name="Ada · coding",
+    runtime_binding=binding,
+    created_at="2026-01-01T00:00:00Z",
+    state=@contracts.AGENT_LIFECYCLE_ACTIVE,
+  )
+  let model = update(Model::new(), BotsLoaded([bot]))
+  let model = update(model, OpenBotDetail("bot_a"))
+  let model = update(model, SelectBotTab(BotAgents))
+  let model = update(model, BotAgentsLoaded("bot_a", [agent]))
+  let harness = test_harness_for_model(model)
+  assert_true(harness.has_text("Create Agent"))
+  assert_true(harness.has_text("Ada · coding"))
+  assert_true(harness.has_text("claude-code"))
+  assert_false(harness.has_text("agent_1"))
+  harness.tap_text("Advanced")
   assert_true(harness.has_text("Agents / Sessions"))
   assert_true(harness.has_text("Agent: Default agent"))
   assert_true(harness.has_text("Workspace: Select a workspace"))
@@ -1035,59 +1090,73 @@ test "Bot Agents and Tasks use name selectors and hide raw ids by default" {
   assert_true(harness.has_text("Start session"))
   assert_false(harness.has_text("Agent id override"))
   assert_false(harness.has_text("Workspace id override"))
-  harness.tap_text("Advanced")
-  assert_true(harness.has_text("Agent id override"))
-  assert_true(harness.has_text("Workspace id override"))
-  harness.tap_text("Tasks")
-  assert_true(harness.has_text("Create task"))
-  assert_true(harness.has_text("Workspace: Select a workspace"))
-  assert_false(harness.has_text("Workspace id override"))
-  assert_false(harness.has_text("Machine id override"))
-  harness.tap_text("Advanced")
-  assert_true(harness.has_text("Workspace id override"))
+  let advanced = update(update(model, SetBotAgentManage(true)), AgentAdvanced(true))
+  let advanced_harness = test_harness_for_model(advanced)
+  assert_true(advanced_harness.has_text("Agent id override"))
+  assert_true(advanced_harness.has_text("Workspace id override"))
+  advanced_harness.tap_text("Tasks")
+  assert_true(advanced_harness.has_text("Create task"))
+  assert_true(advanced_harness.has_text("Workspace: Select a workspace"))
+  assert_false(advanced_harness.has_text("Workspace id override"))
+  assert_false(advanced_harness.has_text("Machine id override"))
+  advanced_harness.tap_text("Advanced")
+  assert_true(advanced_harness.has_text("Workspace id override"))
 }
 
 ///|
-test "New Chat trims the first prompt, starts once, then sends follow-ups" {
+test "New Chat requires a Bot, Agent and workspace before chat.create" {
+  let bot = @contracts.BotRecord::new(
+    id="bot_a",
+    org_id="org_1",
+    name="Ada",
+    created_at="2026-01-01T00:00:00Z",
+    software_allowlist=["claude-code"],
+  )
+  let binding = @contracts.RuntimeBinding::new(
+    software_id="claude-code",
+    adapter_id="acp",
+    launch_kind=@contracts.RUNTIME_LAUNCH_ACP,
+    command="",
+    args=[],
+    model_profile="",
+    hash="sha256:test",
+  )
+  let agent = @contracts.AgentRecord::new(
+    id="agent_1",
+    org_id="org_1",
+    bot_id="bot_a",
+    name="Ada · coding",
+    runtime_binding=binding,
+    created_at="2026-01-01T00:00:00Z",
+    state=@contracts.AGENT_LIFECYCLE_ACTIVE,
+  )
   let model = update(Model::new(), NewChat)
-  assert_true(model.page == Workroom)
-  assert_true(model.composing_new_chat)
-  assert_eq(model.selected_chat, "")
-  let drafted = update(model, AgentInputDraft("  first prompt  "))
-  let (started, start_commands) = update_full(drafted, ComposerSend)
-  assert_eq(started.agent.launch_prompt, "first prompt")
-  assert_eq(started.agent.input, "")
-  assert_false(started.composing_new_chat)
-  assert_eq(start_commands.length(), 1)
-  match start_commands[0] {
-    AgentStart(_, _, _, _, prompt) => assert_eq(prompt, "first prompt")
-    _ => fail("expected AgentStart")
-  }
-  let session = @contracts.AgentSessionRecord::new(
-    id="sess_1",
-    agent_id="agent_1",
-    mode="default",
-    cwd="/tmp/demo",
-    started_at="2026-01-01T00:00:00Z",
+  let (no_bot, no_bot_commands) = update_full(model, ChatCreateSubmit)
+  assert_eq(no_bot_commands.length(), 0)
+  assert_true(no_bot.chat_draft.message.contains("Choose a Bot"))
+  let model = update(model, BotsLoaded([bot]))
+  let model = update(model, BotAgentsLoaded("bot_a", [agent]))
+  let (no_workspace, no_workspace_commands) = update_full(
+    model,
+    ChatCreateSubmit,
   )
-  let live = update(started, AgentStarted(session))
-  let follow = update(live, AgentInputDraft("  next prompt  "))
-  let (sent, follow_commands) = update_full(follow, ComposerSend)
-  assert_eq(sent.agent.sent_prompts.length(), 1)
-  assert_eq(sent.agent.sent_prompts[0], "next prompt")
-  assert_eq(follow_commands.length(), 1)
-  match follow_commands[0] {
-    AgentSend(session_id, prompt) => {
-      assert_eq(session_id, "sess_1")
-      assert_eq(prompt, "next prompt")
-    }
-    _ => fail("expected AgentSend")
-  }
+  assert_eq(no_workspace_commands.length(), 0)
+  assert_true(no_workspace.chat_draft.message.contains("open workspace"))
   let (blank, blank_commands) = update_full(
-    update(live, AgentInputDraft("   ")),
-    ComposerSend,
+    update(no_workspace, ChatDraftWorkspace("ws_1")),
+    ChatCreateSubmit,
   )
-  assert_eq(blank_commands.length(), 0)
+  // A workspace id without a loaded workspace record is still accepted by the
+  // form because the worker owns the RPC contract; the host remains authority.
+  assert_eq(blank_commands.length(), 1)
+  match blank_commands[0] {
+    ChatCreate(bot_id, _, _, agent_id, workspace_id, _) => {
+      assert_eq(bot_id, "bot_a")
+      assert_eq(agent_id, "agent_1")
+      assert_eq(workspace_id, "ws_1")
+    }
+    _ => fail("expected chat.create")
+  }
 }
 
 ///|

@@ -3,16 +3,23 @@ fn sidebar_test_chat(
   id : String,
   bot_id : String,
   updated_at : String,
-) -> ChatProjection {
-  {
-    id,
-    bot_id,
-    title: id,
-    state: "idle",
-    updated_at,
-    project_id: "",
-    agent_session_id: "",
-  }
+) -> @contracts.ChatDetail {
+  let chat = @contracts.ChatRecord::new(
+    id~,
+    org_id="org_1",
+    title=id,
+    created_at="2026-01-01T00:00:00Z",
+  )
+  @contracts.ChatDetail::new(
+    chat={ ..chat, updated_at },
+    participants=[
+      @contracts.ChatParticipant::new(
+        chat_id=id,
+        bot_id~,
+        added_at="2026-01-01T00:00:00Z",
+      ),
+    ],
+  )
 }
 
 ///|

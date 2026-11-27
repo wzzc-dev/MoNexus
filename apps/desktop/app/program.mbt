@@ -93,7 +93,12 @@ pub fn program_with_preferences(
       (next, effect)
     },
     view~,
-    subscriptions=terminal_poll_subscription,
+    subscriptions=fn(model) {
+      @moui.Subscription::batch([
+        terminal_poll_subscription(model),
+        chat_poll_subscription(model),
+      ])
+    },
   ).with_commands(commands=model => {
     [
       @core.ProgramCommand::new(

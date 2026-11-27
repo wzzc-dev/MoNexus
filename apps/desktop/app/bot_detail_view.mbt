@@ -98,6 +98,174 @@ fn bot_chats_for(model : Model, bot : BotIdentity) -> Array[ChatIdentity] {
 }
 
 ///|
+fn bot_project_filter_menu_items(
+  model : Model,
+  on_select : (String) -> Msg,
+) -> Array[@views.MenuItem[Msg]] {
+  let items : Array[@views.MenuItem[Msg]] = [
+    @views.MenuItem::new(
+      id="",
+      label=project_filter_label(model, ""),
+      message=on_select(""),
+    ),
+    @views.MenuItem::new(
+      id=PROJECT_FILTER_NONE,
+      label=project_filter_label(model, PROJECT_FILTER_NONE),
+      message=on_select(PROJECT_FILTER_NONE),
+    ),
+  ]
+  for record in model.project.projects {
+    items.push(
+      @views.MenuItem::new(
+        id=record.id,
+        label=project_name(record),
+        message=on_select(record.id),
+      ),
+    )
+  }
+  items
+}
+
+///|
+/// Project filter shared by the Bot directory and the selected Bot's Chat
+/// list. The value stays route metadata; only names are painted.
+fn bot_project_filter_row(model : Model) -> @moui.View[Msg] {
+  @views.row([
+    ui_section(tr(model.lang, "Bots", "Bot")),
+    @views.spacer(weight=1.0),
+    ui_select_field(
+      tr(model.lang, "Project", "项目"),
+      bot_project_filter_menu_items(model, fn(value) { BotProjectFilter(value) }),
+      model.bot_project_filter,
+      model.bot_project_filter_open,
+      BotProjectFilterPicker(!model.bot_project_filter_open),
+      if model.project.projects_loaded {
+        tr(model.lang, "All projects", "全部项目")
+      } else {
+        tr(model.lang, "Loading projects...", "正在加载项目...")
+      },
+      236.0,
+    ),
+  ], spacing=10.0, align=@style.CrossAlign::End).frame(width=992.0)
+}
+
+///|
+fn bot_directory_row(
+  model : Model,
+  record : @contracts.BotRecord,
+  selected : Bool,
+) -> @moui.View[Msg] {
+  let activity = bot_recent_activity(model, record)
+  let latest = latest_chat_for_bot(model.chats, record.id)
+  let recent = match latest {
+    Some(chat) => {
+      let suffix = if activity == "" { "" } else { " · " + activity }
+      chat.title + suffix
+    }
+    None =>
+      if activity == "" {
+        tr(model.lang, "No recent Chat activity", "暂无最近对话活动")
+      } else {
+        activity
+      }
+  }
+  @views.container(
+    @views.padding_edges(
+      @views.row([
+        @views.container(
+          @views.text(
+            bot_initial(bot_name(record)),
+            align=@core.TextAlign::TextCenter,
+          ).font(ui_font(9.0, 620)).foreground(ui_on_ink()),
+          width=22.0,
+          height=22.0,
+          background=ui_ink(),
+          corner_radius=11.0,
+          padding=0.0,
+        ),
+        @views.column([
+          @views.row([
+            @views.text(
+              bot_name(record),
+              width=220.0,
+              align=@core.TextAlign::TextStart,
+              wrap=false,
+            ).font(ui_font(11.0, if selected { 620 } else { 540 })).foreground(
+              ui_text_color(),
+            ),
+            ui_tag(if record.state == "" {
+              tr(model.lang, "idle", "空闲")
+            } else {
+              record.state
+            }),
+          ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=330.0),
+          @views.text(
+            recent,
+            width=600.0,
+            align=@core.TextAlign::TextStart,
+            wrap=false,
+          ).font(ui_font(9.0, 400)).foreground(ui_dim()),
+        ], spacing=2.0, align=@style.CrossAlign::Start).frame(width=600.0),
+        @views.spacer(weight=1.0),
+        @views.text(
+          if selected {
+            tr(model.lang, "open", "已打开")
+          } else {
+            tr(model.lang, "view", "查看")
+          },
+          align=@core.TextAlign::TextEnd,
+        ).font(ui_font(9.0, 500)).foreground(ui_dim()),
+      ], spacing=9.0, align=@style.CrossAlign::Center).frame(width=968.0),
+      top=7.0,
+      right=12.0,
+      bottom=7.0,
+      left=12.0,
+    ),
+    width=992.0,
+    background=if selected { ui_selected() } else { clear_color() },
+    corner_radius=3.0,
+    padding=0.0,
+  ).on_tap(OpenBotDetail(record.id)).cursor(
+    @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
+  )
+}
+
+///|
+fn bot_directory_rows(model : Model, selected_bot : String) -> Array[@moui.View[Msg]] {
+  let rows : Array[@moui.View[Msg]] = []
+  let bots = bots_in_project(model, model.bot_project_filter)
+  if !model.bots_loaded {
+    rows.push(
+      @views.text(
+        tr(model.lang, "Loading Bots from the host...", "正在从主机加载 Bot..."),
+        width=992.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(10.0, 400)).foreground(ui_dim()),
+    )
+  } else if bots.is_empty() {
+    rows.push(
+      @views.text(
+        tr(
+          model.lang,
+          "No Bot matches this Project filter. Bot membership is derived from active Chat participants; the host exposes no project.membership.list RPC.",
+          "没有 Bot 符合此项目筛选。Bot 成员资格来自对话中的有效参与者；主机未暴露 project.membership.list RPC。",
+        ),
+        width=992.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(10.0, 400)).foreground(ui_dim()),
+    )
+  } else {
+    for record in bots {
+      rows.push(bot_directory_row(model, record, record.id == selected_bot))
+      rows.push(ui_divider_soft())
+    }
+  }
+  rows
+}
+
+///|
 fn bot_task_visible(
   model : Model,
   task : @contracts.TaskRecord,
@@ -448,21 +616,68 @@ fn bot_item_pane(
       left=8.0,
     ),
   )
-  // A Chat projection carries a project id, not a workspace id. Do not join
-  // those two id spaces; keep the Bot page honest until a typed project
-  // projection exists.
-  content.push(
-    @views.text(
-      tr(
-        model.lang,
-        "No project projection for this Bot yet.",
-        "此 Bot 尚无项目投影。",
-      ),
-      width=390.0,
-      align=@core.TextAlign::TextStart,
-      wrap=true,
-    ).font(ui_font(8.5, 400)).foreground(ui_dim()),
-  )
+  // A Chat carries the Project id. Membership is only claimed when an active
+  // participant in a projected Project Chat is this Bot; no membership RPC
+  // exists yet, so the window never guesses access.
+  let project_rows : Array[@moui.View[Msg]] = []
+  for project in model.project.projects {
+    let mut chat_count = 0
+    for chat in model.chats {
+      if chat.project_id == project.id &&
+        (chat.bot_id == bot.id || chat.participants.contains(bot.id)) {
+        chat_count = chat_count + 1
+      }
+    }
+    if chat_count > 0 {
+      project_rows.push(
+        @views.container(
+          @views.padding_edges(
+            @views.row([
+              @views.lucide_icon("folder", size=11.0, color=ui_dim()),
+              @views.text(
+                project_name(project),
+                width=270.0,
+                align=@core.TextAlign::TextStart,
+                wrap=false,
+              ).font(ui_font(9.0, 540)).foreground(ui_text_color()),
+              @views.spacer(weight=1.0),
+              @views.text(
+                chat_count.to_string() +
+                tr(model.lang, " Chats", " 个 Chat"),
+                align=@core.TextAlign::TextEnd,
+              ).font(mono_font(8.5, 400)).foreground(ui_dim()),
+            ], spacing=6.0, align=@style.CrossAlign::Center).frame(width=378.0),
+            top=5.0,
+            right=6.0,
+            bottom=5.0,
+            left=6.0,
+          ),
+          width=390.0,
+          padding=0.0,
+        ).on_tap(SelectProject(project.id)).cursor(
+          @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
+        ),
+      )
+    }
+  }
+  if project_rows.is_empty() {
+    content.push(
+      @views.text(
+        tr(
+          model.lang,
+          "No Project Chat membership evidence for this Bot yet.",
+          "此 Bot 尚无项目对话成员证据。",
+        ),
+        width=390.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(8.5, 400)).foreground(ui_dim()),
+    )
+  } else {
+    for row in project_rows {
+      content.push(row)
+    }
+  }
   content.push(
     @views.padding_edges(
       @views.row([
@@ -908,27 +1123,49 @@ fn bot_chats_tab(
   model : Model,
   bot : BotIdentity,
 ) -> @moui.View[Msg] {
-  let chats = bot_chats_for(model, bot)
+  let chats = bot_chats_filtered(model, bot.id, model.bot_project_filter)
   let rows : Array[@moui.View[Msg]] = [
+    bot_project_filter_row(model),
+  ]
+  for row in bot_directory_rows(model, bot.id) {
+    rows.push(row)
+  }
+  rows.push(ui_divider_soft())
+  rows.push(
     @views.row([
       @views.text(
-        tr(model.lang, "Chats", "聊天"),
+        tr(model.lang, "Chats with ", "与 ") + bot.name,
         align=@core.TextAlign::TextStart,
-      ).font(ui_font(13.0, 620)).foreground(ui_text_color()),
+      ).font(ui_font(12.0, 620)).foreground(ui_text_color()),
+      ui_tag(project_filter_label(model, model.bot_project_filter)),
       @views.spacer(weight=1.0),
       @views.text(
         chats.length().to_string(),
         align=@core.TextAlign::TextEnd,
       ).font(mono_font(9.0, 400)).foreground(ui_dim()),
     ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=992.0),
-  ]
+  )
+  if model.bot_project_filter == PROJECT_FILTER_NONE {
+    rows.push(
+      @views.text(
+        tr(
+          model.lang,
+          "No-project Chats appear only here in the Bot view; they never enter a Project view.",
+          "无项目对话只在此 Bot 视图出现，不会进入项目视图。",
+        ),
+        width=992.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(9.5, 400)).foreground(ui_dim()),
+    )
+  }
   if chats.is_empty() {
     rows.push(
       @views.text(
         tr(
           model.lang,
-          "No Chat projection for this Bot yet.",
-          "此 Bot 尚无对话投影。",
+          "No Chat matches this Project filter yet.",
+          "此项目筛选下尚无对话。",
         ),
         width=992.0,
         align=@core.TextAlign::TextStart,
@@ -942,24 +1179,30 @@ fn bot_chats_tab(
       ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=992.0),
     )
   } else {
-    for chat in chats {
+    for record in chats {
+      let chat = chat_identity_for(model, record)
       rows.push(
         @views.container(
           @views.padding_edges(
             @views.row([
               @views.text(
                 chat.title,
-                width=600.0,
+                width=520.0,
                 align=@core.TextAlign::TextStart,
                 wrap=false,
               ).font(ui_font(12.0, 560)).foreground(ui_text_color()),
               @views.text(
-                bot_name_for_chat(
-                  model,
-                  chat,
-                ),
+                chat_project_label(model, chat.project_id),
                 align=@core.TextAlign::TextStart,
               ).font(ui_font(9.5, 400)).foreground(ui_muted()),
+              if chat.agent_name == "" {
+                ui_meta("")
+              } else {
+                @views.text(
+                  chat.agent_name,
+                  align=@core.TextAlign::TextStart,
+                ).font(ui_font(9.0, 400)).foreground(ui_dim())
+              },
               @views.spacer(weight=1.0),
               @views.text(
                 compact_time(chat.updated_at),
@@ -1012,11 +1255,370 @@ fn bot_chats_tab(
 }
 
 ///|
+fn agent_lifecycle_label(model : Model, state : String) -> String {
+  match state {
+    @contracts.AGENT_LIFECYCLE_ACTIVE => tr(model.lang, "active", "可用")
+    @contracts.AGENT_LIFECYCLE_SUSPENDED => tr(model.lang, "suspended", "已暂停")
+    @contracts.AGENT_LIFECYCLE_RETIRED => tr(model.lang, "retired", "已停用")
+    @contracts.AGENT_LIFECYCLE_PROVISIONING =>
+      tr(model.lang, "provisioning", "创建中")
+    "" => tr(model.lang, "unknown", "未知")
+    _ => state
+  }
+}
+
+///|
+fn agent_software_menu_items(
+  bot : @contracts.BotRecord,
+  on_select : (String) -> Msg,
+) -> Array[@views.MenuItem[Msg]] {
+  let items : Array[@views.MenuItem[Msg]] = []
+  for software in bot.software_allowlist {
+    items.push(
+      @views.MenuItem::new(
+        id=software,
+        label=software,
+        message=on_select(software),
+      ),
+    )
+  }
+  items
+}
+
+///|
+fn bot_agent_row(
+  model : Model,
+  agent : @contracts.AgentRecord,
+) -> @moui.View[Msg] {
+  let state = if agent.state == "" {
+    @contracts.AGENT_LIFECYCLE_PROVISIONING
+  } else {
+    agent.state
+  }
+  let software = agent.runtime_binding.software_id
+  let when = if agent.updated_at != "" {
+    compact_time(agent.updated_at)
+  } else {
+    compact_time(agent.created_at)
+  }
+  let actions : Array[@moui.View[Msg]] = []
+  if state == @contracts.AGENT_LIFECYCLE_ACTIVE {
+    actions.push(
+      ui_ghost_small(
+        tr(model.lang, "Suspend", "暂停"),
+        SuspendBotAgent(agent.id),
+      ),
+    )
+  }
+  if state != @contracts.AGENT_LIFECYCLE_RETIRED {
+    actions.push(
+      ui_ghost_small(
+        tr(model.lang, "Retire", "停用"),
+        RetireBotAgent(agent.id),
+      ),
+    )
+  }
+  @views.container(
+    @views.padding_edges(
+      @views.row([
+        @views.column([
+          @views.row([
+            @views.text(
+              if agent.name == "" {
+                tr(model.lang, "Unnamed Agent", "未命名 Agent")
+              } else {
+                agent.name
+              },
+              width=330.0,
+              align=@core.TextAlign::TextStart,
+              wrap=false,
+            ).font(ui_font(11.0, 580)).foreground(ui_text_color()),
+            ui_tag(agent_lifecycle_label(model, state)),
+            if software == "" {
+              ui_meta("")
+            } else {
+              @views.text(
+                software,
+                align=@core.TextAlign::TextStart,
+              ).font(mono_font(9.0, 400)).foreground(ui_muted())
+            },
+          ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=640.0),
+          @views.text(
+            if agent.specialty == "" {
+              tr(
+                model.lang,
+                "Execution worker · no specialty recorded",
+                "执行器 · 未记录专长",
+              )
+            } else {
+              agent.specialty
+            },
+            width=640.0,
+            align=@core.TextAlign::TextStart,
+            wrap=false,
+          ).font(ui_font(9.0, 400)).foreground(ui_dim()),
+        ], spacing=3.0, align=@style.CrossAlign::Start).frame(width=640.0),
+        @views.spacer(weight=1.0),
+        if when == "" { ui_meta("") } else { ui_mono(when, 8.5) },
+        @views.row(actions, spacing=5.0, align=@style.CrossAlign::Center),
+      ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
+      top=9.0,
+      right=14.0,
+      bottom=9.0,
+      left=14.0,
+    ),
+    width=992.0,
+    background=ui_surface(),
+    border=Some(ui_border_style(ui_border_soft(), 1.0)),
+    corner_radius=4.0,
+    padding=0.0,
+  )
+}
+
+///|
+fn bot_agent_create_form(
+  model : Model,
+  bot : @contracts.BotRecord,
+) -> Array[@moui.View[Msg]] {
+  let draft = model.agent_draft
+  let fields : Array[@moui.View[Msg]] = [
+    ui_section(tr(model.lang, "Create Agent", "创建 Agent")),
+    @views.row([
+      ui_field(
+        tr(model.lang, "Name", "名称"),
+        draft.name,
+        fn(value) { AgentDraftName(value) },
+        tr(model.lang, "e.g. Ada · coding", "例如：Ada · coding"),
+        300.0,
+      ),
+      if bot.software_allowlist.is_empty() {
+        ui_field(
+          tr(model.lang, "Software", "软件"),
+          draft.software,
+          fn(value) { AgentDraftSoftware(value) },
+          tr(model.lang, "software name", "软件名称"),
+          300.0,
+        )
+      } else {
+        ui_select_field(
+          tr(model.lang, "Software", "软件"),
+          agent_software_menu_items(bot, fn(value) { AgentDraftSoftware(value) }),
+          draft.software,
+          draft.software_picker_open,
+          AgentDraftSoftwarePicker(!draft.software_picker_open),
+          tr(model.lang, "Select software", "选择软件"),
+          300.0,
+        )
+      },
+      ui_field(
+        tr(model.lang, "Specialty", "专长"),
+        draft.specialty,
+        fn(value) { AgentDraftSpecialty(value) },
+        tr(model.lang, "optional", "可选"),
+        260.0,
+      ),
+    ], spacing=12.0, align=@style.CrossAlign::End).frame(width=960.0),
+    @views.row([
+      @views.column([
+        ui_field_label(tr(model.lang, "Launch", "启动方式")),
+        @views.row([
+          ui_choice_segment(
+            "ACP",
+            draft.launch_kind == @contracts.RUNTIME_LAUNCH_ACP,
+            AgentDraftLaunch(@contracts.RUNTIME_LAUNCH_ACP),
+          ),
+          ui_choice_segment(
+            tr(model.lang, "Command", "命令"),
+            draft.launch_kind == @contracts.RUNTIME_LAUNCH_COMMAND,
+            AgentDraftLaunch(@contracts.RUNTIME_LAUNCH_COMMAND),
+          ),
+        ], spacing=6.0, align=@style.CrossAlign::Center),
+      ], spacing=5.0, align=@style.CrossAlign::Start),
+      @views.spacer(weight=1.0),
+      ui_primary(
+        if draft.busy {
+          tr(model.lang, "Creating...", "正在创建...")
+        } else {
+          tr(model.lang, "Create Agent", "创建 Agent")
+        },
+        BotAgentCreateSubmit,
+      ),
+    ], spacing=12.0, align=@style.CrossAlign::End).frame(width=960.0),
+  ]
+  if draft.launch_kind == @contracts.RUNTIME_LAUNCH_COMMAND {
+    fields.push(
+      @views.row([
+        ui_field(
+          tr(model.lang, "Command", "命令"),
+          draft.command,
+          fn(value) { AgentDraftCommand(value) },
+          tr(model.lang, "runtime executable", "运行时可执行文件"),
+          380.0,
+        ),
+        ui_field(
+          tr(model.lang, "Arguments", "参数"),
+          draft.args,
+          fn(value) { AgentDraftArgs(value) },
+          tr(model.lang, "space-separated", "以空格分隔"),
+          560.0,
+        ),
+      ], spacing=12.0, align=@style.CrossAlign::End).frame(width=960.0),
+    )
+  }
+  if bot.software_allowlist.is_empty() {
+    fields.push(
+      ui_muted_wrapped(
+        tr(
+          model.lang,
+          "This Bot projects no software allowlist. The host accepts the software name entered above; no agent id is typed.",
+          "此 Bot 未投影软件允许列表。主机会接受上方输入的软件名称；无需输入 Agent ID。",
+        ),
+        960.0,
+      ),
+    )
+  }
+  match bot.create_policy {
+    @contracts.BOT_CREATE_POLICY_OFF =>
+      fields.push(
+        @views.text(
+          tr(
+            model.lang,
+            "This Bot's create policy is off; the host will reject new Agents.",
+            "此 Bot 的创建策略为关闭；主机会拒绝新的 Agent。",
+          ),
+          width=960.0,
+          align=@core.TextAlign::TextStart,
+          wrap=true,
+        ).font(ui_font(10.0, 400)).foreground(ui_warning()),
+      )
+    @contracts.BOT_CREATE_POLICY_ASK =>
+      fields.push(
+        @views.text(
+          tr(
+            model.lang,
+            "This Bot's create policy is ask. The host requires an owner Decision id; this P1 form does not invent one, so creation will be rejected until the policy is changed outside this flow.",
+            "此 Bot 的创建策略为询问。主机要求所有者决策 ID；此 P1 表单不会编造该 ID，因此在流程外更改策略前，创建会被拒绝。",
+          ),
+          width=960.0,
+          align=@core.TextAlign::TextStart,
+          wrap=true,
+        ).font(ui_font(10.0, 400)).foreground(ui_warning()),
+      )
+    _ => ()
+  }
+  if draft.message != "" {
+    fields.push(ui_muted_wrapped(draft.message, 960.0))
+  } else if model.chat_error.has_prefix("bot.agent.") {
+    fields.push(
+      @views.text(
+        model.chat_error,
+        width=960.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(10.0, 400)).foreground(ui_danger()),
+    )
+  }
+  fields
+}
+
+///|
 fn bot_agents_tab(model : Model) -> @moui.View[Msg] {
+  let bot_identity = active_bot_identity(model)
+  let bot_record = bot_by_id(model.bots, bot_identity.id)
+  let rows : Array[@moui.View[Msg]] = [
+    @views.row([
+      @views.text(
+        tr(model.lang, "Agents", "Agents"),
+        align=@core.TextAlign::TextStart,
+      ).font(ui_font(13.0, 620)).foreground(ui_text_color()),
+      @views.spacer(weight=1.0),
+      @views.text(
+        bot_identity.name,
+        align=@core.TextAlign::TextEnd,
+      ).font(ui_font(9.5, 400)).foreground(ui_muted()),
+      ui_ghost_small(
+        tr(model.lang, "Refresh", "刷新"),
+        SelectBotTab(BotAgents),
+      ),
+    ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=992.0),
+  ]
+  if !bot_agents_loaded_for(model, bot_identity.id) {
+    rows.push(
+      @views.text(
+        tr(model.lang, "Loading Agents from the host...", "正在从主机加载 Agent..."),
+        width=992.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(10.0, 400)).foreground(ui_dim()),
+    )
+  } else if model.bot_agents.is_empty() {
+    rows.push(
+      @views.text(
+        tr(
+          model.lang,
+          "No Agents for this Bot yet. Create one by name and software below.",
+          "此 Bot 尚无 Agent。请在下方按名称和软件创建。",
+        ),
+        width=992.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(10.0, 400)).foreground(ui_dim()),
+    )
+  } else {
+    for agent in model.bot_agents {
+      rows.push(bot_agent_row(model, agent))
+    }
+  }
+  rows.push(ui_divider_soft())
+  match bot_record {
+    Some(record) => {
+      for field in bot_agent_create_form(model, record) {
+        rows.push(field)
+      }
+    }
+    None =>
+      rows.push(
+        @views.text(
+          tr(
+            model.lang,
+            "Open a projected Bot before creating an Agent.",
+            "请先打开一个已投影的 Bot，再创建 Agent。",
+          ),
+          width=992.0,
+          align=@core.TextAlign::TextStart,
+          wrap=true,
+        ).font(ui_font(10.0, 400)).foreground(ui_warning()),
+      )
+  }
+  rows.push(ui_divider_soft())
+  rows.push(
+    ui_advanced_control(
+      model.lang,
+      model.bot_agent_manage,
+      SetBotAgentManage(!model.bot_agent_manage),
+    ),
+  )
+  rows.push(
+    @views.text(
+      tr(
+        model.lang,
+        "Legacy session controls stay reachable; Chat owns the visible thread.",
+        "旧会话控制仍可访问；可见线程由 Chat 承载。",
+      ),
+      width=992.0,
+      align=@core.TextAlign::TextStart,
+      wrap=true,
+    ).font(ui_font(9.0, 400)).foreground(ui_dim()),
+  )
+  if model.bot_agent_manage {
+    rows.push(agents_page(model))
+  }
   @views.container(
     @views.padding_edges(
       @views.scroll_view(
-        agents_page(model).frame(width=992.0),
+        @views.column(rows, spacing=10.0, align=@style.CrossAlign::Start).frame(
+          width=992.0,
+        ),
         width=992.0,
         height=557.0,
         request=@core.ScrollRequest::new(
