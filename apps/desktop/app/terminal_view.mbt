@@ -13,7 +13,7 @@ let terminal_line_height : Double = 18.0
 
 ///|
 fn terminal_focus_active(model : Model) -> Bool {
-  model.page == Projects &&
+  model.page == Manage &&
   model.project.terminal_focus &&
   model.project.workspace is Some(_)
 }

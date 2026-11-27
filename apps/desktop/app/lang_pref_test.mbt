@@ -68,7 +68,7 @@ test "startup language precedence is saved, then env, then English" {
 test "SetLanguage flips labels and save results update the diagnostic" {
   let model = update(Model::new(), SetLanguage(Chinese))
   assert_true(model.lang == Chinese)
-  assert_eq(model.page.label_in(model.lang), "主页")
+  assert_eq(model.page.label_in(model.lang), "对话")
   let failed = update(
     model,
     LanguageStored(LanguageSaveFailed("permission denied")),
@@ -78,7 +78,7 @@ test "SetLanguage flips labels and save results update the diagnostic" {
   let recovered = update(failed, LanguageStored(LanguageSaveOk))
   assert_eq(recovered.lang_note, "")
   let english = update(recovered, SetLanguage(English))
-  assert_eq(english.page.label_in(english.lang), "Home")
+  assert_eq(english.page.label_in(english.lang), "Chats")
 }
 
 ///|
@@ -96,13 +96,17 @@ test "the Settings language control switches the whole shell" {
   assert_true(harness.has_text("外观"))
   assert_true(harness.has_text("语言"))
   assert_true(harness.has_text("令牌：未知（主机未连接）"))
-  harness.tap_text("主页")
-  assert_true(harness.has_text("欢迎使用 MoNexus"))
+  harness.tap_text("新对话")
+  assert_true(
+    harness.has_text("尚无回复。回复会在这里以连续正文显示。"),
+  )
   harness.tap_text("设置")
   harness.tap_text("English")
   assert_true(harness.has_text("Connection"))
-  harness.tap_text("Home")
-  assert_true(harness.has_text("Welcome to MoNexus"))
+  harness.tap_text("New Chat")
+  assert_true(
+    harness.has_text("No reply yet. Replies appear here as continuous text."),
+  )
 }
 
 ///|
@@ -163,5 +167,5 @@ async test "a saved Chinese choice seeds a fresh model" {
   )
   assert_true(model.lang == Chinese)
   assert_eq(model.lang_note, "")
-  assert_eq(model.page.label_in(model.lang), "主页")
+  assert_eq(model.page.label_in(model.lang), "对话")
 }

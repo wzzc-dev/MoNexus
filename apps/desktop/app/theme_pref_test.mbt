@@ -109,15 +109,15 @@ test "startup precedence is saved, then env, then default" {
   assert_true(env_dark.mode == Dark)
   assert_eq(env_dark.source, "environment")
   let default = resolve_startup_theme(NoThemeChoice, None)
-  assert_true(default.mode == Dark)
+  assert_true(default.mode == Light)
   assert_eq(default.source, "default")
   assert_eq(default.note, "")
 }
 
 ///|
-test "an illegal MONEXUS_THEME falls back to dark with a diagnostic" {
+test "an illegal MONEXUS_THEME falls back to light with a diagnostic" {
   let startup = resolve_startup_theme(NoThemeChoice, Some("sepia"))
-  assert_true(startup.mode == Dark)
+  assert_true(startup.mode == Light)
   assert_eq(startup.source, "default")
   assert_true(startup.note.contains("MONEXUS_THEME=sepia"))
 }
@@ -129,7 +129,7 @@ test "an invalid saved choice falls through and reports why" {
   assert_eq(with_env.source, "environment")
   assert_true(with_env.note.contains("bad theme.json"))
   let bare = resolve_startup_theme(InvalidThemeChoice("bad theme.json"), None)
-  assert_true(bare.mode == Dark)
+  assert_true(bare.mode == Light)
   assert_eq(bare.source, "default")
   assert_true(bare.note.contains("bad theme.json"))
 }
@@ -185,7 +185,7 @@ async test "a corrupt preference file is ignored, reported and left intact" {
     _ => assert_true(false)
   }
   let startup = startup_theme_in(config, None)
-  assert_true(startup.mode == Dark)
+  assert_true(startup.mode == Light)
   assert_eq(startup.source, "default")
   assert_true(startup.note.contains("theme.json"))
   // Reading never rewrites what the user has on disk.

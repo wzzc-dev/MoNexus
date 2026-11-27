@@ -18,7 +18,7 @@ fn terminal_test_record() -> @contracts.WorkspaceRecord {
 /// Opening a focused terminal with a live session: the state the polling and
 /// input tests start from.
 fn terminal_test_running_model() -> Model {
-  let model = update(Model::new(), SelectPage(Projects))
+  let model = update(Model::new(), SelectPage(Manage))
   let model = update(model, ProjectOpened(terminal_test_record()))
   let model = update(model, ProjectTerminalFocus)
   update(model, ProjectTerminalOpened("sess_test", "$ ", 2L, false))
@@ -28,7 +28,7 @@ fn terminal_test_running_model() -> Model {
 test "terminal.open applies initial text, cursor and eof" {
   assert_eq(terminal_transcript_text(""), "$ ")
   assert_eq(terminal_transcript_text("$ ready\n"), "$ ready\n")
-  let model = update(Model::new(), SelectPage(Projects))
+  let model = update(Model::new(), SelectPage(Manage))
   let model = update(model, ProjectOpened(terminal_test_record()))
   let (opening, commands) = update_full(model, ProjectTerminalFocus)
   assert_eq(opening.project.terminal_state, TerminalOpening)
@@ -261,15 +261,15 @@ test "the live session survives page navigation" {
   let model = terminal_test_running_model()
   assert_true(terminal_should_poll(model))
   assert_eq(terminal_poll_subscription(model).descriptors().length(), 1)
-  let away = update(model, SelectPage(Home))
-  assert_eq(away.page.label(), "Home")
+  let away = update(model, SelectPage(Workroom))
+  assert_eq(away.page.label(), "Workroom")
   assert_eq(away.project.terminal_id, "sess_test")
   assert_eq(away.project.terminal_text, "$ ")
   assert_eq(away.project.terminal_cursor, 2L)
   assert_false(terminal_should_poll(away))
   assert_eq(terminal_poll_subscription(away).descriptors().length(), 0)
-  let back = update(away, SelectPage(Projects))
-  assert_eq(back.page.label(), "Projects")
+  let back = update(away, SelectPage(Manage))
+  assert_eq(back.page.label(), "Manage")
   assert_eq(back.project.terminal_id, "sess_test")
   assert_eq(back.project.terminal_text, "$ ")
   assert_eq(back.project.terminal_cursor, 2L)

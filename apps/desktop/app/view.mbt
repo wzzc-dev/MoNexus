@@ -24,12 +24,11 @@ using @views {
 ///|
 fn page_icon(page : Page) -> String {
   match page {
-    Home => "house"
-    Machines => "server"
-    Projects => "folder"
-    Agents => "message-circle"
+    Workroom => "message-circle"
+    BotDetail => "users"
     Inbox => "mail"
     Tasks => "list"
+    Manage => "columns-3"
     Search => "search"
     Settings => "settings"
   }
@@ -219,6 +218,36 @@ fn task_title_for(model : Model, task_id : String) -> String {
 }
 
 ///|
+/// Resolve the Bot name that owns a Chat projection. A Chat whose Bot is not
+/// projected keeps the current Bot identity rather than falling back to an id.
+fn bot_name_for_chat(model : Model, chat : ChatIdentity) -> String {
+  match bot_by_id(model.bots, chat.bot_id) {
+    Some(record) => bot_name(record)
+    None =>
+      if chat.bot_id == "" || chat.bot_id == active_bot_identity(model).id {
+        active_bot_identity(model).name
+      } else {
+        tr(model.lang, "Bot", "Bot")
+      }
+  }
+}
+
+///|
+/// First glyph for the hand-painted identity avatars.
+fn bot_initial(name : String) -> String {
+  let trimmed = name.trim().to_owned()
+  if trimmed == "" {
+    return "?"
+  }
+  let chars = trimmed.to_array()
+  if chars.is_empty() {
+    "?"
+  } else {
+    @string.from_array(chars[0:1])
+  }
+}
+
+///|
 /// Left navigation row: 32pt tall, Lucide glyph + label, accent tint when the
 /// page is open and a hover wash otherwise. The Inbox row carries its needs-you
 /// count.
@@ -228,20 +257,28 @@ fn nav_item(model : Model, page : Page) -> @moui.View[Msg] {
   let hover_key = "nav:" + page.label()
   let hovered = model.hover_row == hover_key
   let tone = if active {
-    ui_accent()
+    ui_ink()
   } else if hovered {
     ui_text_color()
   } else {
     ui_muted()
   }
   let background = if active {
-    ui_accent_soft()
+    ui_selected()
   } else if hovered {
     ui_hover()
   } else {
     clear_color()
   }
   let children : Array[@moui.View[Msg]] = [
+    container(
+      @views.empty(),
+      width=2.0,
+      height=14.0,
+      background=if active { ui_ink() } else { clear_color() },
+      corner_radius=1.0,
+      padding=0.0,
+    ),
     lucide_icon(page_icon(page), size=16.0, color=tone),
     text(label, align=@core.TextAlign::TextStart).font(ui_font(13.0, if active { 600 } else { 400 }))
     .foreground(tone),
@@ -256,13 +293,13 @@ fn nav_item(model : Model, page : Page) -> @moui.View[Msg] {
   container(
     padding_xy(
       row(children, spacing=10.0, align=@style.CrossAlign::Center).frame(
-        width=184.0,
+        width=168.0,
       ),
-      horizontal=10.0,
+      horizontal=8.0,
     ),
     height=32.0,
     background=background,
-    corner_radius=7.0,
+    corner_radius=4.0,
     padding=0.0,
   ).on_tap(SelectPage(page)).on_hover(
     fn(over) { HoverRow(hover_key, over) },
@@ -272,85 +309,617 @@ fn nav_item(model : Model, page : Page) -> @moui.View[Msg] {
 ///|
 fn brand_mark() -> @moui.View[Msg] {
   container(
-    text("M").font(serif_font(15.0)).foreground(ui_on_accent()),
+    text("M").font(serif_font(15.0)).foreground(ui_on_ink()),
     width=24.0,
     height=24.0,
-    background=ui_accent(),
-    corner_radius=7.0,
+    background=ui_ink(),
+    corner_radius=4.0,
     padding=0.0,
   )
 }
 
 ///|
-fn sidebar(model : Model) -> @moui.View[Msg] {
-  let items : Array[@moui.View[Msg]] = []
-  for page in [Home, Machines, Projects, Agents, Inbox, Tasks, Search] {
-    items.push(nav_item(model, page))
+fn sidebar_group_label(label : String) -> @moui.View[Msg] {
+  container(
+    padding_edges(
+      text(label, align=@core.TextAlign::TextStart).font(ui_font(9.0, 600)).foreground(ui_dim()),
+      top=0.0,
+      right=8.0,
+      bottom=5.0,
+      left=8.0,
+    ),
+    height=20.0,
+    padding=0.0,
+  )
+}
+
+///|
+fn sidebar_chat_row(
+  model : Model,
+  chat : ChatIdentity,
+  active : Bool,
+) -> @moui.View[Msg] {
+  let hover_key = "chat:" + chat.id
+  let hovered = model.hover_row == hover_key
+  let tone = if active || hovered { ui_text_color() } else { ui_muted() }
+  let bot = bot_name_for_chat(model, chat)
+  let when = compact_time(chat.updated_at)
+  let meta = if when == "" {
+    bot
+  } else {
+    bot + " · " + when
   }
-  let content = column([
+  let msg = if chat.is_fallback {
+    SelectPage(Workroom)
+  } else {
+    SelectChat(chat.id)
+  }
+  container(
+    padding_edges(
+      column([
+        text(chat.title, align=@core.TextAlign::TextStart).font(ui_font(11.0, if active { 600 } else { 500 })).foreground(tone),
+        text(meta, align=@core.TextAlign::TextStart).font(ui_font(9.0, 400)).foreground(ui_dim()),
+      ], spacing=2.0, align=@style.CrossAlign::Start).frame(width=174.0),
+      top=6.0,
+      right=8.0,
+      bottom=6.0,
+      left=8.0,
+    ),
+    height=38.0,
+    background=if active {
+      ui_selected()
+    } else if hovered {
+      ui_hover()
+    } else {
+      clear_color()
+    },
+    corner_radius=4.0,
+    padding=0.0,
+  ).on_tap(msg).on_hover(fn(over) { HoverRow(hover_key, over) }).cursor(
+    @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
+  )
+}
+
+///|
+fn bot_status_tone(status : String) -> @core.Color {
+  if status == @contracts.BOT_STATE_ACTIVE {
+    ui_success()
+  } else if status == @contracts.BOT_STATE_SUSPENDED {
+    ui_warning()
+  } else {
+    ui_dim()
+  }
+}
+
+///|
+fn sidebar_bot_row(
+  model : Model,
+  identity : BotIdentity,
+  active : Bool,
+) -> @moui.View[Msg] {
+  let hover_key = "bot:" + identity.id
+  let hovered = model.hover_row == hover_key
+  let dot = if identity.is_fallback {
+    link_tone(model.host.link)
+  } else {
+    bot_status_tone(identity.status)
+  }
+  let status = if identity.status == "" {
+    tr(model.lang, "idle", "空闲")
+  } else {
+    identity.status
+  }
+  // The active identity row opens its Bot page; selecting another Bot follows
+  // the Chat-first rule and opens that Bot's latest known Chat (or its page
+  // when no Chat projection exists yet).
+  let msg = if active {
+    OpenBotDetail(identity.id)
+  } else {
+    SelectBot(identity.id)
+  }
+  container(
+    padding_edges(
+      row([
+        container(
+          text(
+            bot_initial(identity.name),
+            align=@core.TextAlign::TextCenter,
+          ).font(ui_font(10.0, 600)).foreground(
+            if active { ui_on_ink() } else { ui_muted() },
+          ),
+          width=24.0,
+          height=24.0,
+          background=if active { ui_ink() } else { ui_surface_alt() },
+          corner_radius=12.0,
+          border=Some(ui_edge(if active { ui_ink() } else { ui_border() })),
+          padding=0.0,
+        ),
+        column([
+          text(identity.name, align=@core.TextAlign::TextStart).font(ui_font(11.0, if active { 600 } else { 500 })).foreground(
+            if active { ui_text_color() } else { ui_muted() },
+          ),
+          text(status, align=@core.TextAlign::TextStart).font(ui_font(9.0, 400)).foreground(ui_dim()),
+        ], spacing=1.0, align=@style.CrossAlign::Start).frame(width=130.0),
+        ui_dot(dot),
+      ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=176.0),
+      top=4.0,
+      right=6.0,
+      bottom=4.0,
+      left=6.0,
+    ),
+    height=34.0,
+    background=if active {
+      ui_selected()
+    } else if hovered {
+      ui_hover()
+    } else {
+      clear_color()
+    },
+    corner_radius=4.0,
+    padding=0.0,
+  ).on_tap(msg).on_hover(
+    fn(over) { HoverRow(hover_key, over) },
+  ).cursor(@core.CursorStyle::Icon(@core.CursorIcon::CursorPointer))
+}
+
+///|
+fn new_chat_action(model : Model) -> @moui.View[Msg] {
+  column([
     container(
       padding_edges(
         row([
-          brand_mark(),
-          text("MoNexus", align=@core.TextAlign::TextStart).font(ui_font(15.0, 600)).foreground(ui_text_color()),
-        ], spacing=9.0, align=@style.CrossAlign::Center).frame(width=196.0),
+          lucide_icon("plus", size=14.0, color=ui_muted()),
+          text(tr(model.lang, "New Chat", "新对话"), align=@core.TextAlign::TextStart).font(
+            ui_font(11.0, 500),
+          ).foreground(ui_text_color()),
+          spacer(weight=1.0),
+          ui_meta("⌘N"),
+        ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=176.0),
         top=0.0,
-        right=14.0,
+        right=8.0,
         bottom=0.0,
-        left=14.0,
+        left=8.0,
       ),
-      height=44.0,
+      height=30.0,
+      background=ui_surface(),
+      corner_radius=4.0,
+      border=Some(ui_edge(ui_border())),
       padding=0.0,
+    ).on_tap(NewChat).cursor(
+      @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
+    ),
+  ], spacing=0.0).frame(width=184.0)
+}
+
+///|
+/// Keep the active Chat visible even when it is older than the three most
+/// recent rows. The sidebar is selection-aware, not just recency-aware.
+fn sidebar_chat_projection_rows(model : Model) -> Array[ChatProjection] {
+  let shown : Array[ChatProjection] = []
+  for record in model.chats {
+    if shown.length() >= 3 {
+      break
+    }
+    shown.push(record)
+  }
+  match active_chat_identity(model) {
+    Some(current) => {
+      let mut present = false
+      for record in shown {
+        if record.id == current.id {
+          present = true
+        }
+      }
+      if !present && !current.is_fallback {
+        match chat_by_id(model.chats, current.id) {
+          Some(record) => {
+            if shown.length() >= 3 {
+              ignore(shown.pop())
+            }
+            shown.push(record)
+          }
+          None => ()
+        }
+      }
+    }
+    None => ()
+  }
+  shown
+}
+
+///|
+fn sidebar_bot_projection_rows(model : Model) -> Array[@contracts.BotRecord] {
+  let shown : Array[@contracts.BotRecord] = []
+  let active = active_bot_identity(model)
+  for record in model.bots {
+    if shown.length() >= 3 {
+      break
+    }
+    shown.push(record)
+  }
+  let mut present = false
+  for record in shown {
+    if record.id == active.id {
+      present = true
+    }
+  }
+  if !present && active.id != "" {
+    match bot_by_id(model.bots, active.id) {
+      Some(record) => {
+        if shown.length() >= 3 {
+          ignore(shown.pop())
+        }
+        shown.push(record)
+      }
+      None => ()
+    }
+  }
+  shown
+}
+
+///|
+fn sidebar_chat_list(model : Model) -> Array[@moui.View[Msg]] {
+  let rows : Array[@moui.View[Msg]] = []
+  let active = active_chat_identity(model)
+  if !model.chats.is_empty() {
+    let shown = sidebar_chat_projection_rows(model)
+    for record in shown {
+      let chat = chat_identity_for(model, record)
+      let is_active = match active {
+        Some(current) => current.id == chat.id
+        None => false
+      }
+      rows.push(sidebar_chat_row(model, chat, is_active))
+    }
+    rows.push(
+      container(
+        padding_edges(
+          row([
+            text(
+              tr(model.lang, "All chats", "全部对话"),
+              align=@core.TextAlign::TextStart,
+            ).font(ui_font(9.0, 500)).foreground(ui_dim()),
+            spacer(weight=1.0),
+            lucide_icon("arrow-right", size=14.0, color=ui_dim()),
+          ], spacing=6.0, align=@style.CrossAlign::Center).frame(width=168.0),
+          top=6.0,
+          right=8.0,
+          bottom=2.0,
+          left=8.0,
+        ),
+        height=22.0,
+        padding=0.0,
+      ).on_tap(SelectBotTab(BotChats)).cursor(
+        @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
+      ),
+    )
+  } else {
+    match active {
+      Some(chat) => rows.push(sidebar_chat_row(model, chat, true))
+      None =>
+        rows.push(
+          container(
+            padding_edges(
+              text(
+                tr(
+                  model.lang,
+                  "No Chats yet. Start one below.",
+                  "尚无对话。请在下方新建。",
+                ),
+                width=168.0,
+                align=@core.TextAlign::TextStart,
+                wrap=true,
+              ).font(ui_font(9.0, 400)).foreground(ui_dim()),
+              top=6.0,
+              right=8.0,
+              bottom=6.0,
+              left=8.0,
+            ),
+            height=44.0,
+            padding=0.0,
+          ),
+        )
+    }
+  }
+  rows
+}
+
+///|
+fn sidebar_bot_list(model : Model) -> Array[@moui.View[Msg]] {
+  let rows : Array[@moui.View[Msg]] = []
+  let active = active_bot_identity(model)
+  if !model.bots.is_empty() {
+    let shown = sidebar_bot_projection_rows(model)
+    for record in shown {
+      let identity = bot_identity_for(model, record)
+      rows.push(sidebar_bot_row(model, identity, identity.id == active.id))
+    }
+  } else if active.id != "" || model.agent.session is Some(_) {
+    rows.push(sidebar_bot_row(model, active, true))
+  } else {
+    rows.push(
+      container(
+        padding_edges(
+          text(
+            tr(
+              model.lang,
+              "No Bot projection loaded yet.",
+              "尚未加载 Bot 投影。",
+            ),
+            width=168.0,
+            align=@core.TextAlign::TextStart,
+            wrap=true,
+          ).font(ui_font(9.0, 400)).foreground(ui_dim()),
+          top=5.0,
+          right=8.0,
+          bottom=6.0,
+          left=8.0,
+        ),
+        height=44.0,
+        padding=0.0,
+      ),
+    )
+  }
+  rows
+}
+
+///|
+fn sidebar(model : Model) -> @moui.View[Msg] {
+  let chat_rows = sidebar_chat_list(model)
+  let bot_rows = sidebar_bot_list(model)
+  let host_name = if model.host.host_id == "" {
+    tr(model.lang, "Local host", "本地主机")
+  } else {
+    model.host.host_id
+  }
+  let content = column([
+    padding_edges(
+      row([
+        brand_mark(),
+        column([
+          text("MoNexus", align=@core.TextAlign::TextStart).font(ui_font(14.0, 600)).foreground(ui_text_color()),
+          text(
+            tr(model.lang, "Workspace", "工作区") +
+            " · " +
+            active_bot_identity(model).name,
+            align=@core.TextAlign::TextStart,
+          ).font(ui_font(9.0, 400)).foreground(ui_dim()),
+        ], spacing=2.0, align=@style.CrossAlign::Start).frame(width=150.0),
+      ], spacing=9.0, align=@style.CrossAlign::Center).frame(width=196.0),
+      top=2.0,
+      right=12.0,
+      bottom=12.0,
+      left=12.0,
     ),
     padding_edges(
-      column(items, spacing=2.0),
-      top=8.0,
-      right=10.0,
+      new_chat_action(model),
+      top=0.0,
+      right=12.0,
+      bottom=12.0,
+      left=12.0,
+    ),
+    padding_edges(
+      column([
+        sidebar_group_label(tr(model.lang, "Chats", "对话")),
+        column(chat_rows, spacing=1.0),
+      ], spacing=0.0),
+      top=0.0,
+      right=12.0,
+      bottom=14.0,
+      left=12.0,
+    ),
+    padding_edges(
+      column([
+        sidebar_group_label(tr(model.lang, "Bots", "Bot")),
+        column(bot_rows, spacing=1.0),
+      ], spacing=0.0),
+      top=0.0,
+      right=12.0,
       bottom=0.0,
-      left=10.0,
+      left=12.0,
     ),
     spacer(weight=1.0),
-    ui_divider_soft(),
     padding_edges(
-      column([nav_item(model, Settings)], spacing=0.0),
+      column([
+        sidebar_group_label(tr(model.lang, "Tools", "工具")),
+        column([
+          nav_item(model, Inbox),
+          nav_item(model, Tasks),
+          nav_item(model, Manage),
+          nav_item(model, Search),
+        ], spacing=1.0),
+      ], spacing=0.0).frame(width=184.0),
       top=10.0,
-      right=10.0,
-      bottom=8.0,
-      left=10.0,
+      right=12.0,
+      bottom=0.0,
+      left=12.0,
     ),
     padding_edges(
-      ui_mono(@contracts.PRODUCT_VERSION, 10.0).frame(width=196.0),
+      row([
+        ui_dot(link_tone(model.host.link)),
+        text(host_name, align=@core.TextAlign::TextStart).font(ui_font(9.0, 400)).foreground(ui_muted()),
+        spacer(weight=1.0),
+        ui_mono(model.host.link.label_in(model.lang), 8.5),
+      ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=176.0),
+      top=12.0,
+      right=12.0,
+      bottom=6.0,
+      left=12.0,
+    ),
+    padding_edges(
+      column([
+        nav_item(model, Settings),
+        padding_edges(
+          ui_mono(@contracts.PRODUCT_VERSION, 9.0).frame(width=176.0),
+          top=2.0,
+          right=8.0,
+          bottom=2.0,
+          left=8.0,
+        ),
+      ], spacing=1.0).frame(width=184.0),
       top=0.0,
-      right=14.0,
-      bottom=10.0,
-      left=14.0,
+      right=12.0,
+      bottom=8.0,
+      left=12.0,
     ),
   ], spacing=0.0).frame(width=ui_sidebar_width, height=ui_sidebar_height)
-  ui_panel(content, width=ui_sidebar_width, height=ui_sidebar_height)
+  ui_panel(content, width=ui_sidebar_width, height=ui_sidebar_height, fill=ui_rail())
 }
 
 ///|
 fn page_refresh_msg(model : Model) -> Msg? {
   match model.page {
-    Machines => Some(RefreshMachines)
-    Projects => Some(ProjectRefresh)
-    Agents => Some(AgentRefresh)
     Inbox => Some(InboxRefresh)
     Tasks => Some(TasksRefresh)
+    Manage =>
+      match model.manage_tab {
+        ManageProjects => Some(ProjectRefresh)
+        ManageMachines => Some(RefreshMachines)
+      }
     _ => None
   }
 }
 
 ///|
-fn top_bar(model : Model) -> @moui.View[Msg] {
-  let children : Array[@moui.View[Msg]] = [
-    ui_page_title(model.page.label_in(model.lang)),
-    spacer(weight=1.0),
-    ui_state_pill(
-      tr(model.lang, "host ", "主机 ") +
-      model.host.link.label_in(model.lang),
-      link_tone(model.host.link),
+fn topbar_crumb(
+  label : String,
+  msg : Msg,
+  active : Bool,
+) -> @moui.View[Msg] {
+  container(
+    padding_xy(
+      text(
+        label,
+        width=if active { 220.0 } else { 130.0 },
+        align=@core.TextAlign::TextStart,
+        wrap=false,
+      ).font(ui_font(10.0, if active { 600 } else { 400 })).foreground(
+        if active { ui_text_color() } else { ui_dim() },
+      ),
+      horizontal=2.0,
     ),
+    height=24.0,
+    padding=0.0,
+  ).on_tap(msg).cursor(@core.CursorStyle::Icon(@core.CursorIcon::CursorPointer))
+}
+
+///|
+fn topbar_sep() -> @moui.View[Msg] {
+  text("/", align=@core.TextAlign::TextStart).font(ui_font(10.0, 400)).foreground(
+    ui_border(),
+  )
+}
+
+///|
+fn topbar_icon_action(icon : String, msg : Msg, active : Bool) -> @moui.View[Msg] {
+  container(
+    lucide_icon(icon, size=14.0, color=ui_dim()),
+    width=26.0,
+    height=26.0,
+    background=if active { ui_selected() } else { clear_color() },
+    corner_radius=4.0,
+    padding=0.0,
+  ).on_tap(msg).cursor(@core.CursorStyle::Icon(@core.CursorIcon::CursorPointer))
+}
+
+///|
+fn topbar_search(model : Model) -> @moui.View[Msg] {
+  container(
+    padding_xy(
+      row([
+        lucide_icon("search", size=12.0, color=ui_dim()),
+        text(
+          tr(model.lang, "Search", "搜索"),
+          align=@core.TextAlign::TextStart,
+        ).font(ui_font(10.0, 400)).foreground(ui_dim()),
+        spacer(weight=1.0),
+        ui_mono("⌘K", 8.5),
+      ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=132.0),
+      horizontal=8.0,
+    ),
+    width=150.0,
+    height=26.0,
+    background=ui_paper(),
+    corner_radius=4.0,
+    border=Some(ui_edge(ui_border())),
+    padding=0.0,
+  ).on_tap(SelectPage(Search)).cursor(
+    @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
+  )
+}
+
+///|
+/// Compact secondary-action strip in the top bar. The sidebar remains the
+/// primary route for these destinations; this keeps them reachable while the
+/// workroom is the active surface.
+fn topbar_more(model : Model) -> @moui.View[Msg] {
+  row([
+    topbar_icon_action("mail", SelectPage(Inbox), model.page == Inbox),
+    topbar_icon_action("list", SelectPage(Tasks), model.page == Tasks),
+    topbar_icon_action("columns-3", SelectPage(Manage), model.page == Manage),
+    topbar_icon_action("settings", SelectPage(Settings), model.page == Settings),
+  ], spacing=3.0, align=@style.CrossAlign::Center)
+}
+
+///|
+fn top_bar(model : Model) -> @moui.View[Msg] {
+  let crumbs : Array[@moui.View[Msg]] = []
+  match model.page {
+    Workroom => {
+      let bot = active_bot_identity(model)
+      let chat = active_chat_identity(model)
+      crumbs.push(
+        topbar_crumb(tr(model.lang, "Chats", "对话"), SelectPage(Workroom), false),
+      )
+      crumbs.push(topbar_sep())
+      crumbs.push(
+        topbar_crumb(
+          bot.name,
+          OpenBotDetail(bot.id),
+          false,
+        ),
+      )
+      crumbs.push(topbar_sep())
+      crumbs.push(
+        topbar_crumb(
+          match chat {
+            Some(record) => record.title
+            None => tr(model.lang, "New Chat", "新对话")
+          },
+          SelectPage(Workroom),
+          true,
+        ),
+      )
+    }
+    BotDetail => {
+      let bot = active_bot_identity(model)
+      crumbs.push(
+        topbar_crumb(tr(model.lang, "Bots", "Bot"), OpenBotDetail(bot.id), false),
+      )
+      crumbs.push(topbar_sep())
+      crumbs.push(topbar_crumb(bot.name, OpenBotDetail(bot.id), false))
+      crumbs.push(topbar_sep())
+      crumbs.push(
+        topbar_crumb(model.bot_tab.label_in(model.lang), SelectBotTab(model.bot_tab), true),
+      )
+    }
+    _ => {
+      crumbs.push(
+        topbar_crumb(tr(model.lang, "Tools", "工具"), SelectPage(Workroom), false),
+      )
+      crumbs.push(topbar_sep())
+      crumbs.push(
+        topbar_crumb(model.page.label_in(model.lang), SelectPage(model.page), true),
+      )
+    }
+  }
+  let children : Array[@moui.View[Msg]] = [
+    row(crumbs, spacing=7.0, align=@style.CrossAlign::Center).frame(
+      width=520.0,
+    ),
+    spacer(weight=1.0),
+    topbar_search(model),
+    topbar_more(model),
   ]
   match page_refresh_msg(model) {
     Some(msg) =>
@@ -388,7 +957,7 @@ fn status_bar(model : Model) -> @moui.View[Msg] {
     host.event_seq.to_string()
   } else {
     "MoNexus " + @contracts.PRODUCT_VERSION +
-    tr(model.lang, " · 8 pages", " · 8 个页面")
+    tr(model.lang, " · workroom", " · 工作台")
   }
   container(
     padding_xy(
@@ -1038,6 +1607,44 @@ fn projects_page(model : Model) -> @moui.View[Msg] {
 }
 
 ///|
+/// Manage is one secondary destination with Projects and Machines as tabs.
+/// Each tab keeps the full existing page and its actions intact.
+fn manage_page(model : Model) -> @moui.View[Msg] {
+  let tabs = row([
+    ui_choice_segment(
+      tr(model.lang, "Projects", "项目"),
+      model.manage_tab == ManageProjects,
+      SelectManageTab(ManageProjects),
+    ),
+    ui_choice_segment(
+      tr(model.lang, "Machines", "机器"),
+      model.manage_tab == ManageMachines,
+      SelectManageTab(ManageMachines),
+    ),
+  ], spacing=6.0, align=@style.CrossAlign::Center).frame(width=960.0)
+  let body = match model.manage_tab {
+    ManageProjects => projects_page(model)
+    ManageMachines => machines_page(model)
+  }
+  column([
+    column([
+      ui_page_title(tr(model.lang, "Manage", "管理")),
+      ui_muted_wrapped(
+        tr(
+          model.lang,
+          "Projects and machines are context for Chats, not separate destinations.",
+          "项目与机器是对话的上下文，而不是并列的顶级页面。",
+        ),
+        960.0,
+      ),
+    ], spacing=6.0),
+    tabs,
+    ui_divider_soft(),
+    body,
+  ], spacing=16.0)
+}
+
+///|
 // MARK: - Agents
 
 fn agents_page(model : Model) -> @moui.View[Msg] {
@@ -1106,7 +1713,10 @@ fn agents_page(model : Model) -> @moui.View[Msg] {
           ),
           650.0,
         ),
-        ui_ghost(tr(model.lang, "Open a Project", "打开项目"), SelectPage(Projects)),
+        ui_ghost(
+          tr(model.lang, "Open a Project", "打开项目"),
+          SelectManageTab(ManageProjects),
+        ),
         spacer(weight=1.0),
       ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
     )
@@ -1986,7 +2596,10 @@ fn tasks_page(model : Model) -> @moui.View[Msg] {
           ),
           650.0,
         ),
-        ui_ghost(tr(model.lang, "Open a Project", "打开项目"), SelectPage(Projects)),
+        ui_ghost(
+          tr(model.lang, "Open a Project", "打开项目"),
+          SelectManageTab(ManageProjects),
+        ),
         spacer(weight=1.0),
       ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
     )
@@ -2384,15 +2997,14 @@ fn settings_page(model : Model) -> @moui.View[Msg] {
 ///|
 fn page_body(model : Model) -> @moui.View[Msg] {
   match model.page {
-    Home => home_page(model)
-    Machines => machines_page(model)
-    Projects =>
+    Workroom => workroom_page(model)
+    BotDetail => bot_detail_page(model)
+    Manage =>
       if terminal_focus_active(model) {
         terminal_page(model)
       } else {
-        projects_page(model)
+        manage_page(model)
       }
-    Agents => agents_page(model)
     Inbox => inbox_page(model)
     Tasks => tasks_page(model)
     Search => search_page(model)
@@ -2412,6 +3024,8 @@ fn main_island(model : Model) -> @moui.View[Msg] {
       bottom=ui_body_padding,
       left=ui_body_padding,
     )
+  } else if model.page == Workroom || model.page == BotDetail {
+    page_body(model).frame(width=ui_main_width, height=ui_scroll_height)
   } else {
     scroll_view(
       padding_edges(

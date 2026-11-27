@@ -16,7 +16,7 @@ fn terminal_ui_test_record() -> @contracts.WorkspaceRecord {
 
 ///|
 test "the focused terminal draws its controls and workspace context" {
-  let model = update(Model::new(), SelectPage(Projects))
+  let model = update(Model::new(), SelectPage(Manage))
   let model = update(model, ProjectOpened(terminal_ui_test_record()))
   let model = update(model, ProjectTerminalFocus)
   let model = update(model, ProjectTerminalOpened("sess_test", "$ ", 2L, false))
