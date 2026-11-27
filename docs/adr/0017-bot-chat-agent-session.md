@@ -1,9 +1,9 @@
 # ADR-0017：Bot / Chat / AgentSession 领域模型——身份、执行与迁移
 
-- 状态：Proposed（2026-11-27，待 owner 评审；评审通过前不得标为 Accepted）
+- 状态：Accepted（2026-11-27，owner 已确认模型并指示开始实现）
 - 日期：2026-11-27
 - 依据：`docs/architecture.md` §2.3、§3、§5、§6.3、§7、§9.2、§10、§11；ADR-0004（数据模型与事件）、ADR-0005（Agent 运行时）、ADR-0006（权限模型）、ADR-0007（UI 与 MoUI）、ADR-0012（配对远端 runtime）、ADR-0015（技能包）、ADR-0016（账户托管）；`packages/contracts/agent.mbt`、`packages/contracts/task.mbt`、`packages/contracts/events.mbt`、`services/host/agents.mbt`、`packages/machines/agent_store.mbt`
-- 关系：本 ADR 正式化 owner 已确认的 Bot/Chat/AgentSession 模型。它不改变 A1 的「主控唯一权威」、A5 的账户/凭据边界或 ADR-0006 的策略判定点；只重新划分身份、执行与用户可见会话的对象边界，并给出旧对象的安全迁移。若本 ADR 被接受，ADR-0005 的「每 Agent 独立记忆」、ADR-0007 的 Agents/Sessions 页面和 ADR-0015 的 `scope=agent` 语义需要同步改成「Bot 长期身份 / Agent 执行器」两轴；在本 ADR 还是 Proposed 时，已接受 ADR 与现有代码中的 `Agent` 仍按旧语义解释，不能静默混用。
+- 关系：本 ADR 正式化 owner 已确认的 Bot/Chat/AgentSession 模型。它不改变 A1 的「主控唯一权威」、A5 的账户/凭据边界或 ADR-0006 的策略判定点；只重新划分身份、执行与用户可见会话的对象边界，并给出旧对象的安全迁移。接受本 ADR 后，ADR-0005 的「每 Agent 独立记忆」、ADR-0007 的 Agents/Sessions 页面和 ADR-0015 的 `scope=agent` 语义需要同步改成「Bot 长期身份 / Agent 执行器」两轴；在完成文档同步前，所有新设计必须注明 legacy Agent 与 new Agent worker 的区别，不能静默混用。
 
 ## 背景
 
@@ -443,7 +443,7 @@ causation_id, correlation_id, idempotency_key, payload
 
 范围：
 
-- 本 ADR 完成 owner 评审并保持 Proposed；若接受，更新 `docs/architecture.md` 及旧 ADR 术语引用。
+- 本 ADR 已接受；更新 `docs/architecture.md` 及旧 ADR 术语引用。
 - 定义 Bot/Agent/Chat/AgentSession/ChatParticipant/ProjectMembership 契约、规范 ID、事件 schema、状态机和单写约束。
 - 实现迁移 dry-run、alias 表、旧 API 适配器、投影重建和 cutover 排他模式；不实现 Bots UI。
 
@@ -520,7 +520,7 @@ causation_id, correlation_id, idempotency_key, payload
 #### 10.1 ADR 级验收
 
 - 文档只新增/修改 `docs/adr/0017-*.md` 与 `docs/adr/README.md`；不触碰 `apps/`、`packages/`、`services/`、`tests/`、`scripts/` 或产品代码。
-- ADR 状态为 Proposed、日期 2026-11-27；README 索引指向本 ADR 并显示 Proposed；owner 评审前不得标记 Accepted。
+- ADR 状态为 Accepted、日期 2026-11-27；README 索引指向本 ADR 并显示 Accepted。
 - `git diff --check` 通过；README 相对链接与 ADR 文件存在；无生成物、临时文件或 vendor 变更。
 - 明确覆盖 Bot/Agent/Chat/AgentSession/Project 的归属、不变量、规范 ID、旧 ID alias、状态迁移、权限继承、记忆边界、事件幂等和迁移单写要求。
 - 明确覆盖 UI/IA：Bots 目的地、Bot/Project 双视图同一 Chat、稳定深链、无第三全局 Chats、Agent 管理在 Bot 详情、header/composer/Inbox 行为。
@@ -558,15 +558,17 @@ causation_id, correlation_id, idempotency_key, payload
 - 安全：Bot 权限上限、Project membership、固定 runtime binding 和审批作用域共同阻止「换 Agent 绕过审批」；迁移期间必须排他，不能为了平滑上线做双写。
 - 文档：若本 ADR 接受，需更新 `docs/architecture.md` 的对象/关系/页面章节以及 ADR-0005、ADR-0007、ADR-0015 的旧 Agent 术语；在完成前，所有新设计必须注明 legacy Agent 与 new Agent worker 的区别。
 
-#### 11.2 开放问题（owner 评审时确认）
+#### 11.2 owner 已决事项（2026-11-27）
 
-1. **默认创建策略**：本 ADR 建议默认 `Ask`，beta 期间是否改为 `Off`，以及首次迁移是否使用 owner 一次性迁移 Decision。
-2. **旧 runtime binding 的推断边界**：旧 `mode/command/args/agent_name/profile` 能否唯一确定 Agent；模型/工具 profile 缺失时，哪些情况必须由 owner 在预检报告确认。
-3. **旧 Agent-scope 技能/credential 的多 Agent fan-out**：本 ADR 禁止静默扩散，要求 owner 选择；是否需要在 P0 提供迁移专用的显式绑定工具。
-4. **旧 transcript 的用户可见导入范围**：哪些旧 runtime 输出可作为 Chat 消息，哪些只能作为 Artifact/reference；迁移 UI 需要怎样的“历史仅引用”标记。
-5. **Project membership 的迁移证据**：workspace/worktree/task/run 的关联是否足以自动写入 membership，还是全部需要 owner 二次确认。
-6. **归档恢复**：Bot/Project 归档在 V1 是否允许恢复，还是只读历史；本 ADR 当前对 Bot 归档取 V1 终端、Project 允许显式恢复。
-7. **ID 命名确认**：`bot_`、`agw_`、`cht_`、`asn_` 是否作为最终规范前缀；若不改，必须在 P0 契约中冻结，避免再次迁移。
-8. **多 Bot 群聊**：participant 关系和每个 Bot 的 active AgentSession 已预留，但发言/上下文/冲突协议未定义，必须另立 ADR。
+owner 已确认 Bot 是“人”、一个 Bot 可以有多个 Agent、Agent 切换后在同一 Chat 新开 AgentSession，并指示开始实现。以下问题按当前实现口径冻结：
 
-本 ADR 在 owner 明确评审并接受前保持 **Proposed**；只有接受后，P0 的领域契约与迁移实现才可进入实现阶段。
+1. **默认创建策略**：beta 默认 `Ask`；每个 Bot 的开关可设 `Off / Ask / Auto`。首次迁移不需要 owner 一次性 Decision；迁移走确定性预检和显式 cutover 确认，歧义项在预检中由 owner 逐项解决。
+2. **旧 runtime binding 的推断边界**：只接受显式、唯一且一致的绑定证据。旧 `mode/command/args/agent_name/profile` 可以组合推断，但任一字段缺失、冲突或产生多个候选时，迁移标为 unresolved，由 owner 选择；不做默认猜测。
+3. **旧 skill/credential 的 fan-out**：P0 提供迁移专用的显式绑定工具。旧 Agent-scope 绑定只能绑定到一个明确选定的新 Agent；禁止静默复制到同一 Bot 的所有 Agent。
+4. **旧 transcript 导入**：只有旧记录中原本用户可见的消息/摘要可作为 Chat message；runtime stdout、工具中间态和隐藏 prompt 只能作为带来源标记的 Artifact/reference，迁移 UI 必须标明“历史引用，不是聊天原文”。
+5. **Project membership 证据**：只有 workspace/worktree/task/run 与 Project 的直接、无歧义关联才可自动写入 membership，并写审计；多候选、间接或缺失证据一律要求 owner 确认，不能为方便迁移扩大访问范围。
+6. **归档恢复**：Bot 在 V1 归档后为终端只读，不恢复；Project 与 Chat 允许显式恢复，恢复前重新校验成员、参与者和权限。需要恢复 Bot 时创建新 Bot，不复用归档身份。
+7. **ID 命名**：冻结 `bot_`、`agw_`、`cht_`、`asn_`、`prj_` 作为 P0 规范前缀；`agt_`/`ses_` 只作为 legacy alias，不再生成。
+8. **多 Bot 群聊**：V1 不实现实际群聊协议；participant/schema 留扩展点，发言顺序、共享/隔离上下文和冲突消解另立 ADR（P4）。
+
+本 ADR 自 2026-11-27 起为 **Accepted**。P0 领域契约、host 命令、迁移预检与兼容适配器可以进入实现；Bots UI 按 P1 推进。
