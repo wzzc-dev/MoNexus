@@ -518,6 +518,7 @@ pub fn chat_agent_session_start_params(
   agent_id : String,
   workspace_id : String,
   workspace_root : String,
+  worktree_id~ : String = "",
 ) -> Map[String, @json.Json] {
   Map([
     ("client_request_id", json_string(client_request_id)),
@@ -525,6 +526,7 @@ pub fn chat_agent_session_start_params(
     ("agent_id", json_string(agent_id)),
     ("workspace_id", json_string(workspace_id)),
     ("workspace_root", json_string(workspace_root)),
+    ("worktree_id", json_string(worktree_id)),
   ])
 }
 
@@ -792,6 +794,11 @@ pub fn chat_scope_param(params : Map[String, @json.Json]) -> String {
 ///|
 pub fn chat_workspace_root_param(params : Map[String, @json.Json]) -> String {
   string_field_or(params, "workspace_root", "")
+}
+
+///|
+pub fn chat_worktree_id_param(params : Map[String, @json.Json]) -> String {
+  string_field_or(params, "worktree_id", "")
 }
 
 ///|

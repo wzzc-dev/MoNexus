@@ -760,6 +760,7 @@ pub(all) struct AgentSession {
   project_id : String
   workspace_id : String
   workspace_root : String
+  worktree_id : String
   permission_snapshot_hash : String
   state : String
   handoff_from_session_id : String
@@ -781,6 +782,7 @@ pub fn AgentSession::new(
   project_id~ : String = "",
   workspace_id~ : String = "",
   workspace_root~ : String = "",
+  worktree_id~ : String = "",
   state~ : String = AGENT_SESSION_STATE_STARTING,
   handoff_from_session_id~ : String = "",
 ) -> AgentSession {
@@ -792,6 +794,7 @@ pub fn AgentSession::new(
     project_id,
     workspace_id,
     workspace_root,
+    worktree_id,
     permission_snapshot_hash,
     state,
     handoff_from_session_id,
@@ -813,6 +816,7 @@ pub fn AgentSession::to_json(self : AgentSession) -> @json.Json {
     ("project_id", json_string(self.project_id)),
     ("workspace_id", json_string(self.workspace_id)),
     ("workspace_root", json_string(self.workspace_root)),
+    ("worktree_id", json_string(self.worktree_id)),
     ("permission_snapshot_hash", json_string(self.permission_snapshot_hash)),
     ("state", json_string(self.state)),
     (
@@ -853,6 +857,7 @@ pub fn chat_agent_session_from_json(json : @json.Json) -> AgentSession? {
     project_id: string_field_or(object, "project_id", ""),
     workspace_id: string_field_or(object, "workspace_id", ""),
     workspace_root: string_field_or(object, "workspace_root", ""),
+    worktree_id: string_field_or(object, "worktree_id", ""),
     permission_snapshot_hash: string_field_or(
       object,
       "permission_snapshot_hash",

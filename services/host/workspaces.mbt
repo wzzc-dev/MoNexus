@@ -39,6 +39,11 @@ fn workspace_not_found(message : String) -> @contracts.RpcError {
 }
 
 ///|
+fn workspace_unsupported(message : String) -> @contracts.RpcError {
+  @contracts.workspace_error(@contracts.WORKSPACE_ERR_UNSUPPORTED, message)
+}
+
+///|
 fn workspace_row_name(root : String) -> String {
   let trimmed = root.trim_end(chars="/").to_owned()
   if trimmed == "" {
@@ -147,6 +152,49 @@ async fn lookup_worktree(
   }
   state.mutex.release()
   record
+}
+
+///|
+/// Resolve a worktree for Git review. The workspace id stays the scope of the
+/// request; the worktree must belong to it, be ready and live on the same
+/// machine before its path can select the provider root.
+async fn lookup_worktree_for_git_review(
+  state : HostState,
+  workspace : @contracts.WorkspaceRecord,
+  worktree_id : String,
+) -> Result[@contracts.WorktreeRecord, @contracts.RpcError] {
+  let worktree = match lookup_worktree(state, worktree_id) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  if worktree.workspace_id != workspace.id {
+    return Err(
+      @contracts.workspace_error(
+        @contracts.WORKSPACE_ERR_CONFLICT,
+        "worktree does not belong to the requested workspace",
+      ),
+    )
+  }
+  if worktree.state != @contracts.WORKTREE_STATE_READY {
+    return Err(
+      @contracts.workspace_error(
+        @contracts.WORKSPACE_ERR_CONFLICT,
+        "worktree is not ready: " + worktree.state,
+      ),
+    )
+  }
+  if worktree.path == "" || !worktree.path.has_prefix("/") {
+    return Err(workspace_invalid("worktree path must be absolute and non-empty"))
+  }
+  if worktree.machine_id != workspace.machine_id {
+    return Err(
+      @contracts.workspace_error(
+        @contracts.WORKSPACE_ERR_CONFLICT,
+        "worktree machine does not match the workspace machine",
+      ),
+    )
+  }
+  Ok(worktree)
 }
 
 ///|
@@ -767,11 +815,28 @@ async fn handle_workspace_git_status(
       return
     }
   }
+  let worktree_id = @contracts.string_field_or(
+    request.params,
+    "worktree_id",
+    "",
+  )
   // An active environment redirects git execution into its container; the
   // workspace record keeps its original kind and file operations stay on the
   // host bind mount.
   match active_environment_for_workspace_root(state, workspace_id) {
     Some(environment) => {
+      if worktree_id != "" {
+        workspace_io_error(
+          state,
+          sink,
+          request,
+          client_request_id,
+          workspace_unsupported(
+            "worktree git review is unsupported for environment-backed workspaces (M1)",
+          ),
+        )
+        return
+      }
       let status = match environment_git_status(state, record, environment) {
         Ok(value) => value
         Err(error) => {
@@ -785,7 +850,15 @@ async fn handle_workspace_git_status(
     }
     None => ()
   }
-  let provider = match provider_for_workspace(state, record) {
+  let provider_result = if worktree_id == "" {
+    provider_for_workspace(state, record)
+  } else {
+    match lookup_worktree_for_git_review(state, record, worktree_id) {
+      Ok(worktree) => open_provider(state, record.machine_id, worktree.path)
+      Err(error) => Err(error)
+    }
+  }
+  let provider = match provider_result {
     Ok(value) => value
     Err(error) => {
       workspace_io_error(state, sink, request, client_request_id, error)
@@ -855,8 +928,25 @@ async fn handle_workspace_git_diff(
       return
     }
   }
+  let worktree_id = @contracts.string_field_or(
+    request.params,
+    "worktree_id",
+    "",
+  )
   match active_environment_for_workspace_root(state, workspace_id) {
     Some(environment) => {
+      if worktree_id != "" {
+        workspace_io_error(
+          state,
+          sink,
+          request,
+          client_request_id,
+          workspace_unsupported(
+            "worktree git review is unsupported for environment-backed workspaces (M1)",
+          ),
+        )
+        return
+      }
       let diff = match
         environment_git_diff(state, environment, path, cached, range) {
         Ok(value) => value
@@ -871,7 +961,15 @@ async fn handle_workspace_git_diff(
     }
     None => ()
   }
-  let provider = match provider_for_workspace(state, record) {
+  let provider_result = if worktree_id == "" {
+    provider_for_workspace(state, record)
+  } else {
+    match lookup_worktree_for_git_review(state, record, worktree_id) {
+      Ok(worktree) => open_provider(state, record.machine_id, worktree.path)
+      Err(error) => Err(error)
+    }
+  }
+  let provider = match provider_result {
     Ok(value) => value
     Err(error) => {
       workspace_io_error(state, sink, request, client_request_id, error)
@@ -1056,6 +1154,28 @@ async fn handle_worktree_remove(
       return
     }
   }
+  let sessions = match state.store.list_all_bot_agent_sessions() {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      workspace_io_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        workspace_invalid("cannot read Chat AgentSessions: " + message),
+      )
+      return
+    }
+  }
+  let mut blocking_session = ""
+  for session in sessions {
+    if session.worktree_id == worktree_id &&
+      @bots.agent_session_is_nonterminal(session.state) &&
+      blocking_session == "" {
+      blocking_session = session.id
+    }
+  }
   state.mutex.release()
   if leased {
     workspace_io_error(
@@ -1066,6 +1186,19 @@ async fn handle_worktree_remove(
       @contracts.workspace_error(
         @contracts.WORKSPACE_ERR_CONFLICT,
         "worktree is leased by an active run",
+      ),
+    )
+    return
+  }
+  if blocking_session != "" {
+    workspace_io_error(
+      state,
+      sink,
+      request,
+      client_request_id,
+      @contracts.workspace_error(
+        @contracts.WORKSPACE_ERR_CONFLICT,
+        "worktree has a non-terminal Chat AgentSession: " + blocking_session,
       ),
     )
     return

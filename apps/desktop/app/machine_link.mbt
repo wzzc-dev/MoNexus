@@ -46,8 +46,10 @@ fn machine_notice(command : MachineCommand, detail : String) -> String {
     ChatGet(_) => "chat loaded"
     ChatMessages(_, _, _) => "chat messages loaded"
     ChatRead(_, _) => "chat read"
-    ChatCreate(_, title, _, _, _, _) => "chat created: " + title
-    ChatAgentSessionStart(_, _, _) => "chat agent session started"
+    ChatCreate(_, title, _, _, _, _, _, _, _) => "chat created: " + title
+    ChatAgentSessionStart(_, _, _, _) => "chat agent session started"
+    ChatGitStatus(_, _) => "chat git status updated"
+    ChatGitDiff(_, _, _) => "chat diff updated"
     ChatSend(_, _) => "chat message sent"
     ChatStop(_, _) => "chat stopped"
     BotAgentList(_) => "bot agents loaded"
@@ -98,6 +100,28 @@ fn git_status_text(status : @contracts.GitStatus) -> String {
     }
   }
   lines.join("\n")
+}
+
+///|
+fn chat_worktree_short(chat_id : String) -> String {
+  let length = chat_id.length()
+  if length <= 8 {
+    chat_id
+  } else {
+    chat_id[length - 8:].to_owned()
+  }
+}
+
+///|
+pub fn default_chat_worktree_branch(chat_id : String) -> String {
+  "monexus/" + chat_worktree_short(chat_id)
+}
+
+///|
+pub fn default_chat_worktree_path(workspace_root : String, chat_id : String) -> String {
+  let trimmed = workspace_root.trim_end(chars="/").to_owned()
+  let base = if trimmed == "" { workspace_root } else { trimmed }
+  base + "-monexus-" + chat_worktree_short(chat_id)
 }
 
 ///|
@@ -264,6 +288,41 @@ async fn dispatch_project_diff(
         Err(message) => dispatch(ProjectError(message))
       }
     Err(message) => dispatch(ProjectError("diff: " + message))
+  }
+}
+
+///|
+async fn dispatch_chat_session_start(
+  client : @client.RpcClient,
+  chat_id : String,
+  agent_id : String,
+  workspace_id : String,
+  worktree_id : String,
+) -> Unit {
+  let id = request_id("cmd")
+  match
+    client.call_json(
+      id,
+      @contracts.METHOD_CHAT_AGENT_SESSION_START,
+      @contracts.chat_agent_session_start_params(
+        id,
+        chat_id,
+        agent_id,
+        workspace_id,
+        "",
+        worktree_id~,
+      ),
+    ) {
+    Ok(json) =>
+      match @contracts.chat_agent_session_from_result(json) {
+        Ok(session) => dispatch(ChatAgentSessionStarted(session))
+        Err(message) =>
+          dispatch(
+            ChatError(chat_id, "chat.agent_session.start: " + message),
+          )
+      }
+    Err(message) =>
+      dispatch(ChatError(chat_id, "chat.agent_session.start: " + message))
   }
 }
 
@@ -438,7 +497,8 @@ async fn execute_machine_command(
                 ) {
                 Ok(trees) =>
                   match @contracts.worktree_list_from_json(trees) {
-                    Ok(records) => dispatch(ProjectWorktrees(records))
+                    Ok(records) =>
+                      dispatch(ProjectWorktrees(record.id, records))
                     Err(_) => ()
                   }
                 Err(_) => ()
@@ -625,7 +685,8 @@ async fn execute_machine_command(
         ) {
         Ok(json) =>
           match @contracts.worktree_list_from_json(json) {
-            Ok(records) => dispatch(ProjectWorktrees(records))
+            Ok(records) =>
+              dispatch(ProjectWorktrees(workspace_id, records))
             Err(message) => dispatch(ProjectError(message))
           }
         Err(message) => dispatch(ProjectError("worktree.list: " + message))
@@ -894,6 +955,9 @@ async fn execute_machine_command(
       agent_id,
       workspace_id,
       org_id,
+      workspace_root,
+      worktree_id,
+      create_worktree,
     ) => {
       let now_ms = @async.now()
       let now = @contracts.format_rfc3339(now_ms)
@@ -915,39 +979,69 @@ async fn execute_machine_command(
           match @contracts.chat_from_result(json) {
             Ok(detail) => {
               dispatch(ChatOpened(detail))
-              if agent_id != "" && workspace_id != "" {
-                let start_id = request_id("cmd")
-                match
-                  client.call_json(
-                    start_id,
-                    @contracts.METHOD_CHAT_AGENT_SESSION_START,
-                    @contracts.chat_agent_session_start_params(
-                      start_id,
-                      detail.chat.id,
-                      agent_id,
-                      workspace_id,
+              let mut session_worktree_id = worktree_id
+              let mut worktree_failed = false
+              if create_worktree {
+                if workspace_root.trim() == "" {
+                  dispatch(
+                    ChatError(
                       "",
+                      "chat.worktree.create: workspace root is unavailable",
                     ),
-                  ) {
-                  Ok(start_json) =>
-                    match @contracts.chat_agent_session_from_result(start_json) {
-                      Ok(session) => dispatch(ChatAgentSessionStarted(session))
-                      Err(message) =>
-                        dispatch(
-                          ChatError(
-                            detail.chat.id,
-                            "chat.agent_session.start: " + message,
-                          ),
-                        )
-                    }
-                  Err(message) =>
-                    dispatch(
-                      ChatError(
-                        detail.chat.id,
-                        "chat.agent_session.start: " + message,
+                  )
+                  worktree_failed = true
+                } else {
+                  let branch = default_chat_worktree_branch(detail.chat.id)
+                  let path = default_chat_worktree_path(
+                    workspace_root,
+                    detail.chat.id,
+                  )
+                  let worktree_request_id = request_id("cmd")
+                  match
+                    client.call_json(
+                      worktree_request_id,
+                      @contracts.METHOD_WORKTREE_CREATE,
+                      @contracts.worktree_create_params(
+                        worktree_request_id,
+                        workspace_id,
+                        branch,
+                        path,
+                        "",
                       ),
-                    )
+                    ) {
+                    Ok(worktree_json) =>
+                      match @contracts.worktree_result_record(worktree_json) {
+                        Ok(record) => {
+                          session_worktree_id = record.id
+                          dispatch(ProjectWorktreeCreated(record))
+                        }
+                        Err(message) => {
+                          dispatch(
+                            ChatError(
+                              "",
+                              "chat.worktree.create: " + message,
+                            ),
+                          )
+                          worktree_failed = true
+                        }
+                      }
+                    Err(message) => {
+                      dispatch(
+                        ChatError("", "chat.worktree.create: " + message),
+                      )
+                      worktree_failed = true
+                    }
+                  }
                 }
+              }
+              if !worktree_failed && agent_id != "" && workspace_id != "" {
+                dispatch_chat_session_start(
+                  client,
+                  detail.chat.id,
+                  agent_id,
+                  workspace_id,
+                  session_worktree_id,
+                )
               }
             }
             Err(message) => dispatch(ChatError("", "chat.create: " + message))
@@ -955,30 +1049,96 @@ async fn execute_machine_command(
         Err(message) => dispatch(ChatError("", "chat.create: " + message))
       }
     }
-    ChatAgentSessionStart(chat_id, agent_id, workspace_id) => {
+    ChatAgentSessionStart(chat_id, agent_id, workspace_id, worktree_id) =>
+      dispatch_chat_session_start(
+        client,
+        chat_id,
+        agent_id,
+        workspace_id,
+        worktree_id,
+      )
+    ChatGitStatus(workspace_id, worktree_id) => {
       let id = request_id("cmd")
       match
         client.call_json(
           id,
-          @contracts.METHOD_CHAT_AGENT_SESSION_START,
-          @contracts.chat_agent_session_start_params(
+          @contracts.METHOD_WORKSPACE_GIT_STATUS,
+          @contracts.workspace_git_status_params(
             id,
-            chat_id,
-            agent_id,
             workspace_id,
-            "",
+            worktree_id~,
           ),
         ) {
         Ok(json) =>
-          match @contracts.chat_agent_session_from_result(json) {
-            Ok(session) => dispatch(ChatAgentSessionStarted(session))
+          match @contracts.git_status_result_value(json) {
+            Ok(status) =>
+              dispatch(
+                ChatGitStatusLoaded(
+                  workspace_id,
+                  worktree_id,
+                  git_status_text(status),
+                ),
+              )
             Err(message) =>
               dispatch(
-                ChatError(chat_id, "chat.agent_session.start: " + message),
+                ChatGitReviewFailed(
+                  workspace_id,
+                  worktree_id,
+                  "git status: " + message,
+                ),
               )
           }
         Err(message) =>
-          dispatch(ChatError(chat_id, "chat.agent_session.start: " + message))
+          dispatch(
+            ChatGitReviewFailed(
+              workspace_id,
+              worktree_id,
+              "git status: " + message,
+            ),
+          )
+      }
+    }
+    ChatGitDiff(workspace_id, path, worktree_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_WORKSPACE_GIT_DIFF,
+          @contracts.workspace_git_diff_params(
+            id,
+            workspace_id,
+            path,
+            false,
+            "",
+            worktree_id~,
+          ),
+        ) {
+        Ok(json) =>
+          match @contracts.git_diff_result_value(json) {
+            Ok(diff) =>
+              dispatch(
+                ChatGitDiffLoaded(
+                  workspace_id,
+                  worktree_id,
+                  diff.path,
+                  if diff.text == "" {
+                    "(no diff)"
+                  } else if diff.truncated {
+                    diff.text + "\n(diff truncated)"
+                  } else {
+                    diff.text
+                  },
+                ),
+              )
+            Err(message) =>
+              dispatch(
+                ChatGitReviewFailed(workspace_id, worktree_id, "diff: " + message),
+              )
+          }
+        Err(message) =>
+          dispatch(
+            ChatGitReviewFailed(workspace_id, worktree_id, "diff: " + message),
+          )
       }
     }
     ChatSend(chat_id, text) => {

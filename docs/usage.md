@@ -297,6 +297,29 @@ Remote agent PoC (rounds 1–2, not full remote-agent support):
   `agent.resume` does not reconstruct an SSH launch, and `env` from
   `agent.start` is not forwarded over SSH.
 
+### New Chat with an isolated worktree
+
+Desktop: **New Chat** → choose the Bot, Project, Workspace and Agent by name
+→ choose the Worktree → **Create Chat**. The Worktree selector starts at
+**Workspace root**; existing `ready` worktrees appear by branch. Choosing
+**New isolated worktree · monexus/<short>** makes the host create a sibling
+worktree at `<workspace.root>-monexus-<short>`, where `short` is the last
+eight characters of the new `cht_` id, then starts the Agent session with that
+worktree id. If the Bot has exactly one active Agent it is preselected;
+otherwise choose one explicitly. The Chat still belongs to the selected
+workspace, but its session cwd is the worktree path.
+
+The Chat details rail shows Project, Workspace, Worktree (or **Workspace
+root**), Git status and diff, a terminal entry, and the latest execution
+result. The Git panes call `workspace.gitStatus`/`workspace.gitDiff` with the
+session's `worktree_id`, so the diff contains only that worktree's changes and
+does not mix in uncommitted changes from the main checkout. M1 does not allow
+switching the Agent inside one Chat; start a new Chat instead. Ending the Chat
+session is required before `worktree.remove` will accept that worktree.
+Environment/container-backed workspaces do not support worktree Chat review
+in M1; their Git panes reject a `worktree_id` with an explicit unsupported
+error.
+
 ## 5. Projects, tasks, Runs and evidence
 
 A Project declares `verify[]`; a Task inherits it; a Run executes a command
