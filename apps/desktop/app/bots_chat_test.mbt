@@ -93,6 +93,7 @@ fn p1_session(
   agent_id : String,
   workspace_id : String,
   state : String,
+  worktree_id~ : String = "",
 ) -> @contracts.AgentSession {
   @contracts.AgentSession::new(
     id="asn_" + chat_id,
@@ -102,6 +103,7 @@ fn p1_session(
     started_at="2026-01-01T00:00:00Z",
     workspace_id~,
     state~,
+    worktree_id~,
   )
 }
 
@@ -113,6 +115,7 @@ fn p1_chat_detail(
   project_id : String,
   agent_id : String,
   session_state : String,
+  worktree_id~ : String = "",
 ) -> @contracts.ChatDetail {
   let chat = @contracts.ChatRecord::new(
     id=chat_id,
@@ -128,7 +131,13 @@ fn p1_chat_detail(
     "claude-code",
     @contracts.AGENT_LIFECYCLE_ACTIVE,
   )
-  let session = p1_session(chat_id, agent_id, "ws_1", session_state)
+  let session = p1_session(
+    chat_id,
+    agent_id,
+    "ws_1",
+    session_state,
+    worktree_id~,
+  )
   @contracts.ChatDetail::new(
     chat={ ..chat, updated_at: "2026-01-02T00:00:00Z" },
     participants=[
@@ -246,7 +255,7 @@ test "opening a Chat loads messages and appends chat.read cursor without duplica
   let (opened, open_commands) = update_full(model, ChatOpened(detail))
   assert_eq(opened.selected_chat, "chat_a")
   assert_true(opened.chat_messages_loaded == false)
-  assert_eq(open_commands.length(), 2)
+  assert_eq(open_commands.length(), 5)
   match open_commands[0] {
     ChatMessages(chat_id, after, limit) => {
       assert_eq(chat_id, "chat_a")
@@ -261,6 +270,25 @@ test "opening a Chat loads messages and appends chat.read cursor without duplica
       assert_eq(cursor, 0L)
     }
     _ => fail("expected initial chat.read")
+  }
+  match open_commands[2] {
+    ProjectListWorktrees(workspace_id) => assert_eq(workspace_id, "ws_1")
+    _ => fail("expected worktree.list for the Chat workspace")
+  }
+  match open_commands[3] {
+    ChatGitStatus(workspace_id, worktree_id) => {
+      assert_eq(workspace_id, "ws_1")
+      assert_eq(worktree_id, "")
+    }
+    _ => fail("expected workspace.gitStatus for the Chat root")
+  }
+  match open_commands[4] {
+    ChatGitDiff(workspace_id, path, worktree_id) => {
+      assert_eq(workspace_id, "ws_1")
+      assert_eq(path, "")
+      assert_eq(worktree_id, "")
+    }
+    _ => fail("expected workspace.gitDiff for the Chat root")
   }
   let first = p1_message(
     "msg_1",
@@ -418,13 +446,26 @@ test "New Chat creates from names, starts the AgentSession, and enters the real 
   assert_true(submitted.chat_draft.busy)
   assert_eq(submit_commands.length(), 1)
   match submit_commands[0] {
-    ChatCreate(bot_id, title, project_id, agent_id, workspace_id, org_id) => {
+    ChatCreate(
+      bot_id,
+      title,
+      project_id,
+      agent_id,
+      workspace_id,
+      org_id,
+      workspace_root,
+      worktree_id,
+      create_worktree,
+    ) => {
       assert_eq(bot_id, "bot_a")
       assert_eq(title, "Chat with Ada")
       assert_eq(project_id, "")
       assert_eq(agent_id, "agent_1")
       assert_eq(workspace_id, "ws_1")
       assert_eq(org_id, "org_1")
+      assert_eq(workspace_root, "/tmp/demo")
+      assert_eq(worktree_id, "")
+      assert_false(create_worktree)
     }
     _ => fail("expected chat.create")
   }
@@ -819,4 +860,261 @@ test "interrupted Chat shows the system boundary and continuation entry" {
     ),
   )
   assert_false(harness.has_text("Start Agent session"))
+}
+
+///|
+fn p1_worktree(
+  id : String,
+  workspace_id : String,
+  branch : String,
+  path : String,
+) -> @contracts.WorktreeRecord {
+  {
+    id,
+    workspace_id,
+    machine_id: "",
+    branch,
+    path,
+    base: "",
+    state: @contracts.WORKTREE_STATE_READY,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  }
+}
+
+///|
+test "New Chat selects workspace and worktree by name and carries the worktree id" {
+  let bot = p1_bot("bot_a", "Ada", ["claude-code"])
+  let agent = p1_agent(
+    "agent_1",
+    "bot_a",
+    "Ada · coding",
+    "claude-code",
+    @contracts.AGENT_LIFECYCLE_ACTIVE,
+  )
+  let workspace = p1_workspace("ws_1", "demo")
+  let worktree = p1_worktree(
+    "wt_1",
+    "ws_1",
+    "monexus/abcd1234",
+    "/tmp/demo-monexus-abcd1234",
+  )
+  let model = update(Model::new(), NewChat)
+  let model = update(model, BotsLoaded([bot]))
+  let model = update(model, ProjectWorkspaces([workspace]))
+  let model = update(model, BotAgentsLoaded("bot_a", [agent]))
+  assert_eq(model.chat_draft.workspace_id, "ws_1")
+  assert_eq(model.chat_draft.agent_id, "agent_1")
+  let model = update(model, ProjectWorktrees("ws_1", [worktree]))
+  let workspace_picker = update(model, ChatDraftPicker(ChatPickerWorkspace))
+  let picker_harness = test_harness_for_model(workspace_picker)
+  assert_true(picker_harness.has_text("demo"))
+  assert_true(picker_harness.has_text("Workspace root"))
+  let selected = update(model, ChatDraftWorktree("wt_1"))
+  assert_eq(selected.chat_draft.worktree_id, "wt_1")
+  assert_false(selected.chat_draft.create_worktree)
+  let worktree_picker = update(selected, ChatDraftPicker(ChatPickerWorktree))
+  let worktree_harness = test_harness_for_model(worktree_picker)
+  assert_true(worktree_harness.has_text("monexus/abcd1234"))
+  assert_true(worktree_harness.has_text("Workspace root"))
+  let (submitted, submit_commands) = update_full(selected, ChatCreateSubmit)
+  assert_true(submitted.chat_draft.busy)
+  assert_eq(submit_commands.length(), 1)
+  match submit_commands[0] {
+    ChatCreate(
+      bot_id,
+      _title,
+      _project_id,
+      agent_id,
+      workspace_id,
+      _org_id,
+      workspace_root,
+      worktree_id,
+      create_worktree,
+    ) => {
+      assert_eq(bot_id, "bot_a")
+      assert_eq(agent_id, "agent_1")
+      assert_eq(workspace_id, "ws_1")
+      assert_eq(workspace_root, "/tmp/demo")
+      assert_eq(worktree_id, "wt_1")
+      assert_false(create_worktree)
+    }
+    _ => fail("expected chat.create with the selected worktree")
+  }
+}
+
+///|
+test "New Chat preselects only a sole active Agent and defaults a new worktree" {
+  let bot = p1_bot("bot_a", "Ada", ["claude-code"])
+  let agent_one = p1_agent(
+    "agent_1",
+    "bot_a",
+    "Ada · coding",
+    "claude-code",
+    @contracts.AGENT_LIFECYCLE_ACTIVE,
+  )
+  let agent_two = p1_agent(
+    "agent_2",
+    "bot_a",
+    "Ada · review",
+    "claude-code",
+    @contracts.AGENT_LIFECYCLE_ACTIVE,
+  )
+  let workspace = p1_workspace("ws_1", "demo")
+  let model = update(Model::new(), NewChat)
+  let model = update(model, BotsLoaded([bot]))
+  let model = update(model, ProjectWorkspaces([workspace]))
+  let model = update(model, BotAgentsLoaded("bot_a", [agent_one, agent_two]))
+  assert_eq(model.chat_draft.agent_id, "")
+  let model = update(model, ChatDraftAgent("agent_2"))
+  let model = update(model, ChatDraftWorktree(CHAT_WORKTREE_NEW))
+  assert_true(model.chat_draft.create_worktree)
+  assert_eq(model.chat_draft.worktree_id, "")
+  let (_, submit_commands) = update_full(model, ChatCreateSubmit)
+  assert_eq(submit_commands.length(), 1)
+  match submit_commands[0] {
+    ChatCreate(_, _, _, agent_id, workspace_id, _, workspace_root, worktree_id, create_worktree) => {
+      assert_eq(agent_id, "agent_2")
+      assert_eq(workspace_id, "ws_1")
+      assert_eq(workspace_root, "/tmp/demo")
+      assert_eq(worktree_id, "")
+      assert_true(create_worktree)
+    }
+    _ => fail("expected chat.create with a new isolated worktree")
+  }
+  assert_eq(
+    default_chat_worktree_branch("cht_zzzz12345678"),
+    "monexus/12345678",
+  )
+  assert_eq(
+    default_chat_worktree_path("/tmp/demo", "cht_zzzz12345678"),
+    "/tmp/demo-monexus-12345678",
+  )
+  assert_eq(
+    default_chat_worktree_path("/tmp/demo/", "cht_zzzz12345678"),
+    "/tmp/demo-monexus-12345678",
+  )
+}
+
+///|
+test "Chat right rail reviews only the selected worktree" {
+  let bot = p1_bot("bot_a", "Ada", ["claude-code"])
+  let detail = p1_chat_detail(
+    "chat_wt",
+    "bot_a",
+    "Worktree chat",
+    "",
+    "agent_1",
+    @contracts.AGENT_SESSION_STATE_ACTIVE,
+    worktree_id="wt_1",
+  )
+  let workspace = p1_workspace("ws_1", "demo")
+  let worktree = p1_worktree(
+    "wt_1",
+    "ws_1",
+    "monexus/abcd1234",
+    "/tmp/demo-monexus-abcd1234",
+  )
+  let model = update(Model::new(), BotsLoaded([bot]))
+  let model = update(model, ProjectWorkspaces([workspace]))
+  let model = update(model, ChatsLoaded([detail]))
+  let (opened, _) = update_full(model, ChatOpened(detail))
+  assert_eq(opened.chat_worktree_id, "wt_1")
+  let model = update(opened, ProjectWorktrees("ws_1", [worktree]))
+  let model = update(
+    model,
+    ChatGitStatusLoaded(
+      "ws_1",
+      "wt_1",
+      "branch monexus/abcd1234\nM tracked.txt",
+    ),
+  )
+  let model = update(
+    model,
+    ChatGitDiffLoaded("ws_1", "wt_1", "", "+worktree-change"),
+  )
+  let model = update(
+    model,
+    ChatGitReviewFailed("ws_1", "", "stale root review failed"),
+  )
+  assert_false(model.chat_git_diff_text.contains("stale root review failed"))
+  // A stale main-checkout response must not replace the worktree review.
+  let model = update(
+    model,
+    ChatGitDiffLoaded("ws_1", "", "", "+main-checkout-change"),
+  )
+  let harness = test_harness_for_model(model)
+  assert_true(harness.has_text("monexus/abcd1234"))
+  assert_true(harness.has_text("/tmp/demo-monexus-abcd1234"))
+  assert_true(harness.has_text("+worktree-change"))
+  assert_false(harness.has_text("+main-checkout-change"))
+  let root_detail = p1_chat_detail(
+    "chat_root",
+    "bot_a",
+    "Root chat",
+    "",
+    "agent_1",
+    @contracts.AGENT_SESSION_STATE_ACTIVE,
+  )
+  let root_model = update(
+    update(Model::new(), BotsLoaded([bot])),
+    ChatsLoaded([root_detail]),
+  )
+  let (root_opened, _) = update_full(root_model, ChatOpened(root_detail))
+  let root_harness = test_harness_for_model(root_opened)
+  assert_true(root_harness.has_text("Workspace root"))
+  let new_chat = update(root_opened, NewChat)
+  assert_eq(new_chat.chat_worktree_id, "")
+  assert_eq(new_chat.chat_git_status_text, "")
+  assert_eq(new_chat.chat_git_diff_text, "")
+}
+
+///|
+test "ChatStartSession carries the selected worktree id" {
+  let bot = p1_bot("bot_a", "Ada", ["claude-code"])
+  let detail = p1_chat_detail(
+    "chat_wt",
+    "bot_a",
+    "Worktree chat",
+    "",
+    "agent_1",
+    @contracts.AGENT_SESSION_STATE_ACTIVE,
+    worktree_id="wt_1",
+  )
+  let model = update(
+    update(Model::new(), BotsLoaded([bot])),
+    ChatsLoaded([detail]),
+  )
+  let (opened, _) = update_full(model, ChatOpened(detail))
+  let (_, start_commands) = update_full(opened, ChatStartSession)
+  assert_eq(start_commands.length(), 1)
+  match start_commands[0] {
+    ChatAgentSessionStart(chat_id, agent_id, workspace_id, worktree_id) => {
+      assert_eq(chat_id, "chat_wt")
+      assert_eq(agent_id, "agent_1")
+      assert_eq(workspace_id, "ws_1")
+      assert_eq(worktree_id, "wt_1")
+    }
+    _ => fail("expected chat.agent_session.start with the worktree")
+  }
+  let root_detail = p1_chat_detail(
+    "chat_root",
+    "bot_a",
+    "Root chat",
+    "",
+    "agent_1",
+    @contracts.AGENT_SESSION_STATE_ACTIVE,
+  )
+  let root_model = update(
+    update(Model::new(), BotsLoaded([bot])),
+    ChatsLoaded([root_detail]),
+  )
+  let (root_opened, _) = update_full(root_model, ChatOpened(root_detail))
+  let (_, root_commands) = update_full(root_opened, ChatStartSession)
+  assert_eq(root_commands.length(), 1)
+  match root_commands[0] {
+    ChatAgentSessionStart(_, _, _, worktree_id) =>
+      assert_eq(worktree_id, "")
+    _ => fail("expected chat.agent_session.start at the workspace root")
+  }
 }

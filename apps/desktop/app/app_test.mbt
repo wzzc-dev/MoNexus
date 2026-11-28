@@ -1155,7 +1155,7 @@ test "New Chat requires a Bot, Agent and workspace before chat.create" {
   // form because the worker owns the RPC contract; the host remains authority.
   assert_eq(blank_commands.length(), 1)
   match blank_commands[0] {
-    ChatCreate(bot_id, _, _, agent_id, workspace_id, _) => {
+    ChatCreate(bot_id, _, _, agent_id, workspace_id, _, _, _, _) => {
       assert_eq(bot_id, "bot_a")
       assert_eq(agent_id, "agent_1")
       assert_eq(workspace_id, "ws_1")

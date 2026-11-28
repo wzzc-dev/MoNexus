@@ -199,6 +199,45 @@ fn chat_workspace_menu_items(
 }
 
 ///|
+fn chat_worktree_menu_items(
+  model : Model,
+  workspace_id : String,
+  on_select : (String) -> Msg,
+) -> Array[@views.MenuItem[Msg]] {
+  let items : Array[@views.MenuItem[Msg]] = [
+    @views.MenuItem::new(
+      id="",
+      label=tr(model.lang, "Workspace root", "工作区根目录"),
+      message=on_select(""),
+    ),
+  ]
+  for record in worktrees_for(model, workspace_id) {
+    if record.state != @contracts.WORKTREE_STATE_READY {
+      continue
+    }
+    items.push(
+      @views.MenuItem::new(
+        id=record.id,
+        label=worktree_label(model.lang, record),
+        message=on_select(record.id),
+      ),
+    )
+  }
+  items.push(
+    @views.MenuItem::new(
+      id=CHAT_WORKTREE_NEW,
+      label=tr(
+        model.lang,
+        "New isolated worktree · monexus/<short>",
+        "新建隔离工作树 · monexus/<short>",
+      ),
+      message=on_select(CHAT_WORKTREE_NEW),
+    ),
+  )
+  items
+}
+
+///|
 fn workroom_header(
   model : Model,
   chat : ChatIdentity?,
@@ -956,6 +995,11 @@ fn workroom_new_chat_form(model : Model) -> @moui.View[Msg] {
   let workspace_items = chat_workspace_menu_items(model, fn(value) {
     ChatDraftWorkspace(value)
   })
+  let worktree_items = chat_worktree_menu_items(
+    model,
+    draft.workspace_id,
+    fn(value) { ChatDraftWorktree(value) },
+  )
   let agent_items = chat_agent_menu_items(model, fn(value) {
     ChatDraftAgent(value)
   })
@@ -1019,6 +1063,25 @@ fn workroom_new_chat_form(model : Model) -> @moui.View[Msg] {
         152.0,
       ),
     ], spacing=11.0, align=@style.CrossAlign::Center).frame(width=483.0),
+    ui_select_field(
+      tr(model.lang, "Worktree", "工作树"),
+      worktree_items,
+      if draft.create_worktree {
+        CHAT_WORKTREE_NEW
+      } else {
+        draft.worktree_id
+      },
+      draft.worktree_picker_open,
+      ChatDraftPicker(ChatPickerWorktree),
+      if draft.workspace_id == "" {
+        tr(model.lang, "Choose a workspace first", "请先选择工作区")
+      } else if worktrees_loaded_for(model, draft.workspace_id) {
+        tr(model.lang, "Workspace root", "工作区根目录")
+      } else {
+        tr(model.lang, "Loading worktrees...", "正在加载工作树...")
+      },
+      483.0,
+    ),
   ]
   if project_id != "" && bot_items.is_empty() {
     let message = if !model.project_memberships_loaded {
@@ -1047,8 +1110,8 @@ fn workroom_new_chat_form(model : Model) -> @moui.View[Msg] {
     @views.text(
       tr(
         model.lang,
-        "Bot, Project, Workspace and Agent are selected by name. No bot_/cht_/asn_/ws_ id needs to be typed.",
-        "Bot、项目、工作区和智能体均按名称选择，无需输入 bot_/cht_/asn_/ws_ 原始 ID。",
+        "Bot, Project, Workspace, Worktree and Agent are selected by name or branch. No bot_/cht_/asn_/ws_/wt_ id needs to be typed.",
+        "Bot、项目、工作区、工作树和智能体均按名称或分支选择，无需输入 bot_/cht_/asn_/ws_/wt_ 原始 ID。",
       ),
       width=workroom_inner_width(),
       align=@core.TextAlign::TextStart,
@@ -1490,9 +1553,14 @@ fn workroom_detail_rail(
       },
     ),
   ]
-  let workspace_name = workspace_context_name(model, model.agent.workspace_id)
+  let chat_workspace_id = if model.chat_workspace_id != "" {
+    model.chat_workspace_id
+  } else {
+    model.agent.workspace_id
+  }
+  let workspace_name = workspace_context_name(model, chat_workspace_id)
   let mut machine_name = tr(model.lang, "Local machine", "本地机器")
-  match workspace_by_id(model.project.workspaces, model.agent.workspace_id) {
+  match workspace_by_id(model.project.workspaces, chat_workspace_id) {
     Some(record) =>
       if record.machine_id != "" {
         machine_name = machine_name_for(model, record.machine_id)
@@ -1529,6 +1597,19 @@ fn workroom_detail_rail(
       }
     None => tr(model.lang, "not recorded", "未记录")
   }
+  let selected_worktree = worktree_by_id(model, model.chat_worktree_id)
+  let worktree_name = if model.chat_worktree_id == "" {
+    tr(model.lang, "Workspace root", "工作区根目录")
+  } else {
+    match selected_worktree {
+      Some(record) => worktree_label(model.lang, record)
+      None => tr(
+        model.lang,
+        "not in loaded worktrees",
+        "不在已加载的工作树中",
+      )
+    }
+  }
   let context_rows : Array[@moui.View[Msg]] = [
     detail_label(tr(model.lang, "Context", "上下文")),
     detail_row(
@@ -1546,11 +1627,37 @@ fn workroom_detail_rail(
       msg=SelectManageTab(ManageProjects),
     ),
     detail_row(
+      tr(model.lang, "Worktree", "工作树"),
+      worktree_name,
+    ),
+  ]
+  match selected_worktree {
+    Some(record) =>
+      if record.path != "" {
+        context_rows.push(
+          detail_row(tr(model.lang, "Path", "路径"), record.path),
+        )
+      }
+    None => ()
+  }
+  context_rows.push(
+    detail_row(
+      tr(model.lang, "Terminal", "终端"),
+      tr(model.lang, "open workspace terminal", "打开工作区终端"),
+      msg=ChatTerminal,
+    ),
+  )
+  context_rows.push(
+    detail_row(
       tr(model.lang, "Machine", "机器"),
       machine_name,
       msg=SelectManageTab(ManageMachines),
     ),
+  )
+  context_rows.push(
     detail_row(tr(model.lang, "Executor", "执行器"), executor),
+  )
+  context_rows.push(
     detail_row(
       tr(model.lang, "AgentSession", "智能体会话"),
       if model.chat_session_state != "" {
@@ -1561,7 +1668,7 @@ fn workroom_detail_rail(
         tr(model.lang, "recorded", "已记录")
       },
     ),
-  ]
+  )
   if model.chat_pending_decision != "" {
     context_rows.push(
       detail_row(
@@ -1607,6 +1714,87 @@ fn workroom_detail_rail(
       file_section.push(item)
     }
   }
+  let git_status_body = if model.chat_git_status_loading {
+    tr(model.lang, "Loading Git status...", "正在加载 Git 状态...")
+  } else if model.chat_git_status_text == "" {
+    tr(model.lang, "(not loaded)", "（未加载）")
+  } else {
+    model.chat_git_status_text
+  }
+  let git_diff_body = if model.chat_git_diff_loading {
+    tr(model.lang, "Loading diff...", "正在加载差异...")
+  } else if model.chat_git_diff_text == "" {
+    tr(model.lang, "(no diff loaded)", "（未加载差异）")
+  } else {
+    model.chat_git_diff_text
+  }
+  let git_section : Array[@moui.View[Msg]] = [
+    detail_label(tr(model.lang, "Git review", "Git 审阅")),
+    @views.padding_edges(
+      @views.text(
+        tr(
+          model.lang,
+          "Scope: ",
+          "范围：",
+        ) +
+        worktree_name,
+        width=258.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(9.0, 520)).foreground(ui_muted()),
+      bottom=7.0,
+    ),
+    detail_label(tr(model.lang, "Status", "状态")),
+    ui_code_block(git_status_body, 258.0, height=92.0, size=8.5),
+    @views.padding_edges(
+      detail_label(tr(model.lang, "Diff", "差异")),
+      top=8.0,
+    ),
+    ui_code_block(git_diff_body, 258.0, height=142.0, size=8.5),
+  ]
+  let mut latest_result = ""
+  for message in model.chat_messages {
+    if message.role == @contracts.CHAT_MESSAGE_ROLE_ASSISTANT {
+      latest_result = message.body
+    }
+  }
+  if latest_result == "" {
+    latest_result = model.chat_live_text
+  }
+  let execution_section : Array[@moui.View[Msg]] = [
+    detail_label(tr(model.lang, "Latest execution", "最近一次执行")),
+    detail_row(
+      tr(model.lang, "State", "状态"),
+      if model.chat_session_state == "" {
+        tr(model.lang, "not recorded", "未记录")
+      } else {
+        model.chat_session_state
+      },
+    ),
+    @views.padding_edges(
+      @views.text(
+        if latest_result == "" {
+          tr(
+            model.lang,
+            "No execution result recorded for this Chat yet.",
+            "此对话尚无执行结果记录。",
+          )
+        } else {
+          ui_truncate(latest_result, 240.0, 9.0)
+        },
+        width=258.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(9.0, 400)).foreground(
+        if latest_result == "" {
+          ui_dim()
+        } else {
+          ui_muted()
+        },
+      ),
+      top=6.0,
+    ),
+  ]
   let heading = @views.padding_edges(
     @views.row([
       @views.text(tr(model.lang, "Details", "详情"), align=@core.TextAlign::TextStart).font(
@@ -1656,6 +1844,24 @@ fn workroom_detail_rail(
       @views.column(context_rows, spacing=0.0, align=@style.CrossAlign::Start).frame(
         width=258.0,
       ),
+      top=11.0,
+      bottom=11.0,
+    ),
+    ui_divider_soft(),
+    @views.padding_edges(
+      @views.column(git_section, spacing=0.0, align=@style.CrossAlign::Start).frame(
+        width=258.0,
+      ),
+      top=11.0,
+      bottom=11.0,
+    ),
+    ui_divider_soft(),
+    @views.padding_edges(
+      @views.column(
+        execution_section,
+        spacing=0.0,
+        align=@style.CrossAlign::Start,
+      ).frame(width=258.0),
       top=11.0,
       bottom=11.0,
     ),

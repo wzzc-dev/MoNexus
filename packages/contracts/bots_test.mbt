@@ -191,6 +191,7 @@ test "ADR-0017 AgentSession and ProjectMembership round-trip through JSON" {
     project_id=new_project_id(10L),
     workspace_id="wsp_1",
     workspace_root="/repo",
+    worktree_id="wt_1",
     handoff_from_session_id=new_agent_session_id(11L),
   )
   let parsed_session = chat_agent_session_from_json(
@@ -203,11 +204,28 @@ test "ADR-0017 AgentSession and ProjectMembership round-trip through JSON" {
       assert_eq(value.agent_id, session.agent_id)
       assert_eq(value.runtime_session_id, "rt_1")
       assert_eq(value.project_id, session.project_id)
+      assert_eq(value.worktree_id, "wt_1")
       assert_eq(value.permission_snapshot_hash, "sha256:permission")
       assert_eq(value.handoff_from_session_id, session.handoff_from_session_id)
       assert_eq(value.state, AGENT_SESSION_STATE_STARTING)
     }
     None => fail("AgentSession did not decode")
+  }
+  let old_record = chat_agent_session_from_json(
+    json_object([
+      ("id", json_string(session.id)),
+      ("chat_id", json_string(session.chat_id)),
+      ("agent_id", json_string(session.agent_id)),
+      ("workspace_id", json_string("wsp_1")),
+      ("workspace_root", json_string("/repo")),
+    ]),
+  )
+  match old_record {
+    Some(value) => {
+      assert_eq(value.worktree_id, "")
+      assert_eq(value.workspace_root, "/repo")
+    }
+    None => fail("legacy AgentSession without worktree_id did not decode")
   }
   let membership = ProjectMembership::new(
     project_id=session.project_id,
@@ -759,10 +777,22 @@ test "ADR-0017 P0.3 RPC params validate and map errors" {
     agent.id,
     "ws_test",
     "/tmp/ws",
+    worktree_id="wt_test",
   )
   assert_eq(chat_filter_runtime(start_params), agent.id)
   assert_eq(chat_scope_param(start_params), "ws_test")
   assert_eq(chat_workspace_root_param(start_params), "/tmp/ws")
+  assert_eq(chat_worktree_id_param(start_params), "wt_test")
+  assert_eq(
+    chat_worktree_id_param(chat_agent_session_start_params(
+      "cid_start_old",
+      chat.id,
+      agent.id,
+      "ws_test",
+      "/tmp/ws",
+    )),
+    "",
+  )
   assert_eq(chat_cursor_param(Map([("cursor", json_int64(-5L))])), 0L)
   assert_eq(chat_limit_param(Map([("limit", json_int(0))])), 1)
   assert_eq(chat_limit_param(Map([("limit", json_int(1_000))])), 200)

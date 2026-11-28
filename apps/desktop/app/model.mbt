@@ -196,10 +196,13 @@ pub(all) struct ChatDraft {
   bot_id : String
   project_id : String
   workspace_id : String
+  worktree_id : String
+  create_worktree : Bool
   agent_id : String
   bot_picker_open : Bool
   project_picker_open : Bool
   workspace_picker_open : Bool
+  worktree_picker_open : Bool
   agent_picker_open : Bool
   message : String
   busy : Bool
@@ -212,10 +215,13 @@ pub fn ChatDraft::new() -> ChatDraft {
     bot_id: "",
     project_id: "",
     workspace_id: "",
+    worktree_id: "",
+    create_worktree: false,
     agent_id: "",
     bot_picker_open: false,
     project_picker_open: false,
     workspace_picker_open: false,
+    worktree_picker_open: false,
     agent_picker_open: false,
     message: "",
     busy: false,
@@ -228,7 +234,23 @@ pub(all) enum ChatPicker {
   ChatPickerBot
   ChatPickerProject
   ChatPickerWorkspace
+  ChatPickerWorktree
   ChatPickerAgent
+}
+
+///|
+/// Picker sentinel for the default isolated worktree. It never reaches the
+/// host; `ChatCreate` resolves it to `monexus/<chat short>`.
+pub const CHAT_WORKTREE_NEW : String = "__new_worktree__"
+
+///|
+/// Loaded `worktree.list` projection for one workspace. The Chat and Project
+/// surfaces share this cache so a selected worktree stays pickable by branch
+/// without requiring an id.
+pub(all) struct WorkspaceWorktrees {
+  workspace_id : String
+  records : Array[@contracts.WorktreeRecord]
+  loaded : Bool
 }
 
 ///|
@@ -671,6 +693,13 @@ pub struct Model {
   chat_session_state : String
   chat_pending_decision : String
   chat_workspace_id : String
+  chat_worktree_id : String
+  chat_git_status_text : String
+  chat_git_diff_text : String
+  chat_git_status_loading : Bool
+  chat_git_diff_loading : Bool
+  chat_git_review_workspace : String
+  chat_git_review_worktree : String
   chat_poll_in_flight : Bool
   chat_messages_in_flight : Bool
   chat_read_in_flight : Bool
@@ -680,6 +709,7 @@ pub struct Model {
   chat_error : String
   chat_notice : String
   chat_draft : ChatDraft
+  worktrees : Array[WorkspaceWorktrees]
   bot_agents : Array[@contracts.AgentRecord]
   bot_agents_bot : String
   bot_agents_loaded : Bool
@@ -898,6 +928,13 @@ pub fn Model::new_with_preferences(
     chat_session_state: "",
     chat_pending_decision: "",
     chat_workspace_id: "",
+    chat_worktree_id: "",
+    chat_git_status_text: "",
+    chat_git_diff_text: "",
+    chat_git_status_loading: false,
+    chat_git_diff_loading: false,
+    chat_git_review_workspace: "",
+    chat_git_review_worktree: "",
     chat_poll_in_flight: false,
     chat_messages_in_flight: false,
     chat_read_in_flight: false,
@@ -905,6 +942,7 @@ pub fn Model::new_with_preferences(
     chat_error: "",
     chat_notice: "",
     chat_draft: ChatDraft::new(),
+    worktrees: [],
     bot_agents: [],
     bot_agents_bot: "",
     bot_agents_loaded: false,
@@ -1050,8 +1088,13 @@ pub(all) enum Msg {
   ChatDraftBot(String)
   ChatDraftProject(String)
   ChatDraftWorkspace(String)
+  ChatDraftWorktree(String)
   ChatDraftAgent(String)
   ChatDraftPicker(ChatPicker)
+  ChatGitStatusLoaded(String, String, String)
+  ChatGitDiffLoaded(String, String, String, String)
+  ChatGitReviewFailed(String, String, String)
+  ChatTerminal
   BotAgentsLoaded(String, Array[@contracts.AgentRecord])
   AgentDraftName(String)
   AgentDraftSoftware(String)
@@ -1161,7 +1204,7 @@ pub(all) enum Msg {
   ProjectWorktreePath(String)
   ProjectCreateWorktree
   ProjectWorktreeCreated(@contracts.WorktreeRecord)
-  ProjectWorktrees(Array[@contracts.WorktreeRecord])
+  ProjectWorktrees(String, Array[@contracts.WorktreeRecord])
   // Agents / Inbox.
   AgentId(String)
   AgentMode(String)
@@ -1301,8 +1344,13 @@ pub(all) enum MachineCommand {
     String,
     String,
     String,
+    String,
+    String,
+    Bool,
   )
-  ChatAgentSessionStart(String, String, String)
+  ChatAgentSessionStart(String, String, String, String)
+  ChatGitStatus(String, String)
+  ChatGitDiff(String, String, String)
   ChatSend(String, String)
   ChatStop(String, String)
   BotAgentList(String)
@@ -2258,14 +2306,139 @@ fn bot_agents_loaded_for(model : Model, bot_id : String) -> Bool {
 }
 
 ///|
-fn selectable_agent_id(records : Array[@contracts.AgentRecord]) -> String {
+/// M1 preselects only when exactly one Agent is runnable. With multiple
+/// Agents the owner chooses explicitly instead of the window guessing.
+fn sole_selectable_agent_id(records : Array[@contracts.AgentRecord]) -> String {
+  let mut selected = ""
+  let mut count = 0
   for record in records {
     if record.state != @contracts.AGENT_LIFECYCLE_SUSPENDED &&
-      record.state != @contracts.AGENT_LIFECYCLE_RETIRED {
-      return record.id
+      record.state == @contracts.AGENT_LIFECYCLE_ACTIVE {
+      selected = record.id
+      count = count + 1
     }
   }
-  ""
+  if count == 1 {
+    selected
+  } else {
+    ""
+  }
+}
+
+///|
+fn worktrees_for(
+  model : Model,
+  workspace_id : String,
+) -> Array[@contracts.WorktreeRecord] {
+  if workspace_id == "" {
+    return []
+  }
+  for entry in model.worktrees {
+    if entry.workspace_id == workspace_id {
+      return entry.records
+    }
+  }
+  []
+}
+
+///|
+fn worktrees_loaded_for(model : Model, workspace_id : String) -> Bool {
+  if workspace_id == "" {
+    return false
+  }
+  for entry in model.worktrees {
+    if entry.workspace_id == workspace_id {
+      return entry.loaded
+    }
+  }
+  false
+}
+
+///|
+fn remember_worktrees(
+  model : Model,
+  workspace_id : String,
+  records : Array[@contracts.WorktreeRecord],
+) -> Array[WorkspaceWorktrees] {
+  let next : Array[WorkspaceWorktrees] = []
+  let mut replaced = false
+  for entry in model.worktrees {
+    if entry.workspace_id == workspace_id {
+      next.push({ workspace_id, records, loaded: true })
+      replaced = true
+    } else {
+      next.push(entry)
+    }
+  }
+  if !replaced {
+    next.push({ workspace_id, records, loaded: true })
+  }
+  next
+}
+
+///|
+fn remember_worktree(
+  model : Model,
+  record : @contracts.WorktreeRecord,
+) -> Array[WorkspaceWorktrees] {
+  let current = worktrees_for(model, record.workspace_id)
+  let records : Array[@contracts.WorktreeRecord] = []
+  let mut replaced = false
+  for existing in current {
+    if existing.id == record.id {
+      records.push(record)
+      replaced = true
+    } else {
+      records.push(existing)
+    }
+  }
+  if !replaced {
+    records.push(record)
+  }
+  remember_worktrees(model, record.workspace_id, records)
+}
+
+///|
+fn worktree_by_id(
+  model : Model,
+  worktree_id : String,
+) -> @contracts.WorktreeRecord? {
+  if worktree_id == "" {
+    return None
+  }
+  for entry in model.worktrees {
+    for record in entry.records {
+      if record.id == worktree_id {
+        return Some(record)
+      }
+    }
+  }
+  None
+}
+
+///|
+fn worktree_ready_in(
+  records : Array[@contracts.WorktreeRecord],
+  worktree_id : String,
+) -> Bool {
+  for record in records {
+    if record.id == worktree_id &&
+      record.state == @contracts.WORKTREE_STATE_READY {
+      return true
+    }
+  }
+  false
+}
+
+///|
+fn worktree_label(lang : Lang, record : @contracts.WorktreeRecord) -> String {
+  if record.branch != "" {
+    record.branch
+  } else if record.path != "" {
+    record.path
+  } else {
+    tr(lang, "Untitled worktree", "未命名工作树")
+  }
 }
 
 ///|
@@ -2820,6 +2993,10 @@ pub fn update_full(
               }
             None => chat_default_workspace_id(model)
           }
+          let worktree_id = match session {
+            Some(record) => record.worktree_id
+            None => ""
+          }
           let agent = {
             ..model.agent,
             workspace_id,
@@ -2854,6 +3031,13 @@ pub fn update_full(
               },
               chat_pending_decision: chat.pending_decision,
               chat_workspace_id: workspace_id,
+              chat_worktree_id: worktree_id,
+              chat_git_status_text: "",
+              chat_git_diff_text: "",
+              chat_git_status_loading: false,
+              chat_git_diff_loading: false,
+              chat_git_review_workspace: "",
+              chat_git_review_worktree: "",
               chat_poll_in_flight: false,
               chat_messages_in_flight: false,
               chat_read_in_flight: false,
@@ -2918,9 +3102,10 @@ pub fn update_full(
             [] => model.agent.workspace_id
           }
       }
-      let agent_id = match model.bot_agents {
-        [record, ..] => if record.bot_id == bot_id { record.id } else { "" }
-        _ => ""
+      let agent_id = if bot_id != "" && bot_agents_loaded_for(model, bot_id) {
+        sole_selectable_agent_id(model.bot_agents)
+      } else {
+        ""
       }
       let draft = {
         ..model.chat_draft,
@@ -2928,10 +3113,13 @@ pub fn update_full(
         bot_id,
         project_id,
         workspace_id,
+        worktree_id: "",
+        create_worktree: false,
         agent_id,
         bot_picker_open: false,
         project_picker_open: false,
         workspace_picker_open: false,
+        worktree_picker_open: false,
         agent_picker_open: false,
         message: if project_id != "" && member_bots.is_empty() {
           if !model.project_memberships_loaded {
@@ -2969,6 +3157,14 @@ pub fn update_full(
           chat_live_text: "",
           chat_session_state: "",
           chat_pending_decision: "",
+          chat_workspace_id: workspace_id,
+          chat_worktree_id: "",
+          chat_git_status_text: "",
+          chat_git_diff_text: "",
+          chat_git_status_loading: false,
+          chat_git_diff_loading: false,
+          chat_git_review_workspace: workspace_id,
+          chat_git_review_worktree: "",
           chat_error: "",
           chat_notice: "",
           chat_poll_in_flight: false,
@@ -2999,6 +3195,9 @@ pub fn update_full(
           }
           if bot_id != "" {
             commands.push(BotAgentList(bot_id))
+          }
+          if workspace_id != "" {
+            commands.push(ProjectListWorktrees(workspace_id))
           }
           commands
         },
@@ -3270,11 +3469,20 @@ pub fn update_full(
           }
         None => chat_default_workspace_id(model)
       }
+      let worktree_id = match detail.active_agent_session {
+        Some(session) => session.worktree_id
+        None => ""
+      }
       let commands : Array[MachineCommand] = [
         ChatMessages(chat.id, "", 50),
       ]
       if session_id != "" {
         commands.push(ChatRead(chat.id, 0L))
+      }
+      if workspace_id != "" {
+        commands.push(ProjectListWorktrees(workspace_id))
+        commands.push(ChatGitStatus(workspace_id, worktree_id))
+        commands.push(ChatGitDiff(workspace_id, "", worktree_id))
       }
       (
         {
@@ -3298,6 +3506,13 @@ pub fn update_full(
           chat_session_state: chat.agent_state,
           chat_pending_decision: "",
           chat_workspace_id: workspace_id,
+          chat_worktree_id: worktree_id,
+          chat_git_status_text: "",
+          chat_git_diff_text: "",
+          chat_git_status_loading: workspace_id != "",
+          chat_git_diff_loading: workspace_id != "",
+          chat_git_review_workspace: workspace_id,
+          chat_git_review_worktree: worktree_id,
           chat_poll_in_flight: false,
           chat_messages_in_flight: true,
           chat_read_in_flight: session_id != "",
@@ -3528,23 +3743,59 @@ pub fn update_full(
         }
         None => ()
       }
+      let workspace_id = if session.workspace_id == "" {
+        model.chat_workspace_id
+      } else {
+        session.workspace_id
+      }
+      let selected = model.selected_chat == session.chat_id
+      let commands : Array[MachineCommand] = []
+      if selected {
+        commands.push(ChatRead(session.chat_id, 0L))
+      }
+      if workspace_id != "" {
+        commands.push(ProjectListWorktrees(workspace_id))
+        if selected {
+          commands.push(ChatGitStatus(workspace_id, session.worktree_id))
+          commands.push(ChatGitDiff(workspace_id, "", session.worktree_id))
+        }
+      }
       (
         {
           ..model,
           chats,
           chat_details: details,
           chat_session_state: session.state,
-          chat_workspace_id: if session.workspace_id == "" {
-            model.chat_workspace_id
+          chat_workspace_id: workspace_id,
+          chat_worktree_id: session.worktree_id,
+          chat_git_status_text: if selected {
+            ""
           } else {
-            session.workspace_id
+            model.chat_git_status_text
+          },
+          chat_git_diff_text: if selected {
+            ""
+          } else {
+            model.chat_git_diff_text
+          },
+          chat_git_status_loading: selected && workspace_id != "",
+          chat_git_diff_loading: selected && workspace_id != "",
+          chat_git_review_workspace: if selected {
+            workspace_id
+          } else {
+            model.chat_git_review_workspace
+          },
+          chat_git_review_worktree: if selected {
+            session.worktree_id
+          } else {
+            model.chat_git_review_worktree
           },
           chat_read_cursor: 0L,
           chat_live_text: "",
           chat_pending_decision: "",
           chat_poll_in_flight: false,
           chat_messages_in_flight: false,
-          chat_read_in_flight: model.selected_chat == session.chat_id,
+          chat_read_in_flight: selected,
           chat_get_chat: "",
           chat_error: "",
           chat_notice: tr(
@@ -3553,11 +3804,7 @@ pub fn update_full(
             "此对话的智能体会话已启动",
           ),
         },
-        if model.selected_chat == session.chat_id {
-          [ChatRead(session.chat_id, 0L)]
-        } else {
-          none
-        },
+        commands,
       )
     }
     ChatPoll =>
@@ -3643,6 +3890,7 @@ pub fn update_full(
                 model.selected_chat,
                 agent_id,
                 model.chat_workspace_id,
+                model.chat_worktree_id,
               ),
             ],
           )
@@ -3690,6 +3938,98 @@ pub fn update_full(
       none,
     )
     ChatNotice(text) => ({ ..model, chat_notice: text }, none)
+    ChatGitStatusLoaded(workspace_id, worktree_id, text) =>
+      if workspace_id != model.chat_git_review_workspace ||
+        worktree_id != model.chat_git_review_worktree {
+        (model, none)
+      } else {
+        (
+          {
+            ..model,
+            chat_git_status_text: text,
+            chat_git_status_loading: false,
+          },
+          none,
+        )
+      }
+    ChatGitDiffLoaded(workspace_id, worktree_id, _path, text) =>
+      if workspace_id != model.chat_git_review_workspace ||
+        worktree_id != model.chat_git_review_worktree {
+        (model, none)
+      } else {
+        (
+          {
+            ..model,
+            chat_git_diff_text: text,
+            chat_git_diff_loading: false,
+          },
+          none,
+        )
+      }
+    ChatGitReviewFailed(workspace_id, worktree_id, message) =>
+      if workspace_id != model.chat_git_review_workspace ||
+        worktree_id != model.chat_git_review_worktree {
+        (model, none)
+      } else {
+        (
+          {
+            ..model,
+            chat_git_status_text: message,
+            chat_git_diff_text: message,
+            chat_git_status_loading: false,
+            chat_git_diff_loading: false,
+          },
+          none,
+        )
+      }
+    ChatTerminal =>
+      match workspace_by_id(model.project.workspaces, model.chat_workspace_id) {
+        Some(record) => {
+          let same_workspace = match model.project.workspace {
+            Some(current) => current.id == record.id
+            None => false
+          }
+          let base = if same_workspace {
+            model
+          } else {
+            {
+              ..model,
+              project: {
+                ..model.project,
+                workspace: Some(record),
+                machine_id: record.machine_id,
+                root: record.root,
+                terminal_id: "",
+                terminal_text: "",
+                terminal_input: "",
+                terminal_cursor: 0L,
+                terminal_focus: false,
+                terminal_state: TerminalClosed,
+                terminal_eof: false,
+                terminal_error: "",
+                terminal_read_in_flight: false,
+                terminal_target_rows: 0,
+                terminal_target_cols: 0,
+                terminal_pty_rows: 0,
+                terminal_pty_cols: 0,
+                terminal_history: [],
+              },
+            }
+          }
+          update_full(base, ProjectTerminalFocus)
+        }
+        None => (
+          {
+            ..model,
+            chat_error: tr(
+              model.lang,
+              "Load the Chat workspace before opening its terminal.",
+              "打开终端前请先加载对话工作区。",
+            ),
+          },
+          none,
+        )
+      }
     ChatDraftTitle(value) => (
       { ..model, chat_draft: { ..model.chat_draft, title: value } },
       none,
@@ -3805,9 +4145,37 @@ pub fn update_full(
         chat_draft: {
           ..model.chat_draft,
           workspace_id,
+          worktree_id: "",
+          create_worktree: false,
           workspace_picker_open: false,
+          worktree_picker_open: false,
         },
         agent: { ..model.agent, workspace_id },
+      },
+      if workspace_id == "" {
+        none
+      } else {
+        [ProjectListWorktrees(workspace_id)]
+      },
+    )
+    ChatDraftWorktree(value) => (
+      {
+        ..model,
+        chat_draft: {
+          ..model.chat_draft,
+          worktree_id: if value == CHAT_WORKTREE_NEW { "" } else { value },
+          create_worktree: value == CHAT_WORKTREE_NEW,
+          worktree_picker_open: false,
+          message: if value == CHAT_WORKTREE_NEW {
+            tr(
+              model.lang,
+              "A new isolated worktree will be created as monexus/<short> beside the workspace root.",
+              "将在工作区根目录旁创建 monexus/<short> 隔离工作树。",
+            )
+          } else {
+            ""
+          },
+        },
       },
       none,
     )
@@ -3835,6 +4203,10 @@ pub fn update_full(
         ChatPickerWorkspace => {
           ..model.chat_draft,
           workspace_picker_open: !model.chat_draft.workspace_picker_open,
+        }
+        ChatPickerWorktree => {
+          ..model.chat_draft,
+          worktree_picker_open: !model.chat_draft.worktree_picker_open,
         }
         ChatPickerAgent => {
           ..model.chat_draft,
@@ -3897,6 +4269,46 @@ pub fn update_full(
           },
           none,
         )
+      } else if draft.create_worktree &&
+        (match workspace_by_id(model.project.workspaces, draft.workspace_id) {
+          Some(record) => record.root.trim() == ""
+          None => true
+        }) {
+        (
+          {
+            ..model,
+            chat_draft: {
+              ..draft,
+              message: tr(
+                model.lang,
+                "Load the open workspace before creating an isolated worktree.",
+                "创建隔离工作树前请先加载已打开的工作区。",
+              ),
+            },
+          },
+          [ProjectList],
+        )
+      } else if draft.worktree_id != "" &&
+        (match worktree_by_id(model, draft.worktree_id) {
+          Some(record) =>
+            record.workspace_id != draft.workspace_id ||
+            record.state != @contracts.WORKTREE_STATE_READY
+          None => true
+        }) {
+        (
+          {
+            ..model,
+            chat_draft: {
+              ..draft,
+              message: tr(
+                model.lang,
+                "Choose a ready worktree from this workspace.",
+                "请选择此工作区中已就绪的工作树。",
+              ),
+            },
+          },
+          [ProjectListWorktrees(draft.workspace_id)],
+        )
       } else {
         let title = if draft.title.trim() == "" {
           if bot_name == "" {
@@ -3910,6 +4322,11 @@ pub fn update_full(
         }
         let org_id = match bot {
           Some(record) => record.org_id
+          None => ""
+        }
+        let workspace_root = match
+          workspace_by_id(model.project.workspaces, draft.workspace_id) {
+          Some(record) => record.root
           None => ""
         }
         (
@@ -3935,6 +4352,9 @@ pub fn update_full(
               draft.agent_id,
               draft.workspace_id,
               org_id,
+              workspace_root,
+              draft.worktree_id,
+              draft.create_worktree,
             ),
           ],
         )
@@ -3948,7 +4368,7 @@ pub fn update_full(
         bot_agents_loaded: true,
         chat_draft: if bot_id == model.chat_draft.bot_id &&
           model.chat_draft.agent_id == "" {
-          let agent_id = selectable_agent_id(records)
+          let agent_id = sole_selectable_agent_id(records)
           { ..model.chat_draft, agent_id }
         } else {
           model.chat_draft
@@ -4846,7 +5266,20 @@ pub fn update_full(
           workspaces_loaded: true,
         },
       }
-      (apply_workspace_defaults(loaded, sorted), none)
+      let applied = apply_workspace_defaults(loaded, sorted)
+      let workspace_id = if applied.composing_new_chat {
+        applied.chat_draft.workspace_id
+      } else {
+        ""
+      }
+      (
+        applied,
+        if workspace_id != "" && !worktrees_loaded_for(applied, workspace_id) {
+          [ProjectListWorktrees(workspace_id)]
+        } else {
+          none
+        },
+      )
     }
     ProjectSelectWorkspace(workspace_id) =>
       match workspace_by_id(model.project.workspaces, workspace_id) {
@@ -5551,6 +5984,7 @@ pub fn update_full(
     ProjectWorktreeCreated(record) => (
       {
         ..model,
+        worktrees: remember_worktree(model, record),
         project: {
           ..model.project,
           busy: false,
@@ -5560,16 +5994,46 @@ pub fn update_full(
           record.branch +
           tr(model.lang, " ready", " 已就绪"),
         },
+        chat_draft: if model.composing_new_chat &&
+          model.chat_draft.workspace_id == record.workspace_id {
+          {
+            ..model.chat_draft,
+            worktree_id: record.id,
+            create_worktree: false,
+            worktree_picker_open: false,
+            message: tr(model.lang, "Worktree ready: ", "工作树已就绪：") +
+            worktree_label(model.lang, record),
+          }
+        } else {
+          model.chat_draft
+        },
       },
-      none,
+      [ProjectListWorktrees(record.workspace_id)],
     )
-    ProjectWorktrees(records) => (
+    ProjectWorktrees(workspace_id, records) => (
       {
         ..model,
+        worktrees: remember_worktrees(model, workspace_id, records),
         project: {
           ..model.project,
           worktree_message: tr(model.lang, "worktrees: ", "工作树：") +
           records.length().to_string(),
+        },
+        chat_draft: if model.composing_new_chat &&
+          model.chat_draft.workspace_id == workspace_id &&
+          model.chat_draft.worktree_id != "" &&
+          !worktree_ready_in(records, model.chat_draft.worktree_id) {
+          {
+            ..model.chat_draft,
+            worktree_id: "",
+            message: tr(
+              model.lang,
+              "The selected worktree is no longer ready; using the workspace root.",
+              "所选工作树已不再就绪；将使用工作区根目录。",
+            ),
+          }
+        } else {
+          model.chat_draft
         },
       },
       none,

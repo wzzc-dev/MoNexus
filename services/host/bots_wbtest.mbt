@@ -3298,8 +3298,8 @@ async test "Chat agent_session.start failure records a failed session and no run
       assert_eq(sessions[0].runtime_session_id, "")
       assert_eq(bots_host_runtime_count(state), 0)
 
-      // The failed session is terminal, so a later start on a healthy Agent
-      // in the same Chat is allowed.
+      // The failed session is terminal, but M1 still forbids switching the
+      // Agent inside one Chat: the owner must start a new Chat.
       let script = bots_host_repo_file("tests/agent/mock_acp_agent.mjs") catch {
         error => fail(error.to_string())
       }
@@ -3339,48 +3339,15 @@ async test "Chat agent_session.start failure records a failed session and no run
       ) catch {
         error => fail(error.to_string())
       }
-      let retried = match
-        @contracts.chat_agent_session_from_result(
-          bots_host_result(retry_text),
-        ) {
-        Ok(value) => value
-        Err(message) => fail("retry chat.agent_session.start: " + message)
-      }
-      assert_eq(retried.state, @contracts.AGENT_SESSION_STATE_ACTIVE)
-      assert_eq(bots_host_runtime_count(state), 1)
+      let retry_error = bots_host_error(retry_text)
+      assert_true(retry_error.message.contains("Conflict"))
+      assert_true(retry_error.message.contains("Agent switching is P1"))
+      assert_eq(bots_host_runtime_count(state), 0)
       let retry_sessions = bots_host_list_chat_sessions(state, chat.id) catch {
         error => fail(error.to_string())
       }
-      assert_eq(retry_sessions.length(), 2)
-      assert_eq(
-        retry_sessions[0].state,
-        @contracts.AGENT_SESSION_STATE_FAILED,
-      )
-      assert_eq(
-        retry_sessions[1].state,
-        @contracts.AGENT_SESSION_STATE_ACTIVE,
-      )
-      let end_text = bots_host_call(
-        state,
-        @contracts.RpcRequest::new(
-          "req_session_start_retry_end",
-          @contracts.METHOD_CHAT_AGENT_SESSION_END,
-          @contracts.chat_agent_session_end_params(
-            "cid_session_start_retry_end",
-            retried.id,
-            @contracts.AGENT_SESSION_END_REASON_TURN_END,
-          ),
-        ),
-      ) catch {
-        error => fail(error.to_string())
-      }
-      let ended = match
-        @contracts.chat_agent_session_from_result(bots_host_result(end_text)) {
-        Ok(value) => value
-        Err(message) => fail("retry chat.agent_session.end: " + message)
-      }
-      assert_eq(ended.state, @contracts.AGENT_SESSION_STATE_ENDED)
-      assert_eq(bots_host_runtime_count(state), 0)
+      assert_eq(retry_sessions.length(), 1)
+      assert_eq(retry_sessions[0].state, @contracts.AGENT_SESSION_STATE_FAILED)
       done.put(())
     })
   })

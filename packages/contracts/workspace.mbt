@@ -152,6 +152,9 @@ pub const WORKSPACE_ERR_REMOTE : String = "remote"
 pub const WORKSPACE_ERR_INTERNAL : String = "internal"
 
 ///|
+pub const WORKSPACE_ERR_UNSUPPORTED : String = "unsupported"
+
+///|
 pub fn workspace_error_label(kind : String) -> String {
   match kind {
     "invalid" => "InvalidRequest"
@@ -162,6 +165,7 @@ pub fn workspace_error_label(kind : String) -> String {
     "unreachable" => "Unreachable"
     "host_key" => "HostKeyRejected"
     "remote" => "RemoteError"
+    "unsupported" => "Unsupported"
     _ => "Internal"
   }
 }
@@ -842,10 +846,12 @@ pub fn workspace_remove_params(
 pub fn workspace_git_status_params(
   client_request_id : String,
   workspace_id : String,
+  worktree_id~ : String = "",
 ) -> Map[String, @json.Json] {
   Map([
     ("client_request_id", json_string(client_request_id)),
     ("workspace_id", json_string(workspace_id)),
+    ("worktree_id", json_string(worktree_id)),
   ])
 }
 
@@ -856,6 +862,7 @@ pub fn workspace_git_diff_params(
   path : String,
   cached : Bool,
   range : String,
+  worktree_id~ : String = "",
 ) -> Map[String, @json.Json] {
   Map([
     ("client_request_id", json_string(client_request_id)),
@@ -863,6 +870,7 @@ pub fn workspace_git_diff_params(
     ("path", json_string(path)),
     ("cached", json_bool(cached)),
     ("range", json_string(range)),
+    ("worktree_id", json_string(worktree_id)),
   ])
 }
 

@@ -1026,6 +1026,7 @@ async fn handle_chat_agent_session_start(
     return
   }
   let requested_root = @contracts.chat_workspace_root_param(request.params)
+  let worktree_id = @contracts.chat_worktree_id_param(request.params)
   let now_ms = @async.now()
   let now = @contracts.format_rfc3339(now_ms)
   state.mutex.acquire()
@@ -1108,6 +1109,32 @@ async fn handle_chat_agent_session_start(
     )
     return
   }
+  let existing_sessions = match state.store.list_chat_agent_sessions(chat.id) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      bots_domain_error(state, sink, request, client_request_id, message)
+      return
+    }
+  }
+  match bots_latest_session_of(existing_sessions) {
+    Some(previous) =>
+      if previous.agent_id != agent_id {
+        state.mutex.release()
+        send_machine_error(
+          state,
+          sink,
+          request,
+          client_request_id,
+          @contracts.bots_error(
+            @contracts.BOTS_ERR_CONFLICT,
+            "Agent switching is P1; start a new Chat to run " + agent_id,
+          ),
+        )
+        return
+      }
+    None => ()
+  }
   let workspace = match state.store.get_workspace(workspace_id) {
     Ok(Some(value)) => value
     Ok(None) => {
@@ -1139,7 +1166,102 @@ async fn handle_chat_agent_session_start(
     )
     return
   }
-  if requested_root != "" && requested_root != workspace.root {
+  let mut session_root = workspace.root
+  if worktree_id != "" {
+    let worktree = match state.store.get_worktree(worktree_id) {
+      Ok(Some(value)) => value
+      Ok(None) => {
+        state.mutex.release()
+        send_machine_error(
+          state,
+          sink,
+          request,
+          client_request_id,
+          @contracts.bots_error(
+            @contracts.BOTS_ERR_NOT_FOUND,
+            "Worktree not found: " + worktree_id,
+          ),
+        )
+        return
+      }
+      Err(message) => {
+        state.mutex.release()
+        bots_domain_error(state, sink, request, client_request_id, message)
+        return
+      }
+    }
+    if worktree.workspace_id != workspace_id {
+      state.mutex.release()
+      send_machine_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        @contracts.bots_error(
+          @contracts.BOTS_ERR_CONFLICT,
+          "Worktree does not belong to workspace " + workspace_id,
+        ),
+      )
+      return
+    }
+    if worktree.state != @contracts.WORKTREE_STATE_READY {
+      state.mutex.release()
+      send_machine_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        @contracts.bots_error(
+          @contracts.BOTS_ERR_CONFLICT,
+          "Worktree is not ready: " + worktree.state,
+        ),
+      )
+      return
+    }
+    if worktree.path == "" || !worktree.path.has_prefix("/") {
+      state.mutex.release()
+      send_machine_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        @contracts.bots_error(
+          @contracts.BOTS_ERR_INVALID,
+          "Worktree path must be absolute and non-empty",
+        ),
+      )
+      return
+    }
+    if worktree.machine_id != workspace.machine_id {
+      state.mutex.release()
+      send_machine_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        @contracts.bots_error(
+          @contracts.BOTS_ERR_CONFLICT,
+          "Worktree machine does not match the Workspace machine",
+        ),
+      )
+      return
+    }
+    if requested_root != "" && requested_root != worktree.path {
+      state.mutex.release()
+      send_machine_error(
+        state,
+        sink,
+        request,
+        client_request_id,
+        @contracts.bots_error(
+          @contracts.BOTS_ERR_INVALID,
+          "workspace_root does not match the selected worktree",
+        ),
+      )
+      return
+    }
+    session_root = worktree.path
+  } else if requested_root != "" && requested_root != workspace.root {
     state.mutex.release()
     send_machine_error(
       state,
@@ -1203,7 +1325,8 @@ async fn handle_chat_agent_session_start(
     handoff_from_session_id=handoff_from,
     project_id=chat.project_id,
     workspace_id~,
-    workspace_root=workspace.root,
+    workspace_root=session_root,
+    worktree_id~,
   )
   let before = match state.store.last_seq() {
     Ok(value) => value
@@ -1236,9 +1359,9 @@ async fn handle_chat_agent_session_start(
     mode,
     agent.runtime_binding.command,
     agent.runtime_binding.args,
-    workspace.root,
+    session_root,
     workspace.id,
-    "",
+    worktree_id,
     "",
     0,
     Map([]),

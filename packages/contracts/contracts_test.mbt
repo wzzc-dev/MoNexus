@@ -195,3 +195,37 @@ test "workspace conflict errors read as Conflict" {
     "Conflict: worktree is leased by an active run",
   )
 }
+
+///|
+test "workspace git params carry an optional worktree id" {
+  let status = workspace_git_status_params(
+    "cid",
+    "wsp_1",
+    worktree_id="wt_1",
+  )
+  assert_eq(string_field_or(status, "workspace_id", ""), "wsp_1")
+  assert_eq(string_field_or(status, "worktree_id", ""), "wt_1")
+  let diff = workspace_git_diff_params(
+    "cid",
+    "wsp_1",
+    "src/main.mbt",
+    false,
+    "",
+    worktree_id="wt_1",
+  )
+  assert_eq(string_field_or(diff, "path", ""), "src/main.mbt")
+  assert_eq(string_field_or(diff, "worktree_id", ""), "wt_1")
+  assert_eq(
+    string_field_or(
+      workspace_git_status_params("cid", "wsp_1"),
+      "worktree_id",
+      "",
+    ),
+    "",
+  )
+  let unsupported = workspace_error(
+    WORKSPACE_ERR_UNSUPPORTED,
+    "worktree git review is unsupported for environment-backed workspaces",
+  )
+  assert_true(unsupported.message.has_prefix("Unsupported: "))
+}
