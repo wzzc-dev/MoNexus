@@ -130,6 +130,29 @@ A worktree is a first-class object: each Run can target its own worktree, so
 two concurrent Runs do not share a working directory. Non-git workspaces use
 exclusive leases instead.
 
+### Project membership by Bot name
+
+Desktop: **Manage** → **Projects** → select a Project. The **Bot members**
+section lists active members; use **Remove** beside a Bot name, or **Add**
+beside an available Bot name. The same controls are on the Bot page's Project
+section. Lists and pickers show Bot and Project names, not raw `bot_`/`prj_`
+ids. Adding or removing a member refreshes the Project page, Bot page and the
+New Chat draft so a revoked Bot is not left selected.
+
+```bash
+monexus host rpc --method project.membership.list --params '{"project_id":"prj_..."}'
+monexus host rpc --method project.membership.add \
+  --params '{"project_id":"prj_...","bot_id":"bot_..."}'
+monexus host rpc --method project.membership.remove \
+  --params '{"project_id":"prj_...","bot_id":"bot_...","reason":"owner request"}'
+```
+
+`project.membership.list` with no `project_id` returns every active membership.
+Adding an existing active member is idempotent. Removal fails with `conflict`
+while that Bot has a non-terminal AgentSession in the Project; stop the session
+first. M1 access is always empty, and permissions stay bounded by the Bot
+ceiling plus the existing permission snapshot.
+
 ## 4. Agent sessions
 
 Desktop: **Agents** → workspace/worktree + adapter → **Start session**; the

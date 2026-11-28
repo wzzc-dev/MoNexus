@@ -990,13 +990,22 @@ fn workroom_new_chat_form(model : Model) -> @moui.View[Msg] {
     ], spacing=11.0, align=@style.CrossAlign::Center).frame(width=483.0),
   ]
   if project_id != "" && bot_items.is_empty() {
+    let message = if !model.project_memberships_loaded {
+      tr(
+        model.lang,
+        "Loading Project membership from the host...",
+        "正在从主机加载项目成员...",
+      )
+    } else {
+      tr(
+        model.lang,
+        "This Project has no Bot members yet. Add a Bot from the Project page, then choose it here.",
+        "此项目尚无 Bot 成员。请先在项目页添加 Bot，再在此选择。",
+      )
+    }
     fields.push(
       @views.text(
-        tr(
-          model.lang,
-          "No Bot has active membership evidence in this Project. The host exposes no project.membership.list RPC, so this window will not guess; choose No project in the Bot view.",
-          "没有 Bot 在此项目中有有效成员证据。主机未暴露 project.membership.list RPC，因此此窗口不会猜测；请在 Bot 视图选择“无项目”。",
-        ),
+        message,
         width=workroom_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,

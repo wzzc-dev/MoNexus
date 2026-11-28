@@ -342,6 +342,569 @@ async test "Bot and Chat RPC round-trip with idempotent create" {
 }
 
 ///|
+async fn bots_host_seed_project(
+  state : HostState,
+  project_id : String,
+  now : String,
+) -> Unit raise {
+  let record = @contracts.ProjectRecord::new(
+    id=project_id,
+    name="Membership project",
+    repo_url="",
+    default_branch="main",
+    verify=[],
+    created_at=now,
+  )
+  state.mutex.acquire()
+  let appended = state.append_project_event(
+    @contracts.EVENT_PROJECT_CREATED,
+    "project/" + project_id,
+    record.to_json(),
+    record,
+  )
+  state.mutex.release()
+  match appended {
+    Ok(_) => ()
+    Err(message) => fail("append_project_event failed: " + message)
+  }
+}
+
+///|
+async fn bots_host_seed_bot(
+  state : HostState,
+  bot : @contracts.BotRecord,
+  now : String,
+) -> @contracts.BotRecord raise {
+  state.mutex.acquire()
+  let result = state.store.create_bot(bot, "owner", "test", now)
+  state.mutex.release()
+  match result {
+    Ok(value) => value
+    Err(message) => fail("create_bot failed: " + message)
+  }
+}
+
+///|
+async test "Project membership RPC lists active records and add is idempotent" {
+  let state = host_test_state("/tmp/monexus-host-project-membership-test", false) catch {
+    error => fail(error.to_string())
+  }
+  let now = "2026-11-27T04:30:00Z"
+  let first_project = @contracts.new_project_id(7_200L)
+  let second_project = @contracts.new_project_id(7_201L)
+  bots_host_seed_project(state, first_project, now) catch {
+    error => fail(error.to_string())
+  }
+  bots_host_seed_project(state, second_project, now) catch {
+    error => fail(error.to_string())
+  }
+  let first_bot = bots_host_seed_bot(
+    state,
+    { ..bots_host_bot(), id: @contracts.new_bot_id(7_202L) },
+    now,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let second_bot = bots_host_seed_bot(
+    state,
+    {
+      ..bots_host_bot(),
+      id: @contracts.new_bot_id(7_203L),
+      name: "Second Host Builder",
+    },
+    now,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let empty_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_list_empty",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_LIST,
+      @contracts.project_membership_list_params("cid_membership_list_empty"),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let empty = match
+    @contracts.project_memberships_from_result(bots_host_result(empty_text)) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.list: " + message)
+  }
+  assert_eq(empty.length(), 0)
+  let add_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_add_first",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_add_first",
+        first_project,
+        first_bot.id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let first = match
+    @contracts.project_membership_from_result(bots_host_result(add_text)) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.add: " + message)
+  }
+  assert_eq(first.state, @contracts.MEMBERSHIP_STATE_ACTIVE)
+  assert_eq(first.project_id, first_project)
+  assert_eq(first.bot_id, first_bot.id)
+  assert_eq(first.access.length(), 0)
+  state.mutex.acquire()
+  let stored_bot = state.store.get_bot(first_bot.id)
+  state.mutex.release()
+  match stored_bot {
+    Ok(Some(value)) =>
+      assert_eq(value.permission_ceiling, first_bot.permission_ceiling)
+    Ok(None) => fail("membership add lost the Bot")
+    Err(message) => fail("get_bot after membership add: " + message)
+  }
+  let add_again_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_add_first_again",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_add_first_again",
+        first_project,
+        first_bot.id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let again = match
+    @contracts.project_membership_from_result(
+      bots_host_result(add_again_text),
+    ) {
+    Ok(value) => value
+    Err(message) => fail("idempotent project.membership.add: " + message)
+  }
+  assert_eq(again.added_at, first.added_at)
+  let added_events = bots_host_events_of_type(
+    state,
+    0L,
+    @contracts.EVENT_PROJECT_MEMBER_ADDED,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  assert_eq(added_events.length(), 1)
+  let second_add_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_add_second",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_add_second",
+        second_project,
+        second_bot.id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let second = match
+    @contracts.project_membership_from_result(
+      bots_host_result(second_add_text),
+    ) {
+    Ok(value) => value
+    Err(message) => fail("second project.membership.add: " + message)
+  }
+  assert_eq(second.access.length(), 0)
+  let unknown_remove_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_remove_unknown",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_REMOVE,
+      @contracts.project_membership_remove_params(
+        "cid_membership_remove_unknown",
+        first_project,
+        second_bot.id,
+        reason="owner revoke",
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let unknown_remove = bots_host_error(unknown_remove_text)
+  assert_eq(bots_host_error_kind(unknown_remove), "not_found")
+  assert_true(unknown_remove.message.contains("not found"))
+  let all_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_list_all",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_LIST,
+      @contracts.project_membership_list_params("cid_membership_list_all"),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let all = match
+    @contracts.project_memberships_from_result(bots_host_result(all_text)) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.list all: " + message)
+  }
+  assert_eq(all.length(), 2)
+  let filtered_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_list_first",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_LIST,
+      @contracts.project_membership_list_params(
+        "cid_membership_list_first",
+        project_id=first_project,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let filtered = match
+    @contracts.project_memberships_from_result(
+      bots_host_result(filtered_text),
+    ) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.list filter: " + message)
+  }
+  assert_eq(filtered.length(), 1)
+  assert_eq(filtered[0].bot_id, first_bot.id)
+  let missing_project_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_add_missing_project",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_add_missing_project",
+        @contracts.new_project_id(7_204L),
+        first_bot.id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let missing_project = bots_host_error(missing_project_text)
+  assert_eq(bots_host_error_kind(missing_project), "not_found")
+  assert_true(missing_project.message.contains("Project not found"))
+  let missing_bot_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_add_missing_bot",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_add_missing_bot",
+        first_project,
+        @contracts.new_bot_id(7_205L),
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let missing_bot = bots_host_error(missing_bot_text)
+  assert_eq(bots_host_error_kind(missing_bot), "not_found")
+  assert_true(missing_bot.message.contains("Bot not found"))
+  let archived_bot = bots_host_seed_bot(
+    state,
+    {
+      ..bots_host_bot(),
+      id: @contracts.new_bot_id(7_206L),
+      name: "Archived Host Builder",
+    },
+    now,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  state.mutex.acquire()
+  let archive_result = state.store.archive_bot(archived_bot.id, "done", now, "owner")
+  state.mutex.release()
+  match archive_result {
+    Ok(_) => ()
+    Err(message) => fail("archive_bot failed: " + message)
+  }
+  let archived_add_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_add_archived_bot",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_add_archived_bot",
+        first_project,
+        archived_bot.id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let archived_add = bots_host_error(archived_add_text)
+  assert_eq(bots_host_error_kind(archived_add), "conflict")
+  assert_true(archived_add.message.contains("archived"))
+}
+
+///|
+async test "Project membership removal waits for the non-terminal AgentSession" {
+  let state = host_test_state(
+    "/tmp/monexus-host-project-membership-remove-test",
+    false,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let now = "2026-11-27T04:40:00Z"
+  let project_id = @contracts.new_project_id(7_210L)
+  bots_host_seed_project(state, project_id, now) catch {
+    error => fail(error.to_string())
+  }
+  let bot = bots_host_seed_bot(
+    state,
+    { ..bots_host_bot(), id: @contracts.new_bot_id(7_211L) },
+    now,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let add_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_remove_add",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_remove_add",
+        project_id,
+        bot.id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let _ = bots_host_result(add_text)
+  state.mutex.acquire()
+  let agent = match
+    state.store.create_agent(bots_host_agent(bot), "", "owner", "test", now) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("create_agent failed: " + message)
+    }
+  }
+  let chat = match
+    state.store.create_chat(
+      @contracts.ChatRecord::new(
+        id=@contracts.new_chat_id(7_212L),
+        org_id=@contracts.ORG_LOCAL,
+        title="Membership session",
+        created_at=now,
+        project_id~,
+      ),
+      [bot.id],
+      "owner",
+      "test",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("create_chat failed: " + message)
+    }
+  }
+  let session = @contracts.AgentSession::new(
+    id=@contracts.new_agent_session_id(7_213L),
+    chat_id=chat.id,
+    agent_id=agent.id,
+    permission_snapshot_hash="sha256:membership-test",
+    started_at=now,
+    project_id~,
+  )
+  match
+    state.store.start_chat_agent_session(
+      {
+        ..session,
+        workspace_id: "",
+      },
+      "owner",
+      now,
+    ) {
+    Ok(_) => ()
+    Err(message) => {
+      state.mutex.release()
+      fail("start_chat_agent_session failed: " + message)
+    }
+  }
+  state.mutex.release()
+  let blocked_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_remove_blocked",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_REMOVE,
+      @contracts.project_membership_remove_params(
+        "cid_membership_remove_blocked",
+        project_id,
+        bot.id,
+        reason="owner revoke",
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let blocked = bots_host_error(blocked_text)
+  assert_eq(bots_host_error_kind(blocked), "conflict")
+  assert_true(blocked.message.contains("non-terminal AgentSession"))
+  state.mutex.acquire()
+  let ended = state.store.end_chat_agent_session(
+    session.id,
+    @contracts.AGENT_SESSION_STATE_FAILED,
+    @contracts.AGENT_SESSION_END_REASON_ERROR,
+    "",
+    "",
+    now,
+  )
+  state.mutex.release()
+  match ended {
+    Ok(_) => ()
+    Err(message) => fail("end_chat_agent_session failed: " + message)
+  }
+  let remove_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_remove_after_end",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_REMOVE,
+      @contracts.project_membership_remove_params(
+        "cid_membership_remove_after_end",
+        project_id,
+        bot.id,
+        reason="owner revoke",
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let removed = match
+    @contracts.project_membership_from_result(
+      bots_host_result(remove_text),
+    ) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.remove after end: " + message)
+  }
+  assert_eq(removed.state, @contracts.MEMBERSHIP_STATE_REMOVED)
+  assert_eq(removed.reason, "owner revoke")
+  let list_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_list_after_remove",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_LIST,
+      @contracts.project_membership_list_params(
+        "cid_membership_list_after_remove",
+        project_id=project_id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let active = match
+    @contracts.project_memberships_from_result(bots_host_result(list_text)) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.list after remove: " + message)
+  }
+  assert_eq(active.length(), 0)
+}
+
+///|
+async test "Project membership re-add after removal drops historical access" {
+  let state = host_test_state(
+    "/tmp/monexus-host-project-membership-readd-test",
+    false,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let now = "2026-11-27T04:50:00Z"
+  let project_id = @contracts.new_project_id(7_220L)
+  bots_host_seed_project(state, project_id, now) catch {
+    error => fail(error.to_string())
+  }
+  let bot = bots_host_seed_bot(
+    state,
+    { ..bots_host_bot(), id: @contracts.new_bot_id(7_221L) },
+    now,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  state.mutex.acquire()
+  let seeded = state.store.add_project_membership(
+    @contracts.ProjectMembership::new(
+      project_id~,
+      bot_id=bot.id,
+      added_at=now,
+      access=["repo:read"],
+      reason="legacy grant",
+    ),
+    "owner",
+    now,
+  )
+  state.mutex.release()
+  match seeded {
+    Ok(value) => assert_eq(value.access[0], "repo:read")
+    Err(message) => fail("seed legacy membership failed: " + message)
+  }
+  let remove_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_readd_remove",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_REMOVE,
+      @contracts.project_membership_remove_params(
+        "cid_membership_readd_remove",
+        project_id,
+        bot.id,
+        reason="owner revoke",
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let removed = match
+    @contracts.project_membership_from_result(bots_host_result(remove_text)) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.remove: " + message)
+  }
+  assert_eq(removed.state, @contracts.MEMBERSHIP_STATE_REMOVED)
+  assert_eq(removed.access[0], "repo:read")
+  let readd_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_readd_add",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_readd_add",
+        project_id,
+        bot.id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let readded = match
+    @contracts.project_membership_from_result(bots_host_result(readd_text)) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.add after remove: " + message)
+  }
+  assert_eq(readded.state, @contracts.MEMBERSHIP_STATE_ACTIVE)
+  assert_eq(readded.access.length(), 0)
+  assert_eq(readded.reason, "")
+  assert_eq(readded.removed_at, "")
+  state.mutex.acquire()
+  let stored = state.store.get_project_membership(project_id, bot.id)
+  state.mutex.release()
+  match stored {
+    Ok(Some(value)) => {
+      assert_eq(value.state, @contracts.MEMBERSHIP_STATE_ACTIVE)
+      assert_eq(value.access.length(), 0)
+      assert_eq(value.reason, "")
+    }
+    Ok(None) => fail("re-added ProjectMembership disappeared")
+    Err(message) => fail("get_project_membership after re-add: " + message)
+  }
+}
+
+///|
 async fn bots_host_repo_file(relative : String) -> String raise {
   let cwd = match @env.current_dir() {
     Some(value) => value

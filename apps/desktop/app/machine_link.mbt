@@ -55,6 +55,9 @@ fn machine_notice(command : MachineCommand, detail : String) -> String {
     BotAgentSuspend(_, _) => "agent suspended"
     BotAgentRetire(_, _) => "agent retired"
     ProjectCatalog => "projects loaded"
+    ProjectMembershipList => "project memberships loaded"
+    ProjectMembershipAdd(_, _) => "project membership added"
+    ProjectMembershipRemove(_, _, _) => "project membership removed"
     CopyText(_, _) => "clipboard updated"
     AgentList => detail
     DecisionList(_) => detail
@@ -1150,6 +1153,83 @@ async fn execute_machine_command(
           dispatch(ProjectCatalogLoaded(records))
         }
         Err(message) => dispatch(ChatError("", "project.list: " + message))
+      }
+    }
+    ProjectMembershipList => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_PROJECT_MEMBERSHIP_LIST,
+          @contracts.project_membership_list_params(id),
+        ) {
+        Ok(json) =>
+          match @contracts.project_memberships_from_result(json) {
+            Ok(records) => dispatch(ProjectMembershipsLoaded(records))
+            Err(message) =>
+              dispatch(
+                ProjectMembershipError(
+                  "project.membership.list: " + message,
+                ),
+              )
+          }
+        Err(message) =>
+          dispatch(
+            ProjectMembershipError("project.membership.list: " + message),
+          )
+      }
+    }
+    ProjectMembershipAdd(project_id, bot_id) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+          @contracts.project_membership_add_params(id, project_id, bot_id),
+        ) {
+        Ok(json) =>
+          match @contracts.project_membership_from_result(json) {
+            Ok(record) => dispatch(ProjectMembershipAdded(record))
+            Err(message) =>
+              dispatch(
+                ProjectMembershipError(
+                  "project.membership.add: " + message,
+                ),
+              )
+          }
+        Err(message) =>
+          dispatch(
+            ProjectMembershipError("project.membership.add: " + message),
+          )
+      }
+    }
+    ProjectMembershipRemove(project_id, bot_id, reason) => {
+      let id = request_id("cmd")
+      match
+        client.call_json(
+          id,
+          @contracts.METHOD_PROJECT_MEMBERSHIP_REMOVE,
+          @contracts.project_membership_remove_params(
+            id,
+            project_id,
+            bot_id,
+            reason~,
+          ),
+        ) {
+        Ok(json) =>
+          match @contracts.project_membership_from_result(json) {
+            Ok(record) => dispatch(ProjectMembershipRemoved(record))
+            Err(message) =>
+              dispatch(
+                ProjectMembershipError(
+                  "project.membership.remove: " + message,
+                ),
+              )
+          }
+        Err(message) =>
+          dispatch(
+            ProjectMembershipError("project.membership.remove: " + message),
+          )
       }
     }
     AgentList => {

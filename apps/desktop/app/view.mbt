@@ -132,7 +132,7 @@ fn project_catalog_menu_items(
 }
 
 ///|
-/// Project Chat filter. Only Bots with active membership evidence in the
+/// Project Chat filter. Only Bots with active ProjectMembership in the
 /// selected Project are offered, so filtering never invents membership.
 fn project_chat_bot_menu_items(
   model : Model,
@@ -1763,6 +1763,126 @@ fn project_chat_row(
 }
 
 ///|
+/// Active Project membership is the host projection; it is never inferred from
+/// Chat participants. Both columns act on Bot names, not raw ids.
+fn project_membership_section(
+  model : Model,
+  project_id : String,
+) -> Array[@moui.View[Msg]] {
+  let rows : Array[@moui.View[Msg]] = [
+    @views.row([
+      ui_section(tr(model.lang, "Bot members", "Bot 成员")),
+      @views.spacer(weight=1.0),
+      ui_meta(
+        tr(
+          model.lang,
+          "Active Project membership from the host",
+          "来自主机的有效项目成员关系",
+        ),
+      ),
+    ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
+  ]
+  if !model.project_memberships_loaded {
+    rows.push(
+      ui_muted_wrapped(
+        tr(
+          model.lang,
+          "Loading Project membership from the host...",
+          "正在从主机加载项目成员...",
+        ),
+        960.0,
+      ),
+    )
+  } else {
+    let members = active_memberships_for_project(model, project_id)
+    if members.is_empty() {
+      rows.push(
+        ui_muted_wrapped(
+          tr(
+            model.lang,
+            "No Bot is a member of this Project yet. Add one below by name.",
+            "此项目尚无 Bot 成员。请在下方按名称添加。",
+          ),
+          960.0,
+        ),
+      )
+    } else {
+      for membership in members {
+        rows.push(
+          @views.row([
+            @views.text(
+              ui_truncate(
+                membership_bot_label(model, membership.bot_id),
+                620.0,
+                11.0,
+              ),
+              width=620.0,
+              align=@core.TextAlign::TextStart,
+              wrap=false,
+            ).font(ui_font(11.0, 560)).foreground(ui_text_color()),
+            @views.spacer(weight=1.0),
+            ui_meta(
+              tr(model.lang, "M1 access: Bot ceiling", "M1 权限：Bot 上限"),
+            ),
+            ui_ghost_small(
+              tr(model.lang, "Remove", "移除"),
+              RemoveProjectMembership(project_id, membership.bot_id),
+            ),
+          ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
+        )
+      }
+    }
+    let available : Array[@contracts.BotRecord] = []
+    for bot in model.bots {
+      if bot.state != @contracts.BOT_STATE_ARCHIVED &&
+        !project_membership_active(model, project_id, bot.id) {
+        available.push(bot)
+      }
+    }
+    if !available.is_empty() {
+      rows.push(
+        @views.text(
+          tr(model.lang, "Add a Bot by name", "按名称添加 Bot"),
+          align=@core.TextAlign::TextStart,
+        ).font(ui_font(10.5, 600)).foreground(ui_muted()),
+      )
+      for bot in available {
+        rows.push(
+          @views.row([
+            @views.text(
+              ui_truncate(bot_name(bot), 620.0, 11.0),
+              width=620.0,
+              align=@core.TextAlign::TextStart,
+              wrap=false,
+            ).font(ui_font(11.0, 400)).foreground(ui_text_color()),
+            @views.spacer(weight=1.0),
+            ui_ghost_small(
+              tr(model.lang, "Add", "添加"),
+              AddProjectMembership(project_id, bot.id),
+            ),
+          ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
+        )
+      }
+    } else if members.is_empty() && model.bots.is_empty() {
+      rows.push(
+        ui_muted_wrapped(
+          tr(
+            model.lang,
+            "No Bot is projected yet. Create a Bot before managing membership.",
+            "尚无 Bot 投影。请先创建 Bot 再管理成员关系。",
+          ),
+          960.0,
+        ),
+      )
+    }
+    if model.project_membership_message != "" {
+      rows.push(ui_meta(model.project_membership_message))
+    }
+  }
+  rows
+}
+
+///|
 /// Project context inside Manage/Projects: choose a Project by name, filter its
 /// Chats by Bot membership, and open a Chat without typing a cht_ id.
 fn project_chat_directory(model : Model) -> @moui.View[Msg] {
@@ -1796,6 +1916,14 @@ fn project_chat_directory(model : Model) -> @moui.View[Msg] {
         ui_primary(tr(model.lang, "New Chat", "新对话"), NewChat)
       },
     ], spacing=10.0, align=@style.CrossAlign::End).frame(width=960.0),
+  ]
+  if project_id != "" {
+    for row in project_membership_section(model, project_id) {
+      rows.push(row)
+    }
+    rows.push(ui_divider_soft())
+  }
+  rows.push(
     @views.row([
       @views.text(
         tr(model.lang, "Chats in this Project", "此项目的对话"),
@@ -1815,7 +1943,7 @@ fn project_chat_directory(model : Model) -> @moui.View[Msg] {
         210.0,
       ),
     ], spacing=10.0, align=@style.CrossAlign::End).frame(width=960.0),
-  ]
+  )
   if project_id == "" {
     rows.push(
       ui_muted_wrapped(
