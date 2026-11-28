@@ -247,6 +247,145 @@ fn bots_latest_session_of(
 }
 
 ///|
+/// First-send continuation context budget (UTF-8 bytes, including wrappers).
+const CHAT_HANDOFF_CONTEXT_CAP : Int32 = 8_192
+
+///|
+const CHAT_HANDOFF_CONTEXT_HEADER : String =
+  "[MoNexus Chat continuation context]\n" +
+  "Earlier visible Chat messages, hidden from the timeline:\n"
+
+///|
+const CHAT_HANDOFF_CONTEXT_FOOTER : String =
+  "[/MoNexus Chat continuation context]\n\n"
+
+///|
+fn utf8_byte_length(text : String) -> Int32 {
+  @utf8.encode(text).length()
+}
+
+///|
+fn utf8_char_width(ch : Char) -> Int32 {
+  let code = ch.to_int()
+  if code < 0x80 {
+    1
+  } else if code < 0x800 {
+    2
+  } else if code < 0x10000 {
+    3
+  } else {
+    4
+  }
+}
+
+///|
+/// Take a suffix of at most `limit` UTF-8 bytes without splitting a code point.
+fn utf8_suffix(text : String, limit : Int32) -> String {
+  if limit <= 0 {
+    return ""
+  }
+  let chars : Array[Char] = []
+  let mut used = 0
+  for ch in text.rev_iter() {
+    let width = utf8_char_width(ch)
+    if used + width > limit {
+      break
+    }
+    chars.push(ch)
+    used = used + width
+  }
+  String::from_array(chars.rev())
+}
+
+///|
+/// Build the hidden first-send prompt prefix from visible messages supplied
+/// newest-first. It keeps the most recent messages, trims the newest body from
+/// its tail when it alone exceeds the budget, and always returns chronological
+/// text. System boundaries and non user/assistant roles are never included.
+fn chat_handoff_prefix(
+  messages : Array[@contracts.ChatMessage],
+) -> String {
+  let overhead = utf8_byte_length(CHAT_HANDOFF_CONTEXT_HEADER) +
+    utf8_byte_length(CHAT_HANDOFF_CONTEXT_FOOTER)
+  let mut remaining = CHAT_HANDOFF_CONTEXT_CAP - overhead
+  if remaining <= 0 {
+    return ""
+  }
+  let lines : Array[String] = []
+  for message in messages {
+    let role = if message.role == @contracts.CHAT_MESSAGE_ROLE_USER {
+      "user"
+    } else if message.role == @contracts.CHAT_MESSAGE_ROLE_ASSISTANT {
+      "assistant"
+    } else {
+      continue
+    }
+    if message.body == "" {
+      continue
+    }
+    let label = role + ": "
+    let cost = utf8_byte_length(label) +
+      utf8_byte_length(message.body) +
+      1
+    if cost <= remaining {
+      lines.push(label + message.body + "\n")
+      remaining = remaining - cost
+    } else {
+      // Only the newest message may be partial: keep its tail so the most
+      // recent words survive the byte budget.
+      if lines.length() == 0 {
+        let body_budget = remaining - utf8_byte_length(label) - 1
+        let tail = utf8_suffix(message.body, body_budget)
+        if tail != "" {
+          lines.push(label + tail + "\n")
+        }
+      }
+      break
+    }
+  }
+  if lines.length() == 0 {
+    return ""
+  }
+  let mut out = CHAT_HANDOFF_CONTEXT_HEADER
+  for line in lines.rev() {
+    out = out + line
+  }
+  out + CHAT_HANDOFF_CONTEXT_FOOTER
+}
+
+///|
+/// Fetch enough visible history to fill the prefix budget. Messages arrive
+/// newest-first so the builder can stop at the cap without loading an unbounded
+/// Chat.
+fn load_chat_handoff_messages(
+  state : HostState,
+  chat_id : String,
+) -> Result[Array[@contracts.ChatMessage], String] {
+  let out : Array[@contracts.ChatMessage] = []
+  let mut before = ""
+  let mut bytes = 0
+  for ;; {
+    let page = match
+      state.store.list_chat_messages_before(chat_id, before, 200) {
+      Ok(value) => value
+      Err(message) => return Err(message)
+    }
+    if page.length() == 0 {
+      break
+    }
+    for message in page {
+      out.push(message)
+      bytes = bytes + utf8_byte_length(message.body)
+    }
+    before = page[page.length() - 1].id
+    if page.length() < 200 || bytes >= CHAT_HANDOFF_CONTEXT_CAP {
+      break
+    }
+  }
+  Ok(out)
+}
+
+///|
 fn HostState::chat_detail_locked(
   self : HostState,
   chat : @contracts.ChatRecord,
@@ -1043,12 +1182,25 @@ async fn handle_chat_agent_session_start(
   }
   let permission_hash = @contracts.bots_permission_set_hash(permissions)
   let started_at = @contracts.format_rfc3339(now_ms)
+  let existing_sessions = match state.store.list_chat_agent_sessions(chat.id) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      bots_domain_error(state, sink, request, client_request_id, message)
+      return
+    }
+  }
+  let handoff_from = match bots_latest_session_of(existing_sessions) {
+    Some(value) => value.id
+    None => ""
+  }
   let session = @contracts.AgentSession::new(
     id=bots_new_session_id(now_ms),
     chat_id~,
     agent_id~,
     permission_snapshot_hash=permission_hash,
     started_at~,
+    handoff_from_session_id=handoff_from,
     project_id=chat.project_id,
     workspace_id~,
     workspace_root=workspace.root,
@@ -1097,6 +1249,7 @@ async fn handle_chat_agent_session_start(
       starting.id,
       start_params,
       "chat-start-" + starting.id,
+      chat_session_id=starting.id,
     ) {
     Ok(value) => value
     Err(message) => {
@@ -1377,6 +1530,18 @@ async fn handle_chat_send(
     )
     return
   }
+  // Build the first-send continuation context before appending the current
+  // message, so a history read failure leaves no partial send and cannot burn
+  // the one-time injection marker.
+  let handoff = match
+    load_chat_handoff_messages(state, chat.id) {
+    Ok(history) => chat_handoff_prefix(history)
+    Err(message) => {
+      state.mutex.release()
+      bots_domain_error(state, sink, request, client_request_id, message)
+      return
+    }
+  }
   let message = @contracts.ChatMessage::new(
     id=bots_new_message_id(now_ms),
     chat_id~,
@@ -1392,8 +1557,22 @@ async fn handle_chat_send(
   match appended {
     Ok(record) => {
       state.sync_bots_events_after(before)
+      let runtime_text = match
+        state.store.claim_chat_context_injection(session.id, now) {
+        Ok(claimed) =>
+          if claimed {
+            handoff + text
+          } else {
+            text
+          }
+        Err(message) => {
+          state.mutex.release()
+          bots_domain_error(state, sink, request, client_request_id, message)
+          return
+        }
+      }
       state.mutex.release()
-      match bot_runtime_send(state, session.runtime_session_id, text) {
+      match bot_runtime_send(state, session.runtime_session_id, runtime_text) {
         Ok(_) =>
           send_machine_result(
             state,
@@ -1703,6 +1882,7 @@ async fn bot_runtime_start(
   session_id : String,
   params : Map[String, @json.Json],
   client_request_id : String,
+  chat_session_id~ : String = "",
 ) -> Result[@contracts.AgentSessionRecord, String] {
   let queue : @aqueue.Queue[String] = @aqueue.Queue(kind=Unbounded)
   let sink : Sink = { queue, subscribed: Ref(false), closed: Ref(false), }
@@ -1711,7 +1891,13 @@ async fn bot_runtime_start(
     method: @contracts.METHOD_AGENT_START,
     params,
   }
-  handle_agent_start(state, sink, request, client_request_id)
+  handle_agent_start(
+    state,
+    sink,
+    request,
+    client_request_id,
+    chat_session_id~,
+  )
   let response = @async.with_timeout_opt(
     @agent.agent_timeout_ms() + 10_000,
     async fn() { queue.get() },

@@ -22,3 +22,4 @@
 | [0016](0016-account-hosting.md) | 账户托管（A5）：平台凭据存储、按机器/Agent 绑定与本地代理注入 | Proposed |
 | [0017](0017-bot-chat-agent-session.md) | Bot/Chat/AgentSession 模型：身份、执行与迁移 | Accepted |
 | [0018](0018-smoke-harness.md) | 冒烟测试：原生 MoonBit harness 与 shell OS 边界 | Proposed |
+| [0019](0019-chat-transcript-recovery.md) | Chat transcript 恢复与续聊上下文 | Accepted |

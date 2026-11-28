@@ -166,8 +166,8 @@ fn bots_test_reset_file(path : String) -> Unit raise {
       "trigger_fires", "triggers", "leases", "decisions", "artifacts",
       "evidence", "runs", "tasks", "projects", "worktrees", "workspaces",
       "legacy_aliases", "project_memberships", "chat_participants", "chats",
-      "chat_messages", "agents", "bots", "agent_sessions", "machines", "events",
-      "meta",
+      "chat_messages", "chat_transcripts", "agents", "bots", "agent_sessions",
+      "machines", "events", "meta",
     ] {
       let stmt = conn.prepare("DROP TABLE IF EXISTS " + table)
       let _ = stmt.step()
@@ -1667,5 +1667,168 @@ test "archived Chat rejects sessions and new messages" {
     Ok(_) => fail("archived Chat accepted a new message")
     Err(message) => assert_true(message.contains("archived Chat is read-only"))
   }
+  store.close()
+}
+
+///|
+test "chat transcript persists across reopen and degrades safely" {
+  let path = "/tmp/monexus-chat-transcript-" +
+    @contracts.new_id("test", 0L) +
+    ".db"
+  bots_test_reset_file(path)
+  let now = "2026-11-27T03:00:00Z"
+  let first = match MachineStore::open(path) {
+    Ok(value) => value
+    Err(message) => fail("cannot open file store: " + message)
+  }
+  let (_bot, agent, chat) = bots_test_seed(first, now)
+  let session = match
+    first.start_chat_agent_session(
+      bots_test_session(chat, agent, now),
+      "owner",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("start_chat_agent_session failed: " + message)
+  }
+  match first.save_chat_transcript(session.id, 1_024L, "first", now) {
+    Ok(_) => ()
+    Err(message) => fail("save_chat_transcript failed: " + message)
+  }
+  let claimed = match
+    first.claim_chat_context_injection(session.id, now) {
+    Ok(value) => value
+    Err(message) => fail("claim_chat_context_injection failed: " + message)
+  }
+  assert_true(claimed)
+  let claimed_again = match
+    first.claim_chat_context_injection(session.id, now) {
+    Ok(value) => value
+    Err(message) => fail("second claim failed: " + message)
+  }
+  assert_false(claimed_again)
+  match
+    first.save_chat_transcript(session.id, 2_048L, "last-汉", "2026-11-27T03:01:00Z") {
+    Ok(_) => ()
+    Err(message) => fail("second save_chat_transcript failed: " + message)
+  }
+  let missing = match first.load_chat_transcript("asn_missing") {
+    Ok(value) => value
+    Err(_) => fail("missing transcript must degrade to None")
+  }
+  match missing {
+    Some(_) => fail("missing transcript returned a record")
+    None => ()
+  }
+  first.close()
+  let second = match MachineStore::open(path) {
+    Ok(value) => value
+    Err(message) => fail("cannot reopen file store: " + message)
+  }
+  let restored = match second.load_chat_transcript(session.id) {
+    Ok(Some(value)) => value
+    Ok(None) => fail("chat transcript missing after reopen")
+    Err(message) => fail("load_chat_transcript failed: " + message)
+  }
+  assert_eq(restored.base, 2_048L)
+  assert_eq(restored.text, "last-汉")
+  assert_true(restored.context_injected)
+  let stmt = second.conn.prepare(
+    "UPDATE chat_transcripts SET base=-1 WHERE session_id=?1",
+  )
+  stmt.bind(index=1, session.id)
+  let _ = stmt.step()
+  stmt.finalize()
+  let corrupt = match second.load_chat_transcript(session.id) {
+    Ok(value) => value
+    Err(_) => fail("corrupt transcript must degrade to None")
+  }
+  match corrupt {
+    Some(_) => fail("corrupt transcript returned a record")
+    None => ()
+  }
+  second.close()
+}
+
+///|
+test "chat handoff history is newest-first and excludes system/current" {
+  let store = bots_test_open()
+  let now = "2026-11-27T03:10:00Z"
+  let (_bot, agent, chat) = bots_test_seed(store, now)
+  let session = match
+    store.start_chat_agent_session(
+      bots_test_session(chat, agent, now),
+      "owner",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("start_chat_agent_session failed: " + message)
+  }
+  let older = match
+    store.append_chat_message(
+      bots_test_message(chat, session.id, @contracts.CHAT_MESSAGE_ROLE_USER, "older", now),
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("append older failed: " + message)
+  }
+  match
+    store.append_chat_message(
+      bots_test_message(
+        chat,
+        session.id,
+        @contracts.CHAT_MESSAGE_ROLE_SYSTEM,
+        "boundary",
+        now,
+      ),
+      now,
+    ) {
+    Ok(_) => ()
+    Err(message) => fail("append system failed: " + message)
+  }
+  let reply = match
+    store.append_chat_message(
+      bots_test_message(
+        chat,
+        session.id,
+        @contracts.CHAT_MESSAGE_ROLE_ASSISTANT,
+        "reply",
+        now,
+      ),
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("append assistant failed: " + message)
+  }
+  let current = match
+    store.append_chat_message(
+      bots_test_message(
+        chat,
+        session.id,
+        @contracts.CHAT_MESSAGE_ROLE_USER,
+        "current",
+        now,
+      ),
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("append current failed: " + message)
+  }
+  let before_current = match
+    store.list_chat_messages_before(chat.id, current.id, 10) {
+    Ok(value) => value
+    Err(message) => fail("list_chat_messages_before failed: " + message)
+  }
+  assert_eq(before_current.length(), 2)
+  assert_eq(before_current[0].id, reply.id)
+  assert_eq(before_current[1].id, older.id)
+  let latest = match store.list_chat_messages_before(chat.id, "", 10) {
+    Ok(value) => value
+    Err(message) => fail("latest history read failed: " + message)
+  }
+  assert_eq(latest.length(), 3)
+  assert_eq(latest[0].id, current.id)
+  assert_eq(latest[1].id, reply.id)
+  assert_eq(latest[2].id, older.id)
   store.close()
 }
