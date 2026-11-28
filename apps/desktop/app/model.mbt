@@ -786,6 +786,14 @@ pub fn Model::new_with_startup(startup : StartupTheme) -> Model {
 }
 
 ///|
+/// Representative note used by `MONEXUS_SCENE_FLOAT=note` screenshots. It
+/// exercises every supported inline and block treatment without involving the
+/// local note store, so captures stay deterministic.
+fn scene_float_note_content() -> String {
+  "# 周会笔记\n\n浮窗里的 **排版编辑**，也保留 *源码模式* 与 ~~旧结论~~。\n行内命令 `moon test`，以及 [设计文档](https://example.com/design)。\n\n## 本周完成\n\n- 完成 **Note 编辑器**\n- 补齐 *中文 IME* 验证\n- 检查引用与代码块\n\n1. 运行测试\n2. 更新截图\n3. 等待双平台 CI\n\n> 笔记仍以 `.md` 保存，自动存盘保持不变。\n\n```moonbit\nlet note = @app.float_note_make(...)\n```\n\n---\n\n下周继续 review。"
+}
+
+///|
 pub fn Model::new_with_preferences(
   startup : StartupTheme,
   language : StartupLanguage,
@@ -902,6 +910,31 @@ pub fn Model::new_with_preferences(
         }
         if scene.contains("menu") {
           float = { ..float, menu_open: true }
+        }
+        if scene.contains("note") {
+          match float_active_note(float) {
+            Some(note) => {
+              let seeded = float_note_replace_content(
+                note,
+                scene_float_note_content(),
+              )
+              let seeded = {
+                ..seeded,
+                state: FloatNoteSaved,
+                revision: 0,
+              }
+              let seeded = float_note_set_source_mode(
+                seeded,
+                scene.contains("source"),
+              )
+              float = float_note_updated(
+                float,
+                note.id,
+                fn(_current) { seeded },
+              )
+            }
+            None => ()
+          }
         }
       }
     }
@@ -1290,6 +1323,10 @@ pub(all) enum Msg {
   FloatMenu(Bool)
   FloatNoteTitleDraft(String)
   FloatNoteContentDraft(String)
+  FloatNoteEdit(String, @richtext.MarkdownEditTransaction)
+  FloatNoteSelection(String, Int32, @core.TextRange?)
+  FloatNoteCommand(String, @richtext.MarkdownEditorCommand)
+  FloatNoteSourceMode(String, Bool)
   FloatNoteStored(String, Int, Bool, String)
   FloatWorkspaceRestored(FloatWorkspaceRestore)
   FloatHeaderDrag(@core.DragGesturePhase, Double, Double)
@@ -7338,17 +7375,11 @@ pub fn update_full(
     FloatNoteContentDraft(value) =>
       match float_active_note(model.float) {
         Some(note) => {
+          let next = float_note_replace_content(note, value)
           let float = float_note_updated(
             model.float,
             note.id,
-            fn(current) {
-              {
-                ..current,
-                content: value,
-                state: FloatNoteSaving,
-                revision: current.revision + 1,
-              }
-            },
+            fn(_current) { next },
           )
           (
             {
@@ -7357,6 +7388,104 @@ pub fn update_full(
             },
             none,
           )
+        }
+        None => (model, none)
+      }
+    FloatNoteEdit(note_id, transaction) =>
+      match float_note_by_id(model.float, note_id) {
+        Some(note) => {
+          let next = float_note_apply_edit(note, transaction)
+          if next.content == note.content && next.selection == note.selection {
+            (model, none)
+          } else {
+            let float = float_note_updated(
+              model.float,
+              note_id,
+              fn(_current) { next },
+            )
+            (
+              {
+                ..model,
+                float: if next.content != note.content {
+                  { ..float, message: "" }
+                } else {
+                  float
+                },
+              },
+              none,
+            )
+          }
+        }
+        None => (model, none)
+      }
+    FloatNoteSelection(note_id, caret, selection) =>
+      match float_note_by_id(model.float, note_id) {
+        Some(note) => {
+          let next = float_note_set_selection(note, caret, selection)
+          if next.selection == note.selection {
+            (model, none)
+          } else {
+            (
+              {
+                ..model,
+                float: float_note_updated(
+                  model.float,
+                  note_id,
+                  fn(_current) { next },
+                ),
+              },
+              none,
+            )
+          }
+        }
+        None => (model, none)
+      }
+    FloatNoteCommand(note_id, command) =>
+      match float_note_by_id(model.float, note_id) {
+        Some(note) => {
+          let next = float_note_apply_command(note, command)
+          if next.content == note.content && next.selection == note.selection {
+            (model, none)
+          } else {
+            let float = float_note_updated(
+              model.float,
+              note_id,
+              fn(_current) { next },
+            )
+            (
+              {
+                ..model,
+                float: if next.content != note.content {
+                  { ..float, message: "" }
+                } else {
+                  float
+                },
+              },
+              none,
+            )
+          }
+        }
+        None => (model, none)
+      }
+    FloatNoteSourceMode(note_id, source_mode) =>
+      match float_note_by_id(model.float, note_id) {
+        Some(note) => {
+          let next = float_note_set_source_mode(note, source_mode)
+          if next.source_mode == note.source_mode {
+            (model, none)
+          } else {
+            (
+              {
+                ..model,
+                float: float_note_updated(
+                  model.float,
+                  note_id,
+                  fn(_current) { next },
+                ),
+              },
+              none,
+            )
+          }
         }
         None => (model, none)
       }

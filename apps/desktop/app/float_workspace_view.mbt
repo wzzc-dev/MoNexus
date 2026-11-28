@@ -606,20 +606,135 @@ fn float_note_state(note : FloatNote, lang : Lang) -> (String, @core.Color) {
 }
 
 ///|
-fn float_note_editor_lines(height : Double) -> Int32 {
-  if height < 120.0 {
-    4
-  } else if height < 180.0 {
-    6
-  } else if height < 240.0 {
-    9
-  } else if height < 320.0 {
-    12
-  } else if height < 400.0 {
-    16
-  } else {
-    20
-  }
+///|
+fn float_note_toolbar_control(
+  label : String,
+  accessibility : String,
+  msg : Msg,
+  width : Double,
+  active : Bool,
+) -> @moui.View[Msg] {
+  @views.button(
+    label,
+    on_click=msg,
+    style=float_note_toolbar_button_style(active),
+    theme=float_note_toolbar_theme(),
+    width~,
+    height=26.0,
+  ).accessibility_label(accessibility)
+}
+
+///|
+fn float_note_toolbar(
+  model : Model,
+  note : FloatNote,
+  width : Double,
+) -> @moui.View[Msg] {
+  let lang = model.lang
+  let format = command => FloatNoteCommand(note.id, command)
+  let heading_1 = float_note_toolbar_control(
+    "H1",
+    tr(lang, "Heading 1", "一级标题"),
+    format(@richtext.MarkdownEditorCommand::Heading(1)),
+    28.0,
+    false,
+  )
+  let heading_2 = float_note_toolbar_control(
+    "H2",
+    tr(lang, "Heading 2", "二级标题"),
+    format(@richtext.MarkdownEditorCommand::Heading(2)),
+    28.0,
+    false,
+  )
+  let heading_3 = float_note_toolbar_control(
+    "H3",
+    tr(lang, "Heading 3", "三级标题"),
+    format(@richtext.MarkdownEditorCommand::Heading(3)),
+    28.0,
+    false,
+  )
+  let bold = float_note_toolbar_control(
+    "B",
+    tr(lang, "Bold, Cmd or Ctrl+B", "粗体，Cmd 或 Ctrl+B"),
+    format(@richtext.MarkdownEditorCommand::Bold),
+    26.0,
+    false,
+  )
+  let italic = float_note_toolbar_control(
+    "I",
+    tr(lang, "Italic, Cmd or Ctrl+I", "斜体，Cmd 或 Ctrl+I"),
+    format(@richtext.MarkdownEditorCommand::Italic),
+    26.0,
+    false,
+  )
+  let bullet = float_note_toolbar_control(
+    "•",
+    tr(lang, "Unordered list", "无序列表"),
+    format(@richtext.MarkdownEditorCommand::BulletList),
+    26.0,
+    false,
+  )
+  let ordered = float_note_toolbar_control(
+    "1.",
+    tr(lang, "Ordered list", "有序列表"),
+    format(@richtext.MarkdownEditorCommand::OrderedList),
+    30.0,
+    false,
+  )
+  let quote = float_note_toolbar_control(
+    "Q",
+    tr(lang, "Quote", "引用"),
+    format(@richtext.MarkdownEditorCommand::Quote),
+    26.0,
+    false,
+  )
+  let code = float_note_toolbar_control(
+    "`",
+    tr(lang, "Inline code", "行内代码"),
+    format(@richtext.MarkdownEditorCommand::Code),
+    26.0,
+    false,
+  )
+  let code_block = float_note_toolbar_control(
+    "{}",
+    tr(lang, "Code block", "代码块"),
+    format(@richtext.MarkdownEditorCommand::CodeBlock),
+    30.0,
+    false,
+  )
+  let link = float_note_toolbar_control(
+    tr(lang, "Link", "链接"),
+    tr(lang, "Insert link", "插入链接"),
+    format(@richtext.MarkdownEditorCommand::Link),
+    40.0,
+    false,
+  )
+  let source = float_note_toolbar_control(
+    tr(lang, "Markdown", "Markdown"),
+    if note.source_mode {
+      tr(lang, "Show formatted notes", "显示排版笔记")
+    } else {
+      tr(lang, "Show Markdown source", "显示 Markdown 源码")
+    },
+    FloatNoteSourceMode(note.id, !note.source_mode),
+    72.0,
+    note.source_mode,
+  )
+  @views.row([
+    heading_1,
+    heading_2,
+    heading_3,
+    bold,
+    italic,
+    bullet,
+    ordered,
+    quote,
+    code,
+    code_block,
+    link,
+    @views.spacer(weight=1.0),
+    source,
+  ], spacing=3.0, align=@style.CrossAlign::Center).frame(width~, height=28.0)
 }
 
 ///|
@@ -658,22 +773,48 @@ fn float_note_pane(
     ).font(ui_font(9.0, 400)).foreground(ui_dim()),
   ], spacing=8.0, align=@style.CrossAlign::Center).frame(width~, height=14.0)
   let message_extra = if model.float.message != "" { 18.0 } else { 0.0 }
-  let reserve = 30.0 + 14.0 + 16.0 + 24.0 + message_extra
+  let toolbar = float_note_toolbar(model, note, width)
+  let reserve = 30.0 + 14.0 + 28.0 + 16.0 + 24.0 + message_extra
   let editor_height = (height - reserve).max(80.0)
-  let lines = float_note_editor_lines(editor_height)
-  let editor = @views.text_area(
-    note.content,
-    on_input=fn(value) { FloatNoteContentDraft(value) },
-    placeholder=tr(
-      model.lang,
-      "Plain text or Markdown. Autosaves locally.",
-      "纯文本或 Markdown。本地自动保存。",
-    ),
-    lines~,
-    variant=@style.TextFieldVariant::Filled,
-    theme=field_theme(),
-    width~,
-    line_height=20.0,
+  let editor_font = if note.source_mode {
+    mono_font(11.5, 400)
+  } else {
+    ui_font(13.0, 400)
+  }
+  let editor = @richtext.controlled_markdown_session_editor(
+    session=note.session,
+    selection=note.selection,
+    on_transaction=fn(transaction) {
+      FloatNoteEdit(note.id, transaction)
+    },
+    placeholder=if note.source_mode {
+      tr(
+        model.lang,
+        "Markdown source. Autosaves locally.",
+        "Markdown 源码。本地自动保存。",
+      )
+    } else {
+      tr(
+        model.lang,
+        "Write in Markdown. Formatting appears as you type.",
+        "用 Markdown 书写，排版即时呈现。",
+      )
+    },
+    size=@core.Size::new(width~, height=editor_height),
+    font=editor_font,
+    foreground=ui_text_color(),
+    placeholder_color=ui_dim(),
+    background=@core.Brush::solid(ui_surface_alt()),
+    border=Some(ui_edge(ui_border())),
+    focused_border=Some(ui_edge(ui_accent())),
+    cursor_color=ui_accent(),
+    corner_radius=4.0,
+    source_mode=note.source_mode,
+    on_selection_change=Some(fn(caret, selection) {
+      FloatNoteSelection(note.id, caret, selection)
+    }),
+    visible_viewport_height=editor_height,
+    key=Some("float-note-editor:" + note.id),
   ).accessibility_label(tr(model.lang, "Note content", "笔记正文"))
   let path = match float_note_path_in(float_notes_dir(), note.file_name) {
     Some(value) => value
@@ -682,6 +823,7 @@ fn float_note_pane(
   let children : Array[@moui.View[Msg]] = [
     title_row,
     meta_row,
+    toolbar,
   ]
   if model.float.message != "" {
     children.push(

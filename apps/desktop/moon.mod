@@ -14,4 +14,5 @@ import {
   "wzzc-dev/moui@0.10.2",
   "wzzc-dev/moui_skia_renderer@0.10.2",
   "moonbitlang/async@0.22.5",
+  "wzzc-dev/moui_richtext@0.10.2",
 }
