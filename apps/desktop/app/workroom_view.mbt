@@ -1,7 +1,39 @@
 ///|
-/// Chat-first workroom. The main island is one 739pt work column, a hairline,
-/// and a 292pt details rail. Projects, machines, executors and sessions stay in
-/// the rail; they are context for this Chat, not peer destinations.
+/// Chat-first workroom. At the 1280 reference the main island is one 739pt work
+/// column, a hairline, and a 292pt details rail; the work column takes the
+/// remaining width on narrower windows. Projects, machines, executors and
+/// sessions stay in the rail; they are context for this Chat, not peer
+/// destinations.
+
+///|
+fn workroom_column_width() -> Double {
+  (ui_main_width.val - 292.0 - 1.0).max(0.0)
+}
+
+///|
+fn workroom_inner_width() -> Double {
+  (workroom_column_width() - 56.0).max(0.0)
+}
+
+///|
+fn workroom_message_width() -> Double {
+  (workroom_inner_width() - 28.0).max(0.0)
+}
+
+///|
+fn workroom_pending_width() -> Double {
+  (workroom_inner_width() - 24.0).max(0.0)
+}
+
+///|
+fn workroom_thread_height() -> Double {
+  (ui_scroll_height.val - 95.0 - 1.0 - 172.0).max(0.0)
+}
+
+///|
+fn workroom_rail_scroll_height() -> Double {
+  (ui_scroll_height.val - 34.0).max(0.0)
+}
 
 ///|
 fn workroom_clock(value : String) -> String {
@@ -244,11 +276,15 @@ fn workroom_header(
           ui_tag(workroom_status(model)),
           @views.spacer(weight=1.0),
           bot_chip,
-        ], spacing=9.0, align=@style.CrossAlign::Center).frame(width=683.0),
-        @views.row(meta, spacing=6.0, align=@style.CrossAlign::Center).frame(
-          width=683.0,
+        ], spacing=9.0, align=@style.CrossAlign::Center).frame(
+          width=workroom_inner_width(),
         ),
-      ], spacing=7.0, align=@style.CrossAlign::Start).frame(width=683.0),
+        @views.row(meta, spacing=6.0, align=@style.CrossAlign::Center).frame(
+          width=workroom_inner_width(),
+        ),
+      ], spacing=7.0, align=@style.CrossAlign::Start).frame(
+        width=workroom_inner_width(),
+      ),
       top=22.0,
       right=28.0,
       bottom=16.0,
@@ -268,7 +304,7 @@ fn workroom_user_entry(
 ) -> @moui.View[Msg] {
   let body = @views.text(
     prompt,
-    width=655.0,
+    width=workroom_message_width(),
     align=@core.TextAlign::TextStart,
     wrap=true,
   ).font(ui_font(13.0, 400)).foreground(ui_text_color())
@@ -285,9 +321,13 @@ fn workroom_user_entry(
           ).font(ui_font(9.5, 400)).foreground(ui_dim()),
           @views.spacer(weight=1.0),
           if when == "" { ui_meta("") } else { ui_mono(when, 8.5) },
-        ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=655.0),
+        ], spacing=7.0, align=@style.CrossAlign::Center).frame(
+          width=workroom_message_width(),
+        ),
         body,
-      ], spacing=7.0, align=@style.CrossAlign::Start).frame(width=655.0),
+      ], spacing=7.0, align=@style.CrossAlign::Start).frame(
+        width=workroom_message_width(),
+      ),
       top=10.0,
       right=12.0,
       bottom=10.0,
@@ -300,7 +340,9 @@ fn workroom_user_entry(
   @views.row([
     @views.container(@views.empty(), width=2.0, background=ui_ink(), padding=0.0),
     wash,
-  ], spacing=0.0, align=@style.CrossAlign::Stretch).frame(width=683.0)
+  ], spacing=0.0, align=@style.CrossAlign::Stretch).frame(
+    width=workroom_inner_width(),
+  )
 }
 
 ///|
@@ -342,14 +384,14 @@ fn workroom_assistant_body_entry(
   let body = if empty {
     @views.text(
       body_text,
-      width=683.0,
+      width=workroom_inner_width(),
       align=@core.TextAlign::TextStart,
       wrap=true,
     ).font(ui_font(12.0, 400)).foreground(ui_dim())
   } else {
     @views.text(
       body_text,
-      width=683.0,
+      width=workroom_inner_width(),
       align=@core.TextAlign::TextStart,
       wrap=true,
     ).font(ui_font(13.0, 400)).foreground(ui_text_color())
@@ -365,9 +407,13 @@ fn workroom_assistant_body_entry(
       ).font(ui_font(9.5, 400)).foreground(ui_dim()),
       @views.spacer(weight=1.0),
       if when == "" { ui_meta("") } else { ui_mono(when, 8.5) },
-    ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=683.0),
+    ], spacing=7.0, align=@style.CrossAlign::Center).frame(
+      width=workroom_inner_width(),
+    ),
     body,
-  ], spacing=7.0, align=@style.CrossAlign::Start).frame(width=683.0)
+  ], spacing=7.0, align=@style.CrossAlign::Start).frame(
+    width=workroom_inner_width(),
+  )
 }
 
 ///|
@@ -424,14 +470,18 @@ fn workroom_chat_message_entry(
         ).font(ui_font(9.5, 570)).foreground(ui_dim()),
         @views.spacer(weight=1.0),
         if when == "" { ui_meta("") } else { ui_mono(when, 8.5) },
-      ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=683.0),
+      ], spacing=7.0, align=@style.CrossAlign::Center).frame(
+        width=workroom_inner_width(),
+      ),
       @views.text(
         message.body,
-        width=683.0,
+        width=workroom_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(10.0, 400)).foreground(ui_muted()),
-    ], spacing=5.0, align=@style.CrossAlign::Start).frame(width=683.0)
+    ], spacing=5.0, align=@style.CrossAlign::Start).frame(
+      width=workroom_inner_width(),
+    )
   }
 }
 
@@ -474,10 +524,12 @@ fn workroom_pending_item(model : Model) -> @moui.View[Msg]? {
                 ).font(ui_font(10.5, 620)).foreground(ui_warning()),
                 @views.spacer(weight=1.0),
                 ui_mono(tr(model.lang, "blocking", "阻塞项"), 8.5),
-              ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=659.0),
+              ], spacing=7.0, align=@style.CrossAlign::Center).frame(
+                width=workroom_pending_width(),
+              ),
               @views.text(
                 chat_pending_label(model),
-                width=659.0,
+                width=workroom_pending_width(),
                 align=@core.TextAlign::TextStart,
                 wrap=true,
               ).font(ui_font(10.0, 400)).foreground(ui_muted()),
@@ -487,8 +539,12 @@ fn workroom_pending_item(model : Model) -> @moui.View[Msg]? {
                   SelectPage(Inbox),
                 ),
                 @views.spacer(weight=1.0),
-              ], spacing=6.0, align=@style.CrossAlign::Center).frame(width=659.0),
-            ], spacing=7.0, align=@style.CrossAlign::Start).frame(width=659.0),
+              ], spacing=6.0, align=@style.CrossAlign::Center).frame(
+                width=workroom_pending_width(),
+              ),
+            ], spacing=7.0, align=@style.CrossAlign::Start).frame(
+              width=workroom_pending_width(),
+            ),
             top=10.0,
             right=11.0,
             bottom=10.0,
@@ -496,7 +552,7 @@ fn workroom_pending_item(model : Model) -> @moui.View[Msg]? {
           ),
         ], spacing=0.0, align=@style.CrossAlign::Stretch),
       ),
-      width=683.0,
+      width=workroom_inner_width(),
       background=ui_surface(),
       corner_radius=3.0,
       border=Some(ui_edge(ui_border_soft())),
@@ -519,7 +575,9 @@ fn workroom_activity_row(
       ).foreground(ui_muted()),
       @views.spacer(weight=1.0),
       if when == "" { ui_meta("") } else { ui_mono(when, 8.5) },
-    ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=683.0),
+    ], spacing=7.0, align=@style.CrossAlign::Center).frame(
+      width=workroom_inner_width(),
+    ),
     height=27.0,
     background=clear_color(),
     padding=0.0,
@@ -593,7 +651,9 @@ fn workroom_activity(
         ).foreground(ui_muted()),
         @views.spacer(weight=1.0),
         ui_mono(tr(model.lang, "this session", "当前会话"), 8.5),
-      ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=683.0),
+      ], spacing=7.0, align=@style.CrossAlign::Center).frame(
+        width=workroom_inner_width(),
+      ),
       height=31.0,
       background=clear_color(),
       padding=0.0,
@@ -608,7 +668,7 @@ fn workroom_activity(
             "No recorded activity yet.",
             "尚无已记录的活动。",
           ),
-          width=683.0,
+          width=workroom_inner_width(),
           align=@core.TextAlign::TextStart,
           wrap=true,
         ).font(ui_font(9.5, 400)).foreground(ui_dim()),
@@ -629,14 +689,16 @@ fn workroom_activity(
     ui_divider_soft(),
     @views.padding_edges(
       @views.column(body, spacing=0.0, align=@style.CrossAlign::Start).frame(
-        width=683.0,
+        width=workroom_inner_width(),
       ),
       top=12.0,
       right=0.0,
       bottom=0.0,
       left=0.0,
     ),
-  ], spacing=0.0, align=@style.CrossAlign::Start).frame(width=683.0)
+  ], spacing=0.0, align=@style.CrossAlign::Start).frame(
+    width=workroom_inner_width(),
+  )
 }
 
 ///|
@@ -658,7 +720,9 @@ fn workroom_thread(
         8.5,
       ),
       ui_divider_soft(),
-    ], spacing=7.0, align=@style.CrossAlign::Start).frame(width=683.0),
+    ], spacing=7.0, align=@style.CrossAlign::Start).frame(
+      width=workroom_inner_width(),
+    ),
   )
   let has_chat = match chat {
     Some(record) => !record.is_fallback
@@ -677,7 +741,7 @@ fn workroom_thread(
                 "尚无消息。请在下方发送第一条消息。",
               )
             },
-            width=683.0,
+            width=workroom_inner_width(),
             align=@core.TextAlign::TextStart,
             wrap=true,
           ).font(ui_font(12.0, 400)).foreground(ui_dim()),
@@ -711,7 +775,7 @@ fn workroom_thread(
                 "This Chat has no running Agent session.",
                 "此对话没有运行中的智能体会话。",
               ),
-              width=683.0,
+              width=workroom_inner_width(),
               align=@core.TextAlign::TextStart,
               wrap=true,
             ).font(ui_font(10.0, 400)).foreground(ui_muted()),
@@ -721,8 +785,12 @@ fn workroom_thread(
                 ChatStartSession,
               ),
               @views.spacer(weight=1.0),
-            ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=683.0),
-          ], spacing=6.0, align=@style.CrossAlign::Start).frame(width=683.0),
+            ], spacing=8.0, align=@style.CrossAlign::Center).frame(
+              width=workroom_inner_width(),
+            ),
+          ], spacing=6.0, align=@style.CrossAlign::Start).frame(
+            width=workroom_inner_width(),
+          ),
         )
       }
   } else {
@@ -754,29 +822,33 @@ fn workroom_thread(
             "There is no Chat projection or Agent session yet. Start one below; this window will not invent a history.",
             "尚无对话投影或智能体会话。请在下方开始；此窗口不会编造历史。",
           ),
-          width=683.0,
+          width=workroom_inner_width(),
           align=@core.TextAlign::TextStart,
           wrap=true,
         ).font(ui_font(11.0, 400)).foreground(ui_muted()),
         @views.row([
           ui_primary(tr(model.lang, "New Chat", "新对话"), NewChat),
           @views.spacer(weight=1.0),
-        ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=683.0),
-      ], spacing=8.0, align=@style.CrossAlign::Start).frame(width=683.0),
+        ], spacing=8.0, align=@style.CrossAlign::Center).frame(
+          width=workroom_inner_width(),
+        ),
+      ], spacing=8.0, align=@style.CrossAlign::Start).frame(
+        width=workroom_inner_width(),
+      ),
     )
   }
   @views.scroll_view(
     @views.padding_edges(
       @views.column(entries, spacing=18.0, align=@style.CrossAlign::Start).frame(
-        width=683.0,
+        width=workroom_inner_width(),
       ),
       top=18.0,
       right=28.0,
       bottom=12.0,
       left=28.0,
     ),
-    width=739.0,
-    height=444.0,
+    width=workroom_column_width(),
+    height=workroom_thread_height(),
     request=@core.ScrollRequest::new(
       id=model.scroll_epoch + 101,
       offset=@core.Point::new(x=0.0, y=0.0),
@@ -789,11 +861,11 @@ fn workroom_thread(
 fn workroom_new_chat_footer(model : Model) -> @moui.View[Msg] {
   let draft = model.chat_draft
   let message = if draft.message != "" {
-    ui_muted_wrapped(draft.message, 683.0)
+    ui_muted_wrapped(draft.message, workroom_inner_width())
   } else if model.chat_error != "" {
     @views.text(
       model.chat_error,
-      width=683.0,
+      width=workroom_inner_width(),
       align=@core.TextAlign::TextStart,
       wrap=true,
     ).font(ui_font(10.0, 400)).foreground(ui_danger())
@@ -821,9 +893,13 @@ fn workroom_new_chat_footer(model : Model) -> @moui.View[Msg] {
           ui_ghost(tr(model.lang, "Cancel", "取消"), CancelNewChat),
           @views.spacer(weight=1.0),
           ui_mono(tr(model.lang, "host RPC", "主机 RPC"), 8.5),
-        ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=683.0),
+        ], spacing=8.0, align=@style.CrossAlign::Center).frame(
+          width=workroom_inner_width(),
+        ),
         message,
-      ], spacing=8.0, align=@style.CrossAlign::Start).frame(width=683.0),
+      ], spacing=8.0, align=@style.CrossAlign::Start).frame(
+        width=workroom_inner_width(),
+      ),
       top=12.0,
       right=28.0,
       bottom=16.0,
@@ -921,7 +997,7 @@ fn workroom_new_chat_form(model : Model) -> @moui.View[Msg] {
           "No Bot has active membership evidence in this Project. The host exposes no project.membership.list RPC, so this window will not guess; choose No project in the Bot view.",
           "没有 Bot 在此项目中有有效成员证据。主机未暴露 project.membership.list RPC，因此此窗口不会猜测；请在 Bot 视图选择“无项目”。",
         ),
-        width=683.0,
+        width=workroom_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(10.0, 400)).foreground(ui_warning()),
@@ -934,7 +1010,7 @@ fn workroom_new_chat_form(model : Model) -> @moui.View[Msg] {
         "Bot, Project, Workspace and Agent are selected by name. No bot_/cht_/asn_/ws_ id needs to be typed.",
         "Bot、项目、工作区和智能体均按名称选择，无需输入 bot_/cht_/asn_/ws_ 原始 ID。",
       ),
-      width=683.0,
+      width=workroom_inner_width(),
       align=@core.TextAlign::TextStart,
       wrap=true,
     ).font(ui_font(9.5, 400)).foreground(ui_dim()),
@@ -942,15 +1018,15 @@ fn workroom_new_chat_form(model : Model) -> @moui.View[Msg] {
   @views.scroll_view(
     @views.padding_edges(
       @views.column(fields, spacing=15.0, align=@style.CrossAlign::Start).frame(
-        width=683.0,
+        width=workroom_inner_width(),
       ),
       top=18.0,
       right=28.0,
       bottom=12.0,
       left=28.0,
     ),
-    width=739.0,
-    height=444.0,
+    width=workroom_column_width(),
+    height=workroom_thread_height(),
     request=@core.ScrollRequest::new(
       id=model.scroll_epoch + 102,
       offset=@core.Point::new(x=0.0, y=0.0),
@@ -968,8 +1044,8 @@ fn workroom_new_chat_page(model : Model) -> @moui.View[Msg] {
     workroom_new_chat_form(model),
     workroom_new_chat_footer(model),
   ], spacing=0.0, align=@style.CrossAlign::Start).frame(
-    width=739.0,
-    height=712.0,
+    width=workroom_column_width(),
+    height=ui_scroll_height.val,
   )
 }
 
@@ -1092,7 +1168,7 @@ fn workroom_composer(
     feedback.push(
       @views.text(
         model.chat_error,
-        width=683.0,
+        width=workroom_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(9.5, 400)).foreground(ui_danger()),
@@ -1104,7 +1180,7 @@ fn workroom_composer(
     @views.padding_edges(
       @views.column([
         @views.row(meta, spacing=8.0, align=@style.CrossAlign::Center).frame(
-          width=683.0,
+          width=workroom_inner_width(),
         ),
         @views.column(feedback, spacing=3.0, align=@style.CrossAlign::Start),
         @views.text_area(
@@ -1119,13 +1195,15 @@ fn workroom_composer(
           lines=3,
           variant=@style.TextFieldVariant::Filled,
           theme=field_theme(),
-          width=683.0,
+          width=workroom_inner_width(),
           line_height=20.0,
         ),
         @views.row(tools, spacing=7.0, align=@style.CrossAlign::Center).frame(
-          width=683.0,
+          width=workroom_inner_width(),
         ),
-      ], spacing=7.0, align=@style.CrossAlign::Start).frame(width=683.0),
+      ], spacing=7.0, align=@style.CrossAlign::Start).frame(
+        width=workroom_inner_width(),
+      ),
       top=10.0,
       right=28.0,
       bottom=16.0,
@@ -1578,7 +1656,7 @@ fn workroom_detail_rail(
       @views.scroll_view(
         body,
         width=258.0,
-        height=678.0,
+        height=workroom_rail_scroll_height(),
         request=@core.ScrollRequest::new(
           id=model.scroll_epoch + 201,
           offset=@core.Point::new(x=0.0, y=0.0),
@@ -1591,7 +1669,7 @@ fn workroom_detail_rail(
       left=17.0,
     ),
     width=292.0,
-    height=712.0,
+    height=ui_scroll_height.val,
     background=ui_rail(),
     padding=0.0,
   )
@@ -1610,23 +1688,23 @@ fn workroom_page(model : Model) -> @moui.View[Msg] {
       workroom_thread(model, chat, bot),
       workroom_composer(model, bot),
     ], spacing=0.0, align=@style.CrossAlign::Start).frame(
-      width=739.0,
-      height=712.0,
+      width=workroom_column_width(),
+      height=ui_scroll_height.val,
     )
   }
   let rail = workroom_detail_rail(model, chat, bot)
   let split = @views.row([
     work_column,
-    ui_vertical_rule(712.0),
+    ui_vertical_rule(ui_scroll_height.val),
     rail,
   ], spacing=0.0, align=@style.CrossAlign::Start).frame(
-    width=1032.0,
-    height=712.0,
+    width=ui_main_width.val,
+    height=ui_scroll_height.val,
   )
   @views.container(
     split,
-    width=1032.0,
-    height=712.0,
+    width=ui_main_width.val,
+    height=ui_scroll_height.val,
     background=ui_paper(),
     padding=0.0,
   )

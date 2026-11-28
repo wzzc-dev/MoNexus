@@ -7,10 +7,10 @@ fn float_test_base_model() -> Model {
 ///|
 fn float_test_harness(model : Model) -> @test_support.WidgetHarness {
   @test_support.WidgetHarness::from_program(
-    program=@moui.Program::new(
+    program=@moui.Program::new_with_environment(
       init=() => (model, @moui.Effect::none()),
       update=(current, msg) => (update(current, msg), @moui.Effect::none()),
-      view~,
+      view=(model, environment) => view(model, environment),
     ),
     width=1280.0,
     height=800.0,
@@ -23,14 +23,14 @@ fn float_test_captured_harness(
 ) -> (@test_support.WidgetHarness, Ref[Model]) {
   let cell : Ref[Model] = Ref(model)
   let harness = @test_support.WidgetHarness::from_program(
-    program=@moui.Program::new(
+    program=@moui.Program::new_with_environment(
       init=() => (model, @moui.Effect::none()),
       update=(current, msg) => {
         let next = update(current, msg)
         cell.val = next
         (next, @moui.Effect::none())
       },
-      view~,
+      view=(model, environment) => view(model, environment),
     ),
     width=1280.0,
     height=800.0,

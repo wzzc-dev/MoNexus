@@ -1,11 +1,11 @@
 # Desktop workroom visual system
 
-The MoNexus desktop window is a fixed 1280×800 workroom. Two quiet islands sit
-on a visible frame: a 224pt identity/sidebar island and a 1032pt main island.
-The main island contains the Chat surface and, attached to its right edge by a
-hairline, the Chat details rail. Chat is the product surface; Bot is identity;
-Project, Workspace, Machine, Executor and AgentSession are context around the
-current Chat.
+The MoNexus desktop workroom uses 1280×800 as its reference window. Two quiet
+islands sit on a visible frame: a 224pt identity/sidebar island and a main island
+capped at 1032pt. The main island contains the Chat surface and, attached to its
+right edge by a hairline, the Chat details rail. Chat is the product surface;
+Bot is identity; Project, Workspace, Machine, Executor and AgentSession are
+context around the current Chat.
 
 Light is the product default. Dark mode remains a complete palette and the
 Settings page can flip it at runtime. Theme and language choices persist
@@ -131,7 +131,14 @@ macOS and Linux. Host-returned diagnostics are shown verbatim.
 
 ## Shell metrics
 
-The window is fixed at 1280×800; nothing horizontally scrolls or clips.
+The shell tracks the runtime viewport. The sidebar is always 224pt; the main
+island is `min(1032, window_width − 240)`, where 240 is the sidebar plus the 8pt
+left margin and 8pt island gap. The 1280×800 reference therefore keeps the
+1032pt main island, while the owner's 1248×823 window gives it 1008pt and no
+control or rail is clipped. Heights derive from the viewport after the same 8pt
+outer margin. Nothing horizontally scrolls.
+
+The table below is the 1280×800 reference geometry.
 
 | Metric | Value |
 | --- | --- |
@@ -143,7 +150,8 @@ The window is fixed at 1280×800; nothing horizontally scrolls or clips.
 | Top bar | 1032×44 |
 | Main body | 1032×712 |
 | Status bar | 1032×26 |
-| Workroom split | 739 work column + 1px rule + 292 details rail |
+| Workroom split (1280) | 739 work column + 1px rule + 292 details rail |
+| Workroom split (1248) | 715 work column + 1px rule + 292 details rail |
 | Details rail inner | 258 scroller, 17pt padding |
 | Work header | 739×96 |
 | Thread viewport | 739×444 |
@@ -229,8 +237,9 @@ cards.
   row with a Manage link until a typed Bot-to-project projection exists.
 
 The same paper/ink/stone tokens and hairline/row system are used throughout.
-The left work-item pane is 430pt and the right detail pane 601pt inside the
-main island; both scroll independently.
+The left work-item pane is 430pt and the right detail pane takes the rest of the
+main island (601pt at the 1280 reference, 577pt at 1248); both scroll
+independently.
 
 ## Floating workspace
 
@@ -240,7 +249,7 @@ route; the overlay state stays in the model, so active tab, notes, open tabs,
 size and position are retained. There is one overlay instance and no
 top-level navigation entry.
 
-- Default geometry is 904×620 at `(248, 64)` in the fixed 1280×800 window.
+- Default geometry is 904×620 at `(248, 64)` in the 1280×800 reference window.
   Dragging is clamped to `x ≥ 240`, `y ≥ 56`; resizing is clamped to 480–1024
   wide and 340–736 high, with the bottom-right edge kept inside the window.
   The closed overlay never covers the sidebar's Chat rows.
@@ -388,5 +397,7 @@ git diff --check
 
 Acceptance renders the real desktop scenes at 1280×800 in both modes for the
 workroom, Inbox, Manage (Projects/Machines), Tasks and Settings, plus the Bot
-page. The screenshots are review artifacts, not committed assets; the exact
-path from the run is recorded in the PR evidence.
+page. Live review also covers the owner's 1248×823 window in Chinese with the
+same seeded state, for the workroom and Bot page in both modes. The screenshots
+are review artifacts, not committed assets; the exact paths from the run are
+recorded in the PR evidence.

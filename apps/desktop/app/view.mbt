@@ -1,10 +1,11 @@
 ///|
 /// The MoNexus desktop shell and its eight pages.
 ///
-/// Layout contract (1280x800): 8pt outer margin, two islands with an 8pt gap.
-/// The 224pt sidebar owns navigation; the 1032pt main island is a 44pt top
-/// bar, a scrolling 992pt body, and a 26pt status bar. Every colour, font and
-/// radius comes from `theme.mbt`/`ui.mbt`; this file only composes.
+/// Layout at the 1280x800 reference: 8pt outer margin, two islands with an 8pt
+/// gap. The 224pt sidebar owns navigation; the main island is capped at 1032pt
+/// and takes the remaining viewport width on narrower windows, with a 44pt top
+/// bar, a 992pt body rhythm and a 26pt status bar. Every colour, font and radius
+/// comes from `theme.mbt`/`ui.mbt`; this file only composes.
 
 ///|
 using @views {
@@ -862,8 +863,13 @@ fn sidebar(model : Model) -> @moui.View[Msg] {
       bottom=8.0,
       left=12.0,
     ),
-  ], spacing=0.0).frame(width=ui_sidebar_width, height=ui_sidebar_height)
-  ui_panel(content, width=ui_sidebar_width, height=ui_sidebar_height, fill=ui_rail())
+  ], spacing=0.0).frame(width=ui_sidebar_width, height=ui_sidebar_height.val)
+  ui_panel(
+    content,
+    width=ui_sidebar_width,
+    height=ui_sidebar_height.val,
+    fill=ui_rail(),
+  )
 }
 
 ///|
@@ -1104,7 +1110,7 @@ fn top_bar(model : Model) -> @moui.View[Msg] {
         refresh_slot,
         actions,
       ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=992.0),
-      horizontal=20.0,
+      horizontal=ui_body_padding.val,
     ),
     height=ui_topbar_height,
     background=clear_color(),
@@ -1138,7 +1144,7 @@ fn status_bar(model : Model) -> @moui.View[Msg] {
         spacer(weight=1.0),
         ui_mono(ui_truncate(right, 520.0, 9.5), 9.5),
       ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=992.0),
-      horizontal=20.0,
+      horizontal=ui_body_padding.val,
     ),
     height=ui_statusbar_height,
     background=clear_color(),
@@ -3410,24 +3416,27 @@ fn main_island(model : Model) -> @moui.View[Msg] {
     // page scroll would nest two vertical scrollers.
     padding_edges(
       page_body(model),
-      top=ui_body_padding,
-      right=ui_body_padding,
-      bottom=ui_body_padding,
-      left=ui_body_padding,
+      top=ui_body_padding.val,
+      right=ui_body_padding.val,
+      bottom=ui_body_padding.val,
+      left=ui_body_padding.val,
     )
   } else if model.page == Workroom || model.page == BotDetail {
-    page_body(model).frame(width=ui_main_width, height=ui_scroll_height)
+    page_body(model).frame(
+      width=ui_main_width.val,
+      height=ui_scroll_height.val,
+    )
   } else {
     scroll_view(
       padding_edges(
         page_body(model).frame(width=ui_body_width),
-        top=ui_body_padding,
-        right=ui_body_padding,
-        bottom=ui_body_padding,
-        left=ui_body_padding,
+        top=ui_body_padding.val,
+        right=ui_body_padding.val,
+        bottom=ui_body_padding.val,
+        left=ui_body_padding.val,
       ),
-      width=ui_main_width,
-      height=ui_scroll_height,
+      width=ui_main_width.val,
+      height=ui_scroll_height.val,
       request=@core.ScrollRequest::new(
         id=model.scroll_epoch,
         offset=@core.Point::new(x=0.0, y=0.0),
@@ -3441,17 +3450,25 @@ fn main_island(model : Model) -> @moui.View[Msg] {
     body,
     ui_divider(),
     status_bar(model),
-  ], spacing=0.0).frame(width=ui_main_width, height=ui_main_height)
+  ], spacing=0.0).frame(
+    width=ui_main_width.val,
+    height=ui_main_height.val,
+  )
   ui_panel(
     content,
-    width=ui_main_width,
-    height=ui_main_height,
+    width=ui_main_width.val,
+    height=ui_main_height.val,
     fill=ui_canvas(),
   )
 }
 
 ///|
-pub fn view(model : Model) -> @moui.View[Msg] {
+pub fn view(
+  model : Model,
+  environment : @core.ViewEnvironment,
+) -> @moui.View[Msg] {
+  let viewport = environment.viewport_size()
+  ui_apply_shell(viewport.width, viewport.height)
   // Repaint the whole window from the model's appearance before building any
   // child, so the hand-painted shell and MoUI controls agree on one palette.
   apply_theme_mode(model.theme_mode)
@@ -3461,8 +3478,8 @@ pub fn view(model : Model) -> @moui.View[Msg] {
   ], spacing=ui_gap, align=@style.CrossAlign::Start)
   let framed = container(
     shell,
-    width=ui_window_width,
-    height=ui_window_height,
+    width=ui_window_width.val,
+    height=ui_window_height.val,
     background=ui_frame(),
     padding=ui_margin,
   ).theme(app_theme())

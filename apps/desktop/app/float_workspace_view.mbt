@@ -1445,15 +1445,15 @@ fn float_window_layer(
   }
   let overlay = float_workspace_overlay(model)
   @views.stage(
-    width=ui_window_width,
-    height=ui_window_height,
+    width=ui_window_width.val,
+    height=ui_window_height.val,
     [
       @views.place(
         shell,
         x=0.0,
         y=0.0,
-        width=ui_window_width,
-        height=ui_window_height,
+        width=ui_window_width.val,
+        height=ui_window_height.val,
       ),
       @views.place(
         overlay,

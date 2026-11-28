@@ -1,16 +1,18 @@
 ///|
 /// Shell metrics and shared widgets.
 ///
-/// Every number here belongs to the fixed 1280x800 window contract: 8pt outer
-/// margin, 8pt island gap, 224pt sidebar, 44pt top bar, 26pt status bar. Views
-/// never re-derive these; they compose the helpers below so the eight pages
-/// read as one product.
+/// The design contract is an 8pt outer margin, 8pt island gap, 224pt sidebar,
+/// 44pt top bar and 26pt status bar. The main island keeps the 1032pt cap on
+/// wide windows and contracts to the remaining width on the owner's 1248pt
+/// window, so no right-hand control or rail is lost at the window edge. Views
+/// never re-derive these values; they read the metrics installed from the
+/// runtime viewport by `view`.
 
 ///|
-let ui_window_width : Double = 1280.0
+let ui_window_width : Ref[Double] = Ref(1280.0)
 
 ///|
-let ui_window_height : Double = 800.0
+let ui_window_height : Ref[Double] = Ref(800.0)
 
 ///|
 let ui_margin : Double = 8.0
@@ -25,13 +27,13 @@ let ui_island_radius : Double = 10.0
 let ui_sidebar_width : Double = 224.0
 
 ///|
-let ui_sidebar_height : Double = 784.0
+let ui_sidebar_height : Ref[Double] = Ref(784.0)
 
 ///|
-let ui_main_width : Double = 1032.0
+let ui_main_width : Ref[Double] = Ref(1032.0)
 
 ///|
-let ui_main_height : Double = 784.0
+let ui_main_height : Ref[Double] = Ref(784.0)
 
 ///|
 let ui_topbar_height : Double = 44.0
@@ -40,13 +42,37 @@ let ui_topbar_height : Double = 44.0
 let ui_statusbar_height : Double = 26.0
 
 ///|
-let ui_body_padding : Double = 20.0
+let ui_body_padding : Ref[Double] = Ref(20.0)
 
 ///|
 let ui_body_width : Double = 992.0
 
 ///|
-let ui_scroll_height : Double = 712.0
+let ui_scroll_height : Ref[Double] = Ref(712.0)
+
+///|
+/// Install the shell metrics for one viewport. The sidebar stays at its 224pt
+/// contract; the main island takes the rest of the width up to the 1032pt
+/// design cap. Page content keeps its 992pt rhythm, with the horizontal gutter
+/// tightening from 20pt to 8pt only when the window is narrower than 1280pt.
+fn ui_apply_shell(width : Double, height : Double) -> Unit {
+  let window_width = width.max(960.0)
+  let window_height = height.max(640.0)
+  let main_width = (window_width - ui_sidebar_width - 16.0).min(1032.0).max(720.0)
+  let main_height = (window_height - 2.0 * ui_margin).max(560.0)
+  let body_padding = ((main_width - 992.0) / 2.0).clamp(
+    min=8.0,
+    max=20.0,
+  )
+  ui_window_width.val = window_width
+  ui_window_height.val = window_height
+  ui_main_width.val = main_width
+  ui_main_height.val = main_height
+  ui_sidebar_height.val = main_height
+  ui_scroll_height.val =
+    (main_height - ui_topbar_height - ui_statusbar_height - 2.0).max(0.0)
+  ui_body_padding.val = body_padding
+}
 
 ///|
 /// Top-bar control rhythm. Search, floating workspace and overflow actions

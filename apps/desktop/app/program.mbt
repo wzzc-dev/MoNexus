@@ -33,7 +33,7 @@ pub fn program_with_preferences(
   startup : StartupTheme,
   language : StartupLanguage,
 ) -> @moui.Program[Model, Msg] {
-  @moui.Program::new(
+  @moui.Program::new_with_environment(
     init=() => {
       (
         Model::new_with_preferences(startup, language),
@@ -124,7 +124,7 @@ pub fn program_with_preferences(
       }
       (next, effect)
     },
-    view~,
+    view=(model, environment) => view(model, environment),
     subscriptions=fn(model) {
       @moui.Subscription::batch([
         terminal_poll_subscription(model),

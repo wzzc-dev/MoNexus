@@ -25,7 +25,7 @@ fn terminal_input_runtime_harness(
   saw_stop : Ref[Bool],
 ) -> @test_support.WidgetHarness {
   @test_support.WidgetHarness::from_program(
-    program=@moui.Program::new(
+    program=@moui.Program::new_with_environment(
       init=() => (model, @moui.Effect::none()),
       update=(current, msg) => {
         match msg {
@@ -34,7 +34,7 @@ fn terminal_input_runtime_harness(
         }
         (update(current, msg), @moui.Effect::none())
       },
-      view~,
+      view=(model, environment) => view(model, environment),
     ),
     width=1280.0,
     height=800.0,
