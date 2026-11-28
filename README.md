@@ -398,7 +398,7 @@ available:
 ```bash
 scripts/host_smoke.sh       # M1 host
 scripts/machine_smoke.sh    # M2 machines, temp sshd
-scripts/workspace_smoke.sh  # M3 workspace/worktree/lease/terminal, temp sshd
+scripts/workspace_smoke.sh  # M3 workspace/worktree/lease/terminal, native harness + temp sshd
 scripts/agent_smoke.sh      # M4 ACP session/permission/memory, mock adapter
 scripts/agent_ssh_smoke.sh  # PoC: mock ACP over ssh -T, temp sshd + temp keys
 scripts/task_smoke.sh       # M5 tasks/runs/evidence/search, temp sshd
