@@ -129,6 +129,11 @@ wait_exit() { # pid timeout_tenths
   return 1
 }
 
+# Read a file mode portably: GNU stat on Linux, BSD stat on macOS.
+file_mode() {
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || echo '?'
+}
+
 cleanup() {
   local pid
   for pid in ${PIDS[@]+"${PIDS[@]}"}; do
@@ -714,7 +719,7 @@ else
   fail B1 "pair with a one-time code stores a node token" "rc=$MAIN_PAIR_RC out=$MAIN_PAIR_OUT"
 fi
 if [ -f "$NODE_BASE/$MAIN_RID/token" ]; then
-  TOKEN_MODE="$(stat -c %a "$NODE_BASE/$MAIN_RID/token" 2>/dev/null || echo '?')"
+  TOKEN_MODE="$(file_mode "$NODE_BASE/$MAIN_RID/token")"
   eq B2 "node token file is 0600" "600" "$TOKEN_MODE"
   NODE_TOKEN="$(cat "$NODE_BASE/$MAIN_RID/token" 2>/dev/null)"
 else
