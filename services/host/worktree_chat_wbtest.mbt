@@ -702,7 +702,10 @@ async test "chat.agent_session.start runs in the selected worktree and refuses A
     attempt = attempt + 1
     @async.sleep(50)
   }
-  assert_true(transcript.contains("CWD=" + worktree.path))
+  let real_worktree_path = @fs.realpath(worktree.path) catch {
+    error => fail("cannot resolve worktree path: " + error.to_string())
+  }
+  assert_true(transcript.contains("CWD=" + real_worktree_path))
 
   let end_text = wt_host_call(
     state,
