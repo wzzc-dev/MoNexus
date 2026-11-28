@@ -442,6 +442,70 @@ fn field_theme() -> @core.Theme {
 }
 
 ///|
+/// Dense typography and padding for the floating note formatting strip. The
+/// palette and radii stay those of the app theme; only the control metrics
+/// shrink so twelve formatting actions fit the narrowest floating workspace.
+fn float_note_toolbar_theme() -> @core.Theme {
+  let base = app_theme()
+  let layout = base.layout_scale
+  let typography = base.typography
+  {
+    ..base,
+    layout_scale: {
+      ..layout,
+      control_height: 26.0,
+      control_padding_x: 6.0,
+    },
+    typography: {
+      ..typography,
+      control: ui_font(11.0, 500),
+    },
+  }
+}
+
+///|
+/// Formatting-strip button. Inactive controls are hairlines; the active
+/// source-mode control carries a quiet accent wash so the current view is
+/// visible without adding a second filled button to the pane.
+fn float_note_toolbar_button_style(active : Bool) -> @views.ButtonStyle {
+  let edge_color = if active { ui_accent() } else { ui_border() }
+  let edge = @core.BorderStyle::new(
+    brush=@core.Brush::solid(edge_color),
+    width=1.0,
+  )
+  let idle = if active {
+    @core.Brush::solid(ui_accent_soft())
+  } else {
+    transparent_brush()
+  }
+  let normal = @views.new_control_state_style(
+    foreground=if active { ui_text_color() } else { ui_muted() },
+    background=idle,
+    border=edge,
+    radius=3.0,
+  )
+  let hovered = @views.new_control_state_style(
+    foreground=ui_text_color(),
+    background=@core.Brush::solid(ui_hover()),
+    border=edge,
+    radius=3.0,
+  )
+  let pressed = @views.new_control_state_style(
+    foreground=ui_text_color(),
+    background=@core.Brush::solid(ui_surface_alt()),
+    border=edge,
+    radius=3.0,
+  )
+  let disabled = @views.new_control_state_style(
+    foreground=ui_dim(),
+    background=idle,
+    border=edge,
+    radius=3.0,
+  )
+  @views.ButtonStyle::new(normal~, hovered~, pressed~, disabled~)
+}
+
+///|
 fn ui_border_style(color : @core.Color, width : Double) -> @core.BorderStyle {
   @core.BorderStyle::new(brush=@core.Brush::solid(color), width~)
 }

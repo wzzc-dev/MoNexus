@@ -3,6 +3,7 @@ import {
   "wzzc-dev/moui/views/style" @style,
   "wzzc-dev/moui/core" @core,
   "wzzc-dev/moui",
+  "wzzc-dev/moui_richtext" @richtext,
   "monexus/contracts" @contracts,
   "monexus/host-client" @client,
   "moonbitlang/async",

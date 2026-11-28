@@ -93,6 +93,31 @@ pub(all) struct FloatNote {
   content : String
   state : FloatNoteState
   revision : Int
+  session : @richtext.MarkdownDocumentSession
+  selection : @richtext.MarkdownEditorSelection
+  source_mode : Bool
+}
+
+///|
+pub fn float_note_make(
+  id : String,
+  title : String,
+  file_name : String,
+  content : String,
+  state : FloatNoteState,
+  revision : Int,
+) -> FloatNote {
+  {
+    id,
+    title,
+    file_name,
+    content,
+    state,
+    revision,
+    session: @richtext.MarkdownDocumentSession::new(content),
+    selection: { caret: 0, selection: None },
+    source_mode: false,
+  }
 }
 
 ///|
@@ -156,14 +181,14 @@ pub(all) enum FloatPersistRequest {
 
 ///|
 pub fn float_workspace_new(lang : Lang) -> FloatWorkspace {
-  let note = {
-    id: "n1",
-    title: tr(lang, "Note 1", "笔记 1"),
-    file_name: "note-n1.md",
-    content: "",
-    state: FloatNoteSaved,
-    revision: 0,
-  }
+  let note = float_note_make(
+    "n1",
+    tr(lang, "Note 1", "笔记 1"),
+    "note-n1.md",
+    "",
+    FloatNoteSaved,
+    0,
+  )
   let tab = { id: "tab-n1", kind: FloatNote, note_id: "n1" }
   {
     open: false,
@@ -380,14 +405,14 @@ pub fn float_new_note(workspace : FloatWorkspace, lang : Lang) -> FloatWorkspace
     Some(name) => name
     None => "note-fallback.md"
   }
-  let note = {
-    id: note_id,
-    title: tr(lang, "Note ", "笔记 ") + sequence.to_string(),
+  let note = float_note_make(
+    note_id,
+    tr(lang, "Note ", "笔记 ") + sequence.to_string(),
     file_name,
-    content: "",
-    state: FloatNoteSaving,
-    revision: 1,
-  }
+    "",
+    FloatNoteSaving,
+    1,
+  )
   let tab = {
     id: "tab-" + note_id,
     kind: FloatNote,
@@ -611,27 +636,34 @@ pub fn decode_float_workspace(
   } else {
     let mut index = 0
     for meta in note_meta {
-      tabs.push(float_note_tab({
-        id: meta.id,
-        title: meta.title,
-        file_name: meta.file_name,
-        content: "",
-        state: FloatNoteSaved,
-        revision: 0,
-      }, index))
+      tabs.push(
+        float_note_tab(
+          float_note_make(
+            meta.id,
+            meta.title,
+            meta.file_name,
+            "",
+            FloatNoteSaved,
+            0,
+          ),
+          index,
+        ),
+      )
       index = index + 1
     }
   }
   let notes : Array[FloatNote] = []
   for meta in note_meta {
-    notes.push({
-      id: meta.id,
-      title: meta.title,
-      file_name: meta.file_name,
-      content: "",
-      state: FloatNoteSaved,
-      revision: 0,
-    })
+    notes.push(
+      float_note_make(
+        meta.id,
+        meta.title,
+        meta.file_name,
+        "",
+        FloatNoteSaved,
+        0,
+      ),
+    )
   }
   let active_tab = match @contracts.string_field(object, "active_tab") {
     Some(value) => value
@@ -719,14 +751,16 @@ pub async fn read_float_restore_in(
             if exists {
               let content = @fs.read_file(path).text() catch { _ => "" }
               if float_note_title_problem(meta.title) is None {
-                notes.push({
-                  id: meta.id,
-                  title: meta.title,
-                  file_name: meta.file_name,
-                  content,
-                  state: FloatNoteSaved,
-                  revision: 0,
-                })
+                notes.push(
+                  float_note_make(
+                    meta.id,
+                    meta.title,
+                    meta.file_name,
+                    content,
+                    FloatNoteSaved,
+                    0,
+                  ),
+                )
               }
             }
           }
@@ -760,14 +794,14 @@ pub async fn read_float_restore_in(
                   next_id = sequence + 1
                 }
               }
-              let note = {
-                id: stem,
-                title: stem,
-                file_name: name,
+              let note = float_note_make(
+                stem,
+                stem,
+                name,
                 content,
-                state: FloatNoteSaved,
-                revision: 0,
-              }
+                FloatNoteSaved,
+                0,
+              )
               tabs.push(float_note_tab(note, index))
               notes.push(note)
               index = index + 1
@@ -989,6 +1023,11 @@ pub fn float_persist_requests(
             Some(write) => requests.push(FloatNoteRequest(write))
             None => ()
           }
+        None => ()
+      }
+    FloatNoteEdit(note_id, _) | FloatNoteCommand(note_id, _) =>
+      match float_note_write_for(workspace, note_id) {
+        Some(write) => requests.push(FloatNoteRequest(write))
         None => ()
       }
     FloatNewNote =>

@@ -89,10 +89,20 @@ pub fn program_with_preferences(
               run= _dispatch => enqueue_language_choice(lang),
             ),
           )
-        FloatNoteContentDraft(_) | FloatNoteTitleDraft(_) | FloatNewNote |
-        ToggleFloatWorkspace | CloseFloatWorkspace | FloatSelectTab(_) |
-        FloatCloseTab(_) | FloatNewAgent | FloatNewTerminal | FloatMenu(_) |
-        FloatHeaderDrag(_, _, _) | FloatResizeDrag(_, _, _) => {
+        FloatNoteContentDraft(_)
+        | FloatNoteTitleDraft(_)
+        | FloatNoteEdit(_, _)
+        | FloatNoteCommand(_, _)
+        | FloatNewNote
+        | ToggleFloatWorkspace
+        | CloseFloatWorkspace
+        | FloatSelectTab(_)
+        | FloatCloseTab(_)
+        | FloatNewAgent
+        | FloatNewTerminal
+        | FloatMenu(_)
+        | FloatHeaderDrag(_, _, _)
+        | FloatResizeDrag(_, _, _) => {
           let requests = float_persist_requests(next.float, msg)
           if !requests.is_empty() {
             effects.push(
@@ -155,6 +165,61 @@ pub fn program_with_preferences(
         ),
       )
     }
+    for command in float_note_formatting_commands(model) {
+      commands.push(command)
+    }
     commands
   })
+}
+
+///|
+/// Bold and italic shortcuts stay scoped to the visible Note tab. Both the
+/// macOS meta chord and the Windows/Linux control chord dispatch the same
+/// formatting transaction.
+pub fn float_note_formatting_commands(
+  model : Model,
+) -> Array[@core.ProgramCommand[Msg]] {
+  let commands : Array[@core.ProgramCommand[Msg]] = []
+  if model.float.open && float_active_kind(model.float) is Some(FloatNote) {
+    match float_active_note(model.float) {
+      Some(note) => {
+        let shortcuts : Array[@core.KeyModifiers] = [
+          @core.KeyModifiers::new(meta=true),
+          @core.KeyModifiers::new(control=true),
+        ]
+        let formatting : Array[
+          (String, String, @richtext.MarkdownEditorCommand),
+        ] = [
+          (
+            tr(model.lang, "Bold", "粗体"),
+            "b",
+            @richtext.MarkdownEditorCommand::Bold,
+          ),
+          (
+            tr(model.lang, "Italic", "斜体"),
+            "i",
+            @richtext.MarkdownEditorCommand::Italic,
+          ),
+        ]
+        for item in formatting {
+          let (label, key, command) = item
+          for modifiers in shortcuts {
+            commands.push(
+              @core.ProgramCommand::new(
+                command=@core.ActionCommand::new(
+                  intent=@core.Activate,
+                  label~,
+                  shortcut=Some(@core.KeyboardShortcut::new(key~, modifiers~)),
+                  group=tr(model.lang, "Note formatting", "笔记格式"),
+                ),
+                message=FloatNoteCommand(note.id, command),
+              ),
+            )
+          }
+        }
+      }
+      None => ()
+    }
+  }
+  commands
 }

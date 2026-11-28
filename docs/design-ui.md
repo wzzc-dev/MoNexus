@@ -273,18 +273,37 @@ top-level navigation entry.
   disabled `浏览器 · 即将支持 / Later` Browser row. The Browser row has no
   message, cannot open or create a tab, and is explicitly marked later-only
   for this slice.
-- Notes are plain text/Markdown with a visible title and local path. Edits
-  autosave through a 300ms debounce and show `Saving… / Saved / Save failed`.
-  One file per note lives at `<config>/floating/notes/note-<safe-id>.md`;
-  the small tab/geometry index is `<config>/floating/workspace.json`. The
-  config root follows the existing preference convention:
-  `$MONEXUS_CONFIG_DIR`, else `$XDG_CONFIG_HOME/monexus`, else
-  `$HOME/.config/monexus`. Writes are atomic temporary-file-plus-rename with
-  mode 0600; the notes directory is created 0700. File names are stable,
-  restricted to safe characters, and titles/paths are validated so a note
-  cannot escape the notes directory. Notes contain only user-entered local
-  text; the app never copies credentials, tokens, ids or diagnostics into
-  note files.
+- Notes open in a formatted Markdown editor with a visible title and local
+  path. Headings, emphasis, strikethrough, inline code, links, lists, quotes,
+  fenced code and horizontal rules render in place while remaining directly
+  editable. A compact formatting strip provides H1/H2/H3, bold, italic,
+  unordered and ordered lists, quote, inline code, code block and link
+  actions. `Cmd/Ctrl+B` and `Cmd/Ctrl+I` format the current selection without
+  taking focus away from the note. The `Markdown` control switches the same
+  note between the formatted and source views; both views edit one canonical
+  Markdown document, so switching never drops content or unsupported syntax.
+  Typing Markdown block prefixes (`# `, `## `, `- `, `1. `, `> `) converts the
+  current block, and the editor suspends rendering updates while an IME
+  composition is in progress so Chinese composition does not lose text.
+- Note edits autosave through a 300ms debounce and show
+  `Saving… / Saved / Save failed`. One file per note lives at
+  `<config>/floating/notes/note-<safe-id>.md`; the small tab/geometry index is
+  `<config>/floating/workspace.json`. The config root follows the existing
+  preference convention: `$MONEXUS_CONFIG_DIR`, else
+  `$XDG_CONFIG_HOME/monexus`, else `$HOME/.config/monexus`. Writes are atomic
+  temporary-file-plus-rename with mode 0600; the notes directory is created
+  0700. File names are stable, restricted to safe characters, and titles/paths
+  are validated so a note cannot escape the notes directory. Notes contain
+  only user-entered local text; the app never copies credentials, tokens, ids
+  or diagnostics into note files.
+- The formatted editor keeps a long-lived `MarkdownDocumentSession` per note,
+  while a small pure helper layer owns source replacement, command application,
+  selection clamping and source-mode state. The view only forwards input,
+  selection and rendering; Markdown ↔ rich-model conversion, toolbar behavior,
+  source synchronization and autosave intent stay unit-testable without
+  mounting the UI. The `.md` file remains canonical, so restoring an older
+  note and switching views do not rewrite unsupported HTML, footnote or table
+  syntax.
 - The overlay uses the same paper/ink/stone tokens, 1px hairlines, 8pt
   spacing, 3–6px control radii (10px for the overlay shell), and one
   restrained elevation shadow. It does not use glass, glow, gradients,
