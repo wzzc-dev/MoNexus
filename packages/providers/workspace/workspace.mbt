@@ -1248,6 +1248,23 @@ fn ssh_tty_argv(
 }
 
 ///|
+/// Wrap an `ssh -tt` argv so it runs behind a local PTY. The shell puts the
+/// slave PTY into raw mode before exec: without it the local terminal starts
+/// canonical with echo, which line-buffers input and duplicates local echo in
+/// front of the remote terminal's echo.
+fn ssh_pty_argv(argv : Array[String]) -> Array[String] {
+  let wrapped : Array[String] = [
+    "sh",
+    "-c",
+    "stty raw -echo 2>/dev/null || true; exec \"$0\" \"$@\"",
+  ]
+  for arg in argv {
+    wrapped.push(arg)
+  }
+  wrapped
+}
+
+///|
 fn remote_terminal_command(
   root : String,
   session_name : String,
@@ -1286,90 +1303,100 @@ fn remote_terminal_command(
 }
 
 ///|
-async fn run_ssh_terminal(
-  ws : SshWorkspace,
-  session_name : String,
-  command : String,
+/// Run an SSH terminal through a local PTY. Resizing that PTY sends SIGWINCH
+/// to `ssh`, which forwards the window-change event to the remote PTY.
+pub async fn run_ssh_pty_terminal(
+  target : @ssh.SshTarget,
+  remote_command : String,
+  rows : Int32,
+  cols : Int32,
   input : @aqueue.Queue[TerminalInput],
   output : @aqueue.Queue[TerminalEvent],
 ) -> Unit {
-  let remote = remote_terminal_command(ws.root, session_name, command)
-  let argv = ssh_tty_argv(ws.target, remote)
-  let (stdin, stdin_writer) = @process.write_to_process() catch {
-    error => {
-      output.put(Data("terminal: " + error.to_string() + "\n")) catch { _ => () }
-      output.put(Eof) catch { _ => () }
-      output.close()
-      return
-    }
-  }
-  let (stdout_reader, stdout_pipe) = @process.read_from_process() catch {
-    _ => {
-      output.put(Eof) catch { _ => () }
-      output.close()
-      return
-    }
-  }
-  let (stderr_reader, stderr_pipe) = @process.read_from_process() catch {
-    _ => {
-      output.put(Eof) catch { _ => () }
-      output.close()
-      return
-    }
+  let argv = ssh_pty_argv(ssh_tty_argv(target, remote_command))
+  let args : Array[StringView] = []
+  for index in 1..<argv.length() {
+    args.push(argv[index].to_string_view())
   }
   @async.with_task_group(async fn(group) {
-    let exit = group.spawn(() => {
-      @process.run(
-        argv[0],
-        argv[1:].to_owned(),
-        stdin=stdin,
-        stdout=stdout_pipe,
-        stderr=stderr_pipe,
-      )
-    })
-    group.spawn_bg(() => pump_process_reader(stdout_reader, output))
-    group.spawn_bg(() => pump_process_reader(stderr_reader, output))
+    let pty = @pty.spawn(
+      group,
+      argv[0],
+      args,
+      rows=rows,
+      cols=cols,
+      no_wait=true,
+    ) catch {
+      error => {
+        output.put(
+          Data("terminal: cannot spawn ssh: " + error.to_string() + "\n"),
+        ) catch { _ => () }
+        output.put(Eof) catch { _ => () }
+        group.return_immediately(())
+        return
+      }
+    }
     group.spawn_bg(() => {
-      let _ = exit.wait() catch { _ => 0 }
+      for ;; {
+        let chunk = pty.read_some() catch {
+          error => {
+            output.put(
+              Data("terminal: ssh read failed: " + error.to_string() + "\n"),
+            ) catch { _ => () }
+            break
+          }
+        }
+        match chunk {
+          Some(bytes) => {
+            let text = @utf8.decode_lossy(bytes[:], ignore_bom=false)
+            let clean = sanitize_terminal(text)
+            if clean != "" {
+              output.put(Data(clean)) catch { _ => break }
+            }
+          }
+          None => break
+        }
+      }
       output.put(Eof) catch { _ => () }
       group.return_immediately(())
     })
     for ;; {
       let item = input.get() catch { _ => break }
       match item {
-        Data(text) => stdin_writer.write(text) catch { _ => break }
-        // ssh(1) is driven through ordinary pipes here, so there is no SSH
-        // channel on which to send a window-change request. Accept and ignore
-        // resize input rather than tearing down a working session.
-        Resize(_rows, _cols) => ()
+        Data(text) =>
+          pty.write(text) catch {
+            error => {
+              output.put(
+                Data("terminal: ssh write failed: " + error.to_string() + "\n"),
+              ) catch { _ => () }
+              group.return_immediately(())
+              break
+            }
+          }
+        Resize(rows, cols) =>
+          pty.resize(rows~, cols~) catch {
+            _ => ()
+          }
         Close => break
       }
     }
   })
-  stdin_writer.close()
   output.put(Eof) catch { _ => () }
   output.close()
 }
 
 ///|
-async fn pump_process_reader(
-  reader : @process.ReadFromProcess,
+async fn run_ssh_terminal(
+  ws : SshWorkspace,
+  session_name : String,
+  command : String,
+  rows : Int32,
+  cols : Int32,
+  input : @aqueue.Queue[TerminalInput],
   output : @aqueue.Queue[TerminalEvent],
 ) -> Unit {
-  for ;; {
-    let chunk = reader.read_some() catch { _ => break }
-    match chunk {
-      Some(bytes) => {
-        let text = @utf8.decode_lossy(bytes[:], ignore_bom=false)
-        let clean = sanitize_terminal(text)
-        if clean != "" {
-          output.put(Data(clean)) catch { _ => break }
-        }
-      }
-      None => break
-    }
-  }
-  reader.close()
+  let remote = remote_terminal_command(ws.root, session_name, command)
+  run_ssh_pty_terminal(ws.target, remote, rows, cols, input, output)
 }
 
 ///|
@@ -1389,7 +1416,7 @@ pub async fn WorkspaceProvider::run_terminal(
     Local(local) =>
       run_local_terminal(local, command, rows, cols, input, output)
     Ssh(remote) =>
-      run_ssh_terminal(remote, session_name, command, input, output)
+      run_ssh_terminal(remote, session_name, command, rows, cols, input, output)
   }
 }
 

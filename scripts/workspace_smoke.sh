@@ -46,6 +46,99 @@ eq() { # label expected actual
   if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected: $2)" "$3"; fi
 }
 
+POLL_TEXT=""
+POLL_CURSOR=0
+POLL_SIZE=""
+poll_terminal_text() { # label session_id cursor needle [timeout_seconds]
+  local label="$1" session="$2" cursor="$3" needle="$4" timeout="${5:-15}"
+  local deadline=$((SECONDS + timeout))
+  local payload="" text="" next="" collected=""
+  POLL_TEXT=""
+  POLL_CURSOR="$cursor"
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    payload="$(rpc terminal.read "$(jq -n --arg id "$session" --argjson cursor "$cursor" '{session_id:$id,cursor:$cursor}')")"
+    text="$(printf '%s' "$payload" | jq -r '.text // empty' 2>/dev/null)"
+    next="$(printf '%s' "$payload" | jq -r '.cursor // empty' 2>/dev/null)"
+    if [ -n "$next" ]; then
+      cursor="$next"
+      POLL_CURSOR="$next"
+    fi
+    if [ -n "$text" ]; then
+      collected="${collected}${text}"
+      POLL_TEXT="$collected"
+      if printf '%s' "$collected" | grep -Fq -- "$needle"; then
+        pass "$label"
+        return 0
+      fi
+    fi
+    sleep 0.2
+  done
+  fail "$label (timeout after ${timeout}s)" "$payload"
+  return 1
+}
+
+retry_terminal_write() { # label session_id cursor data needle [timeout_seconds]
+  local label="$1" session="$2" cursor="$3" data="$4" needle="$5" timeout="${6:-15}"
+  local deadline=$((SECONDS + timeout))
+  local attempt_deadline payload="" text="" next="" collected=""
+  POLL_TEXT=""
+  POLL_CURSOR="$cursor"
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    rpc terminal.write "$(jq -n --arg id "$session" --arg data "$data" '{session_id:$id,data:$data}')" >/dev/null
+    collected=""
+    attempt_deadline=$((SECONDS + 2))
+    while [ "$SECONDS" -lt "$attempt_deadline" ] && [ "$SECONDS" -lt "$deadline" ]; do
+      payload="$(rpc terminal.read "$(jq -n --arg id "$session" --argjson cursor "$cursor" '{session_id:$id,cursor:$cursor}')")"
+      text="$(printf '%s' "$payload" | jq -r '.text // empty' 2>/dev/null)"
+      next="$(printf '%s' "$payload" | jq -r '.cursor // empty' 2>/dev/null)"
+      if [ -n "$next" ]; then
+        cursor="$next"
+        POLL_CURSOR="$next"
+      fi
+      if [ -n "$text" ]; then
+        collected="${collected}${text}"
+        POLL_TEXT="$collected"
+        if printf '%s' "$collected" | grep -Fq -- "$needle"; then
+          pass "$label"
+          return 0
+        fi
+      fi
+      sleep 0.2
+    done
+  done
+  fail "$label (timeout after ${timeout}s)" "$payload"
+  return 1
+}
+
+poll_tmux_size() { # label session_id cursor marker [timeout_seconds]
+  local label="$1" session="$2" cursor="$3" marker="$4" timeout="${5:-15}"
+  local deadline=$((SECONDS + timeout))
+  local payload="" text="" next="" collected="" size=""
+  POLL_SIZE=""
+  POLL_CURSOR="$cursor"
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    payload="$(rpc terminal.read "$(jq -n --arg id "$session" --argjson cursor "$cursor" '{session_id:$id,cursor:$cursor}')")"
+    text="$(printf '%s' "$payload" | jq -r '.text // empty' 2>/dev/null)"
+    next="$(printf '%s' "$payload" | jq -r '.cursor // empty' 2>/dev/null)"
+    if [ -n "$next" ]; then
+      cursor="$next"
+      POLL_CURSOR="$next"
+    fi
+    if [ -n "$text" ]; then
+      collected="${collected}${text}"
+      size="$(printf '%s\n' "$collected" | grep -Eo "${marker}[[:space:]]+[0-9]+[[:space:]]+[0-9]+" | tail -n 1 | awk '{print $(NF-1), $NF}')"
+      if [ -n "$size" ]; then
+        POLL_SIZE="$size"
+        pass "$label ($size)"
+        return 0
+      fi
+    fi
+    sleep 0.2
+  done
+  fail "$label (timeout after ${timeout}s)" "$payload"
+  return 1
+}
+
 cleanup() {
   if [ -n "$HOST_PID" ]; then kill "$HOST_PID" 2>/dev/null || true; wait "$HOST_PID" 2>/dev/null || true; fi
   if [ -n "$SSHD_PID" ]; then kill "$SSHD_PID" 2>/dev/null || true; wait "$SSHD_PID" 2>/dev/null || true; fi
@@ -384,15 +477,47 @@ EOF
     RTREAD="$(rpc terminal.read "$(jq -n --arg id "$RTERM" '{session_id:$id,cursor:0}')")"
     contains 'SSH terminal (ssh -tt) produced command output' 'm3-ssh-ok' "$RTREAD"
     rpc terminal.close "$(jq -n --arg id "$RTERM" '{session_id:$id}')" >/dev/null
+
+    # A direct remote-size probe: the SSH PTY must start at 24x80 and follow
+    # terminal.resize to 30x100 without relying on tmux repaint timing.
+    RRESIZE_CMD='while true; do stty size; sleep 1; done'
+    RTOPEN_R="$(rpc terminal.open "$(jq -n --arg id "$RWS" --arg cmd "$RRESIZE_CMD" '{workspace_id:$id,command:$cmd,rows:24,cols:80}')")"
+    RTERM_R="$(printf '%s' "$RTOPEN_R" | jq -r '.session_id // empty')"
+    [ -n "$RTERM_R" ] && pass "SSH resize terminal.open returned $RTERM_R" || fail 'SSH resize terminal.open returned a session' "$RTOPEN_R"
+    poll_terminal_text 'SSH PTY initial stty size is 24 80' "$RTERM_R" 0 '24 80' 15
+    RRESIZE_CURSOR="$POLL_CURSOR"
+    RRESIZE="$(rpc terminal.resize "$(jq -n --arg id "$RTERM_R" '{session_id:$id,rows:30,cols:100}')")"
+    contains 'SSH terminal.resize acknowledged rows=30' '"rows":30' "$RRESIZE"
+    contains 'SSH terminal.resize acknowledged cols=100' '"cols":100' "$RRESIZE"
+    poll_terminal_text 'SSH PTY resize reaches remote stty size 30 100' "$RTERM_R" "$RRESIZE_CURSOR" '30 100' 15
+    rpc terminal.close "$(jq -n --arg id "$RTERM_R" '{session_id:$id}')" >/dev/null
+
     # Interactive remote terminal: empty command -> ssh -tt + tmux session.
     RTOPEN2="$(rpc terminal.open "$(jq -n --arg id "$RWS" '{workspace_id:$id,command:"",rows:24,cols:80}')")"
     RTERM2="$(printf '%s' "$RTOPEN2" | jq -r '.session_id // empty')"
     [ -n "$RTERM2" ] && pass 'SSH interactive terminal opened a tmux-backed session' || fail 'SSH interactive terminal' "$RTOPEN2"
-    sleep 2
-    rpc terminal.write "$(jq -n --arg id "$RTERM2" '{session_id:$id,data:"printf m3-ssh-tmux-ok\n"}')" >/dev/null
-    sleep 2
-    RTREAD2="$(rpc terminal.read "$(jq -n --arg id "$RTERM2" '{session_id:$id,cursor:0}')")"
-    contains 'SSH tmux session accepts terminal.write' 'm3-ssh-tmux-ok' "$RTREAD2"
+    retry_terminal_write 'SSH tmux session accepts terminal.write' "$RTERM2" 0 $'printf "%s-ssh-tmux-ok\\n" m3\n' 'm3-ssh-tmux-ok' 15
+    TMUX_CURSOR="$POLL_CURSOR"
+    rpc terminal.write "$(jq -n --arg id "$RTERM2" --arg data $'printf "TMUX_SIZE_BEFORE "; stty size\n' '{session_id:$id,data:$data}')" >/dev/null
+    poll_tmux_size 'SSH tmux reports its real pane size before resize' "$RTERM2" "$TMUX_CURSOR" 'TMUX_SIZE_BEFORE' 15
+    TMUX_BEFORE="$POLL_SIZE"
+    TMUX_CURSOR="$POLL_CURSOR"
+    rpc terminal.resize "$(jq -n --arg id "$RTERM2" '{session_id:$id,rows:30,cols:100}')" >/dev/null
+    sleep 0.5
+    rpc terminal.write "$(jq -n --arg id "$RTERM2" --arg data $'printf "TMUX_SIZE_AFTER "; stty size\n' '{session_id:$id,data:$data}')" >/dev/null
+    poll_tmux_size 'SSH tmux reports its real pane size after resize' "$RTERM2" "$TMUX_CURSOR" 'TMUX_SIZE_AFTER' 15
+    TMUX_AFTER="$POLL_SIZE"
+    if [ -n "$TMUX_BEFORE" ] && [ -n "$TMUX_AFTER" ]; then
+      TMUX_BEFORE_ROWS="${TMUX_BEFORE%% *}"
+      TMUX_BEFORE_COLS="${TMUX_BEFORE##* }"
+      TMUX_AFTER_ROWS="${TMUX_AFTER%% *}"
+      TMUX_AFTER_COLS="${TMUX_AFTER##* }"
+      eq 'SSH tmux pane row delta follows resize (24 -> 30 requested)' '6' "$((TMUX_AFTER_ROWS - TMUX_BEFORE_ROWS))"
+      eq 'SSH tmux pane col delta follows resize (80 -> 100 requested)' '20' "$((TMUX_AFTER_COLS - TMUX_BEFORE_COLS))"
+      pass "SSH tmux pane observed ${TMUX_BEFORE} -> ${TMUX_AFTER}"
+    else
+      fail 'SSH tmux pane sizes were captured for delta evidence'
+    fi
     rpc terminal.write "$(jq -n --arg id "$RTERM2" '{session_id:$id,data:"exit\n"}')" >/dev/null
     sleep 0.5
     rpc terminal.close "$(jq -n --arg id "$RTERM2" '{session_id:$id}')" >/dev/null
