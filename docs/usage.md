@@ -320,6 +320,31 @@ Environment/container-backed workspaces do not support worktree Chat review
 in M1; their Git panes reject a `worktree_id` with an explicit unsupported
 error.
 
+### Bootstrap E2E and owner-run acceptance
+
+The mock-ACP bootstrap gate is:
+
+```bash
+bash scripts/m1a_bootstrap_e2e.sh
+# expected: SUMMARY passed=78 failed=0
+```
+
+It creates a throwaway HOME/state dir and two temp git workspaces, then runs
+Project -> workspace -> worktree -> membership -> Chat/AgentSession(worktree)
+-> transcript and worktree-scoped Git review -> host restart
+(`ended(host_restarted)` + one system boundary) -> same-Chat handoff ->
+commit/push to a temp bare remote. No real model, `gh`, SSH or network is
+used. `MONEXUS_M1A_E2E_KEEP=1` keeps the work dir on success; a failure always
+keeps it and prints the host log. The Linux CI job runs this script as
+`M1a bootstrap e2e`, so its failure is a red build; the macOS job does not run
+this Linux-first gate and must not be treated as covering it.
+
+The real GUI + real ACP + logged-in `gh` runbook, screenshots/API evidence
+layout and the **owner-run 待执行** status are in `docs/m1a.md`. In
+particular, `M4_REAL_ACP=1` probing and real PR creation are owner-run
+opt-ins, not CI gates. Environment/container-backed worktrees, a GitHub/CI
+connector and full macOS GUI verification are outside this closed loop.
+
 ## 5. Projects, tasks, Runs and evidence
 
 A Project declares `verify[]`; a Task inherits it; a Run executes a command
