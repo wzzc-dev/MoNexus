@@ -54,6 +54,8 @@ fn bot_tab(
 ) -> @moui.View[Msg] {
   let active = model.bot_tab == tab
   let label = tab.label_in(model.lang)
+  let count_width = if count == "" { 0.0 } else { 5.0 + ui_advance(count, 8.5) }
+  let tab_width = ui_advance(label, 10.5) + count_width + 1.0
   let content = @views.row([
     @views.text(
       label,
@@ -68,19 +70,19 @@ fn bot_tab(
         mono_font(8.5, 400),
       ).foreground(ui_dim())
     },
-  ], spacing=5.0, align=@style.CrossAlign::Center).frame(width=80.0)
+  ], spacing=5.0, align=@style.CrossAlign::Center).frame(width=tab_width)
   @views.column([
     @views.padding_xy(content, horizontal=0.0, vertical=0.0),
     @views.container(
       @views.empty(),
-      width=80.0,
+      width=tab_width,
       height=2.0,
       background=if active { ui_ink() } else { clear_color() },
       padding=0.0,
     ),
   ], spacing=0.0, align=@style.CrossAlign::Start).frame(
-    width=80.0,
-    height=33.0,
+    width=tab_width,
+    height=32.0,
   ).on_tap(SelectBotTab(tab)).cursor(
     @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
   )
@@ -157,6 +159,7 @@ fn bot_directory_row(
 ) -> @moui.View[Msg] {
   let activity = bot_recent_activity(model, record)
   let latest = latest_chat_for_bot(model.chats, record.id)
+  let name = bot_name(record)
   let recent = match latest {
     Some(chat) => {
       let suffix = if activity == "" { "" } else { " · " + activity }
@@ -169,12 +172,14 @@ fn bot_directory_row(
         activity
       }
   }
+  let shown_name = ui_truncate(name, 220.0, 11.0)
+  let shown_recent = ui_truncate(recent, 600.0, 9.0)
   @views.container(
     @views.padding_edges(
       @views.row([
         @views.container(
           @views.text(
-            bot_initial(bot_name(record)),
+            bot_initial(name),
             align=@core.TextAlign::TextCenter,
           ).font(ui_font(9.0, 620)).foreground(ui_on_ink()),
           width=22.0,
@@ -186,7 +191,7 @@ fn bot_directory_row(
         @views.column([
           @views.row([
             @views.text(
-              bot_name(record),
+              shown_name,
               width=220.0,
               align=@core.TextAlign::TextStart,
               wrap=false,
@@ -200,7 +205,7 @@ fn bot_directory_row(
             }),
           ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=330.0),
           @views.text(
-            recent,
+            shown_recent,
             width=600.0,
             align=@core.TextAlign::TextStart,
             wrap=false,
@@ -333,11 +338,15 @@ fn bot_task_row(
         wrap=true,
       ).font(ui_font(10.5, 560)).foreground(ui_text_color()),
       @views.text(
-        if task.goal == "" {
-          task.status
-        } else {
-          task.status + " · " + task.goal
-        },
+        ui_truncate(
+          if task.goal == "" {
+            task.status
+          } else {
+            task.status + " · " + task.goal
+          },
+          310.0,
+          8.5,
+        ),
         width=310.0,
         align=@core.TextAlign::TextStart,
         wrap=false,
@@ -356,6 +365,7 @@ fn bot_task_row(
         ).font(mono_font(10.5, 500)).foreground(ui_muted()),
         width=16.0,
         height=16.0,
+        background=clear_color(),
         corner_radius=3.0,
         border=Some(ui_edge(ui_border_soft())),
         padding=0.0,
@@ -494,7 +504,7 @@ fn bot_automation_rows(model : Model) -> Array[@moui.View[Msg]] {
         @views.row([
           @views.lucide_icon("refresh-cw", size=12.0, color=ui_dim()),
           @views.text(
-            automation.title,
+            ui_truncate(automation.title, 260.0, 9.5),
             width=260.0,
             align=@core.TextAlign::TextStart,
             wrap=false,
@@ -635,7 +645,7 @@ fn bot_item_pane(
             @views.row([
               @views.lucide_icon("folder", size=11.0, color=ui_dim()),
               @views.text(
-                project_name(project),
+                ui_truncate(project_name(project), 270.0, 9.0),
                 width=270.0,
                 align=@core.TextAlign::TextStart,
                 wrap=false,
@@ -653,6 +663,7 @@ fn bot_item_pane(
             left=6.0,
           ),
           width=390.0,
+          background=clear_color(),
           padding=0.0,
         ).on_tap(SelectProject(project.id)).cursor(
           @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
@@ -1186,21 +1197,29 @@ fn bot_chats_tab(
           @views.padding_edges(
             @views.row([
               @views.text(
-                chat.title,
+                ui_truncate(chat.title, 520.0, 12.0),
                 width=520.0,
                 align=@core.TextAlign::TextStart,
                 wrap=false,
               ).font(ui_font(12.0, 560)).foreground(ui_text_color()),
               @views.text(
-                chat_project_label(model, chat.project_id),
+                ui_truncate(
+                  chat_project_label(model, chat.project_id),
+                  160.0,
+                  9.5,
+                ),
+                width=160.0,
                 align=@core.TextAlign::TextStart,
+                wrap=false,
               ).font(ui_font(9.5, 400)).foreground(ui_muted()),
               if chat.agent_name == "" {
                 ui_meta("")
               } else {
                 @views.text(
-                  chat.agent_name,
+                  ui_truncate(chat.agent_name, 120.0, 9.0),
+                  width=120.0,
                   align=@core.TextAlign::TextStart,
+                  wrap=false,
                 ).font(ui_font(9.0, 400)).foreground(ui_dim())
               },
               @views.spacer(weight=1.0),
@@ -1250,6 +1269,7 @@ fn bot_chats_tab(
     ),
     width=1032.0,
     height=597.0,
+    background=clear_color(),
     padding=0.0,
   )
 }
@@ -1634,6 +1654,7 @@ fn bot_agents_tab(model : Model) -> @moui.View[Msg] {
     ),
     width=1032.0,
     height=597.0,
+    background=clear_color(),
     padding=0.0,
   )
 }
@@ -1690,6 +1711,7 @@ fn bot_files_tab(
     ),
     width=1032.0,
     height=597.0,
+    background=clear_color(),
     padding=0.0,
   )
 }
@@ -1711,6 +1733,10 @@ fn bot_detail_body(
 fn bot_detail_page(model : Model) -> @moui.View[Msg] {
   let bot = active_bot_identity(model)
   let chats = bot_chats_for(model, bot)
+  let summary = bot.summary +
+    " · " +
+    chats.length().to_string() +
+    tr(model.lang, " Chats", " 个 Chat")
   let tasks = bot_tasks_in_group(model, bot, BotWorkActive).length() +
     bot_tasks_in_group(model, bot, BotWorkWaiting).length() +
     bot_tasks_in_group(model, bot, BotWorkPlanned).length() +
@@ -1732,7 +1758,7 @@ fn bot_detail_page(model : Model) -> @moui.View[Msg] {
         @views.column([
           @views.row([
             @views.text(
-              bot.name,
+              ui_truncate(bot.name, 300.0, 21.0),
               width=300.0,
               align=@core.TextAlign::TextStart,
               wrap=false,
@@ -1746,10 +1772,7 @@ fn bot_detail_page(model : Model) -> @moui.View[Msg] {
             ),
           ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=430.0),
           @views.text(
-            bot.summary +
-            " · " +
-            chats.length().to_string() +
-            tr(model.lang, " Chats", " 个 Chat"),
+            ui_truncate(summary, 430.0, 10.0),
             width=430.0,
             align=@core.TextAlign::TextStart,
             wrap=false,
@@ -1782,6 +1805,7 @@ fn bot_detail_page(model : Model) -> @moui.View[Msg] {
       left=22.0,
     ),
     height=82.0,
+    background=clear_color(),
     padding=0.0,
   )
   let tabs = @views.container(
@@ -1806,14 +1830,15 @@ fn bot_detail_page(model : Model) -> @moui.View[Msg] {
       bottom=0.0,
       left=22.0,
     ),
-    height=33.0,
-    border=Some(ui_border_style(ui_border_soft(), 1.0)),
+    height=32.0,
+    background=clear_color(),
     padding=0.0,
   )
   @views.container(
     @views.column([
       header,
       tabs,
+      ui_divider_soft(),
       bot_detail_body(model, bot),
     ], spacing=0.0, align=@style.CrossAlign::Start).frame(
       width=1032.0,

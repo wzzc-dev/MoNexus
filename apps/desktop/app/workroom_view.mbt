@@ -182,13 +182,8 @@ fn workroom_header(
   }
   let updated = workroom_updated(model, chat)
   let workspace_name = workspace_context_name(model, model.agent.workspace_id)
-  let meta : Array[@moui.View[Msg]] = [
-    @views.text(bot.name, align=@core.TextAlign::TextStart).font(
-      ui_font(10.0, 550),
-    ).foreground(ui_muted()),
-  ]
+  let meta : Array[@moui.View[Msg]] = []
   if workspace_name != "" {
-    meta.push(ui_meta("·"))
     meta.push(
       @views.text(workspace_name, align=@core.TextAlign::TextStart).font(
         ui_font(10.0, 400),
@@ -196,7 +191,9 @@ fn workroom_header(
     )
   }
   if updated != "" {
-    meta.push(ui_meta("·"))
+    if workspace_name != "" {
+      meta.push(ui_meta("·"))
+    }
     meta.push(ui_meta(updated + tr(model.lang, " updated", " 更新")))
   }
   let avatar = @views.container(
@@ -214,13 +211,19 @@ fn workroom_header(
     @views.padding_xy(
       @views.row([
         avatar,
-        @views.text(bot.name, align=@core.TextAlign::TextStart).font(
+        @views.text(
+          ui_truncate(bot.name, 120.0, 10.0),
+          width=120.0,
+          align=@core.TextAlign::TextStart,
+          wrap=false,
+        ).font(
           ui_font(10.0, 550),
         ).foreground(ui_muted()),
       ], spacing=5.0, align=@style.CrossAlign::Center),
       horizontal=0.0,
     ),
     height=20.0,
+    background=clear_color(),
     padding=0.0,
   ).on_tap(OpenBotDetail(bot.id)).cursor(
     @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
@@ -234,8 +237,7 @@ fn workroom_header(
         ).font(ui_font(9.0, 650)).foreground(ui_dim()),
         @views.row([
           @views.text(
-            title,
-            width=430.0,
+            ui_truncate(title, 430.0, 18.0),
             align=@core.TextAlign::TextStart,
             wrap=false,
           ).font(ui_font(18.0, 650)).foreground(ui_text_color()),
@@ -252,7 +254,8 @@ fn workroom_header(
       bottom=16.0,
       left=28.0,
     ),
-    height=96.0,
+    height=95.0,
+    background=clear_color(),
     padding=0.0,
   )
 }
@@ -508,14 +511,19 @@ fn workroom_activity_row(
   label : String,
   when : String,
 ) -> @moui.View[Msg] {
-  @views.row([
-    @views.lucide_icon(icon, size=12.0, color=ui_dim()),
-    @views.text(label, align=@core.TextAlign::TextStart).font(
-      ui_font(9.5, 400),
-    ).foreground(ui_muted()),
-    @views.spacer(weight=1.0),
-    if when == "" { ui_meta("") } else { ui_mono(when, 8.5) },
-  ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=683.0)
+  @views.container(
+    @views.row([
+      @views.lucide_icon(icon, size=12.0, color=ui_dim()),
+      @views.text(label, align=@core.TextAlign::TextStart).font(
+        ui_font(9.5, 400),
+      ).foreground(ui_muted()),
+      @views.spacer(weight=1.0),
+      if when == "" { ui_meta("") } else { ui_mono(when, 8.5) },
+    ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=683.0),
+    height=27.0,
+    background=clear_color(),
+    padding=0.0,
+  )
 }
 
 ///|
@@ -577,37 +585,50 @@ fn workroom_activity(
     None => ()
   }
   let body : Array[@moui.View[Msg]] = [
-    @views.row([
-      @views.lucide_icon("list", size=12.0, color=ui_dim()),
-      @views.text(tr(model.lang, "Activity", "活动"), align=@core.TextAlign::TextStart).font(
-        ui_font(9.5, 570),
-      ).foreground(ui_muted()),
-      @views.spacer(weight=1.0),
-      ui_mono(tr(model.lang, "this session", "当前会话"), 8.5),
-    ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=683.0),
+    @views.container(
+      @views.row([
+        @views.lucide_icon("list", size=12.0, color=ui_dim()),
+        @views.text(tr(model.lang, "Activity", "活动"), align=@core.TextAlign::TextStart).font(
+          ui_font(9.5, 570),
+        ).foreground(ui_muted()),
+        @views.spacer(weight=1.0),
+        ui_mono(tr(model.lang, "this session", "当前会话"), 8.5),
+      ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=683.0),
+      height=31.0,
+      background=clear_color(),
+      padding=0.0,
+    ),
   ]
   if rows.is_empty() {
     body.push(
-      @views.text(
-        tr(
-          model.lang,
-          "No recorded activity yet.",
-          "尚无已记录的活动。",
-        ),
-        width=683.0,
-        align=@core.TextAlign::TextStart,
-        wrap=true,
-      ).font(ui_font(9.5, 400)).foreground(ui_dim()),
+      @views.padding_edges(
+        @views.text(
+          tr(
+            model.lang,
+            "No recorded activity yet.",
+            "尚无已记录的活动。",
+          ),
+          width=683.0,
+          align=@core.TextAlign::TextStart,
+          wrap=true,
+        ).font(ui_font(9.5, 400)).foreground(ui_dim()),
+        top=5.0,
+      ),
     )
   } else {
+    let mut index = 0
     for row_view in rows {
+      if index > 0 {
+        body.push(ui_divider_soft())
+      }
       body.push(row_view)
+      index = index + 1
     }
   }
   @views.column([
     ui_divider_soft(),
     @views.padding_edges(
-      @views.column(body, spacing=6.0, align=@style.CrossAlign::Start).frame(
+      @views.column(body, spacing=0.0, align=@style.CrossAlign::Start).frame(
         width=683.0,
       ),
       top=12.0,
@@ -943,6 +964,7 @@ fn workroom_new_chat_page(model : Model) -> @moui.View[Msg] {
   let bot = active_bot_identity(model)
   @views.column([
     workroom_header(model, None, bot),
+    ui_divider_soft(),
     workroom_new_chat_form(model),
     workroom_new_chat_footer(model),
   ], spacing=0.0, align=@style.CrossAlign::Start).frame(
@@ -957,6 +979,7 @@ fn workroom_tool(icon : String, msg : Msg) -> @moui.View[Msg] {
     @views.lucide_icon(icon, size=11.0, color=ui_dim()),
     width=19.0,
     height=19.0,
+    background=clear_color(),
     corner_radius=3.0,
     border=Some(ui_edge(ui_border())),
     padding=0.0,
@@ -1039,6 +1062,7 @@ fn workroom_composer(
         @views.lucide_icon("square", size=10.0, color=ui_danger()),
         width=22.0,
         height=22.0,
+        background=clear_color(),
         corner_radius=3.0,
         border=Some(ui_edge(ui_border())),
         padding=0.0,
@@ -1052,6 +1076,7 @@ fn workroom_composer(
         @views.lucide_icon("square", size=10.0, color=ui_danger()),
         width=22.0,
         height=22.0,
+        background=clear_color(),
         corner_radius=3.0,
         border=Some(ui_edge(ui_border())),
         padding=0.0,
@@ -1121,7 +1146,7 @@ fn detail_label(label : String) -> @moui.View[Msg] {
     ).foreground(ui_dim()),
     top=0.0,
     right=0.0,
-    bottom=6.0,
+    bottom=8.0,
     left=0.0,
   )
 }
@@ -1138,7 +1163,7 @@ fn detail_row(
     ).foreground(ui_dim()),
     @views.spacer(weight=1.0),
     @views.text(
-      value,
+      ui_truncate(value, 165.0, 9.5),
       width=165.0,
       align=@core.TextAlign::TextEnd,
       wrap=false,
@@ -1147,6 +1172,7 @@ fn detail_row(
   let row_view = @views.container(
     @views.padding_xy(content, horizontal=0.0, vertical=2.0),
     height=21.0,
+    background=clear_color(),
     padding=0.0,
   )
   match msg {
@@ -1194,6 +1220,7 @@ fn detail_member(
   let row_view = @views.container(
     @views.padding_xy(content, horizontal=0.0, vertical=2.0),
     height=26.0,
+    background=clear_color(),
     padding=0.0,
   )
   match msg {
@@ -1269,17 +1296,26 @@ fn workroom_files(model : Model) -> Array[@moui.View[Msg]] {
       for artifact in record.artifacts {
         let name = artifact_basename(artifact)
         rows.push(
-          @views.row([
-            @views.lucide_icon("file", size=12.0, color=ui_dim()),
-            @views.text(
-              if name == "" { artifact } else { name },
-              width=190.0,
-              align=@core.TextAlign::TextStart,
-              wrap=false,
-            ).font(ui_font(9.5, 400)).foreground(ui_muted()),
-            @views.spacer(weight=1.0),
-            ui_mono(file_extension(name), 8.5),
-          ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=258.0),
+          @views.container(
+            @views.row([
+              @views.lucide_icon("file", size=12.0, color=ui_dim()),
+              @views.text(
+                ui_truncate(
+                  if name == "" { artifact } else { name },
+                  190.0,
+                  9.5,
+                ),
+                width=190.0,
+                align=@core.TextAlign::TextStart,
+                wrap=false,
+              ).font(ui_font(9.5, 400)).foreground(ui_muted()),
+              @views.spacer(weight=1.0),
+              ui_mono(file_extension(name), 8.5),
+            ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=258.0),
+            height=25.0,
+            background=clear_color(),
+            padding=0.0,
+          ),
         )
       }
     None => ()
@@ -1453,7 +1489,7 @@ fn workroom_detail_rail(
       file_section.push(item)
     }
   }
-  let body = @views.column([
+  let heading = @views.padding_edges(
     @views.row([
       @views.text(tr(model.lang, "Details", "详情"), align=@core.TextAlign::TextStart).font(
         ui_font(13.0, 620),
@@ -1461,51 +1497,82 @@ fn workroom_detail_rail(
       @views.spacer(weight=1.0),
       ui_mono(tr(model.lang, "context", "上下文"), 8.5),
     ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=258.0),
-    @views.column(status_rows, spacing=0.0, align=@style.CrossAlign::Start).frame(
-      width=258.0,
+    bottom=11.0,
+  )
+  let participants_section = @views.column([
+    detail_label(tr(model.lang, "Participants", "参与者")),
+    detail_member(
+      bot.name,
+      if bot.status == "" {
+        tr(model.lang, "Bot identity", "Bot 身份")
+      } else {
+        bot.status
+      },
+      true,
+      msg=OpenBotDetail(bot.id),
     ),
-    @views.container(
-      @views.column([
-        detail_label(tr(model.lang, "Participants", "参与者")),
-        detail_member(
-          bot.name,
-          if bot.status == "" {
-            tr(model.lang, "Bot identity", "Bot 身份")
-          } else {
-            bot.status
-          },
-          true,
-          msg=OpenBotDetail(bot.id),
-        ),
-        detail_member(
-          tr(model.lang, "Owner", "所有者"),
-          tr(model.lang, "decisions · approval", "决策 · 审批"),
-          false,
-        ),
-      ], spacing=0.0, align=@style.CrossAlign::Start).frame(width=258.0),
-      border=Some(ui_border_style(ui_border_soft(), 1.0)),
-      padding=0.0,
+    detail_member(
+      tr(model.lang, "Owner", "所有者"),
+      tr(model.lang, "decisions · approval", "决策 · 审批"),
+      false,
     ),
-    @views.column(context_rows, spacing=0.0, align=@style.CrossAlign::Start).frame(
-      width=258.0,
-    ),
-    @views.column(pending_section, spacing=6.0, align=@style.CrossAlign::Start).frame(
-      width=258.0,
-    ),
-    @views.column(file_section, spacing=4.0, align=@style.CrossAlign::Start).frame(
-      width=258.0,
-    ),
-    @views.text(
-      tr(
-        model.lang,
-        "This surface addresses Bots and Chats by name; route ids stay in window metadata.",
-        "此界面按名称定位 Bot 与对话；路由 ID 仅保留在窗口元数据中。",
+  ], spacing=0.0, align=@style.CrossAlign::Start).frame(width=258.0)
+  let body = @views.column([
+    heading,
+    ui_divider_soft(),
+    @views.padding_edges(
+      @views.column(status_rows, spacing=0.0, align=@style.CrossAlign::Start).frame(
+        width=258.0,
       ),
-      width=258.0,
-      align=@core.TextAlign::TextStart,
-      wrap=true,
-    ).font(ui_font(8.5, 400)).foreground(ui_dim()),
-  ], spacing=12.0, align=@style.CrossAlign::Start).frame(width=258.0)
+      top=11.0,
+      bottom=11.0,
+    ),
+    ui_divider_soft(),
+    @views.padding_edges(
+      participants_section,
+      top=11.0,
+      bottom=11.0,
+    ),
+    ui_divider_soft(),
+    @views.padding_edges(
+      @views.column(context_rows, spacing=0.0, align=@style.CrossAlign::Start).frame(
+        width=258.0,
+      ),
+      top=11.0,
+      bottom=11.0,
+    ),
+    ui_divider_soft(),
+    @views.padding_edges(
+      @views.column(pending_section, spacing=6.0, align=@style.CrossAlign::Start).frame(
+        width=258.0,
+      ),
+      top=11.0,
+      bottom=11.0,
+    ),
+    ui_divider_soft(),
+    @views.padding_edges(
+      @views.column(file_section, spacing=4.0, align=@style.CrossAlign::Start).frame(
+        width=258.0,
+      ),
+      top=11.0,
+      bottom=11.0,
+    ),
+    ui_divider_soft(),
+    @views.padding_edges(
+      @views.text(
+        tr(
+          model.lang,
+          "This surface addresses Bots and Chats by name; route ids stay in window metadata.",
+          "此界面按名称定位 Bot 与对话；路由 ID 仅保留在窗口元数据中。",
+        ),
+        width=258.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(8.5, 400)).foreground(ui_dim()),
+      top=11.0,
+      bottom=0.0,
+    ),
+  ], spacing=0.0, align=@style.CrossAlign::Start).frame(width=258.0)
   @views.container(
     @views.padding_edges(
       @views.scroll_view(
@@ -1539,6 +1606,7 @@ fn workroom_page(model : Model) -> @moui.View[Msg] {
   } else {
     @views.column([
       workroom_header(model, chat, bot),
+      ui_divider_soft(),
       workroom_thread(model, chat, bot),
       workroom_composer(model, bot),
     ], spacing=0.0, align=@style.CrossAlign::Start).frame(

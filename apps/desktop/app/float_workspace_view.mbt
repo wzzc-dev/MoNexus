@@ -1324,6 +1324,7 @@ fn float_body(model : Model, width : Double, height : Double) -> @moui.View[Msg]
     @views.padding(body, float_body_padding),
     width~,
     height~,
+    background=clear_color(),
     padding=0.0,
   )
 }
@@ -1334,6 +1335,7 @@ fn float_resize_corner(model : Model) -> @moui.View[Msg] {
     lucide_icon("maximize", size=10.0, color=ui_dim()),
     width=18.0,
     height=18.0,
+    background=clear_color(),
     corner_radius=3.0,
     padding=0.0,
   )
