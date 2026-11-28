@@ -23,18 +23,25 @@ fn terminal_state_label(state : TerminalState, lang : Lang) -> String {
 }
 
 ///|
-/// The poll subscription lives only while the focused terminal is visible and
-/// the session can still produce output. Page navigation and the back action
-/// therefore stop host reads; the protocol cursor lets the next visit resume
-/// from the last byte instead of replaying the transcript.
-pub fn terminal_should_poll(model : Model) -> Bool {
+/// True while a terminal surface owns input: the focused Projects terminal or
+/// a visible floating terminal tab. Program-level Interrupt commands use this
+/// so plain Ctrl+C never stops a terminal the owner is not looking at.
+pub fn terminal_surface_focused(model : Model) -> Bool {
   let focused_manage = model.page == Manage &&
     model.manage_tab == ManageProjects &&
     model.project.terminal_focus
   let overlay_terminal = float_terminal_visible(model) &&
     model.project.terminal_focus
-  (focused_manage || overlay_terminal) &&
-  model.project.terminal_focus &&
+  focused_manage || overlay_terminal
+}
+
+///|
+/// The poll subscription lives only while the focused terminal is visible and
+/// the session can still produce output. Page navigation and the back action
+/// therefore stop host reads; the protocol cursor lets the next visit resume
+/// from the last byte instead of replaying the transcript.
+pub fn terminal_should_poll(model : Model) -> Bool {
+  terminal_surface_focused(model) &&
   model.project.terminal_id != "" &&
   model.project.terminal_state == TerminalRunning &&
   !model.project.terminal_eof

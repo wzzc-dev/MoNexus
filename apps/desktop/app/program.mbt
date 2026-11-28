@@ -132,43 +132,29 @@ pub fn program_with_preferences(
       ])
     },
   ).with_commands(commands=model => {
-    [
-      @core.ProgramCommand::new(
-        command=@core.ActionCommand::new(
-          intent=@core.Copy,
-          label=tr(model.lang, "Interrupt terminal", "中断终端"),
-          shortcut=Some(
-            @core.KeyboardShortcut::new(
-              key="c",
-              modifiers=@core.KeyModifiers::new(control=true, shift=true),
+    let commands : Array[@core.ProgramCommand[Msg]] = []
+    if terminal_surface_focused(model) {
+      commands.push(
+        @core.ProgramCommand::new(
+          command=@core.ActionCommand::new(
+            intent=@core.Interrupt,
+            label=tr(model.lang, "Interrupt terminal", "中断终端"),
+            shortcut=Some(
+              @core.KeyboardShortcut::new(
+                key="c",
+                modifiers=@core.KeyModifiers::new(control=true),
+              ),
+            ),
+            description=tr(
+              model.lang,
+              "Send Ctrl+C to the focused terminal.",
+              "向当前终端发送 Ctrl+C。",
             ),
           ),
-          description=tr(
-            model.lang,
-            "Send Ctrl+C to the focused terminal.",
-            "向当前终端发送 Ctrl+C。",
-          ),
+          message=ProjectTerminalStop,
         ),
-        message=ProjectTerminalStop,
-      ),
-      @core.ProgramCommand::new(
-        command=@core.ActionCommand::new(
-          intent=@core.Copy,
-          label=tr(model.lang, "Interrupt terminal", "中断终端"),
-          shortcut=Some(
-            @core.KeyboardShortcut::new(
-              key="C",
-              modifiers=@core.KeyModifiers::new(control=true, shift=true),
-            ),
-          ),
-          description=tr(
-            model.lang,
-            "Send Ctrl+C to the focused terminal.",
-            "向当前终端发送 Ctrl+C。",
-          ),
-        ),
-        message=ProjectTerminalStop,
-      ),
-    ]
+      )
+    }
+    commands
   })
 }

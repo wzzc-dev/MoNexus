@@ -4,15 +4,16 @@
 - 日期：2026-11-25
 - 修订：2026-11-25 依赖升级到 MoUI 0.9.2（`moui_skia_renderer` 0.4.0 → 0.9.2）
 - 修订：2026-11-27 依赖升级到 MoUI 0.10.1（输入光标行盒修复，MoUI #53）
+- 修订：2026-11-28 依赖升级到 MoUI 0.10.2（`CommandIntent::Interrupt`，MoUI #54）
 - 依据：`docs/architecture.md` r5 §10、§15、MoUI `docs/vendor-workflow.md`
 
 ## 背景
 
-桌面端用 MoUI 0.10.1；框架缺能力时不能 fork，也不能让 vendor 覆盖进入提交。
+桌面端用 MoUI 0.10.2；框架缺能力时不能 fork，也不能让 vendor 覆盖进入提交。
 
 ## 决策
 
-1. **独立仓库消费发布版**：`wzzc-dev/moui@0.10.1` 及子包；`apps/desktop` 用 `moui new` 结构，平台入口只做薄接线。
+1. **独立仓库消费发布版**：`wzzc-dev/moui@0.10.2` 及子包；`apps/desktop` 用 `moui new` 结构，平台入口只做薄接线。
 2. **TEA 结构**：`Model = HostProjection + UiState`；RPC 是 Effect，事件订阅是 Subscription；UI 不直接碰 ssh/文件/模型。
 3. **MoUI 缺能力走官方 vendor 流程**：clone 到 `vendor/MoUI`（gitignored）、在 `moon.work` 做本地覆盖、验证并跑 MoUI gate、向上游提 PR；上游发布后 bump 版本并移除覆盖。禁止提交 `vendor/`，禁止孤儿补丁。
 4. **页面**：Home（收件箱 + 全局任务）、Machines、Projects/Workspaces/Worktrees、Agents/Sessions、Tasks、Activity、Search、Settings。

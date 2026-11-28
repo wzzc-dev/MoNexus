@@ -15,6 +15,8 @@ import {
 }
 
 import {
+  "wzzc-dev/moui/apphost" @apphost,
+  "wzzc-dev/moui/backend" @backend_host,
   "wzzc-dev/moui/runtime/test_support",
   "moonbitlang/async/process",
 } for "test"

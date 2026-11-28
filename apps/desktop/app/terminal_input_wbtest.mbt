@@ -52,10 +52,10 @@ fn terminal_input_test_field() -> @core.View[Msg] {
 }
 
 ///|
-test "plain Ctrl+C reaches terminal input as Copy and interrupts when unselected" {
+test "plain Ctrl+C reaches terminal input as Interrupt and stops" {
   let result = terminal_input_test_field().text_command_result(
     terminal_input_test_context(None),
-    @core.CommandIntent::Copy,
+    @core.CommandIntent::Interrupt,
   )
   assert_true(result.result.handled)
   assert_eq(result.messages.length(), 1)
@@ -66,12 +66,24 @@ test "plain Ctrl+C reaches terminal input as Copy and interrupts when unselected
 }
 
 ///|
-test "Ctrl+C with a real text selection still copies" {
+test "Copy without a selection is handled by the text field and does not stop" {
+  let result = terminal_input_test_field().text_command_result(
+    terminal_input_test_context(None),
+    @core.CommandIntent::Copy,
+  )
+  assert_true(result.result.handled)
+  assert_eq(result.messages.length(), 0)
+  assert_eq(result.result.clipboard_text, Some(""))
+}
+
+///|
+test "Copy with a real text selection copies the selection and does not stop" {
   let result = terminal_input_test_field().text_command_result(
     terminal_input_test_context(Some(@core.TextRange::new(start=0, end=2))),
     @core.CommandIntent::Copy,
   )
   assert_true(result.result.handled)
   assert_eq(result.messages.length(), 0)
+  assert_eq(result.result.clipboard_text, Some("ab"))
 }
 
