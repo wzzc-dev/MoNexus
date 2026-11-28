@@ -25,10 +25,10 @@ test "the focused terminal draws its controls and workspace context" {
     ProjectTerminalOutput("sess_test", 7L, "ok\n$ ", false),
   )
   let harness = @test_support.WidgetHarness::from_program(
-    program=@moui.Program::new(
+    program=@moui.Program::new_with_environment(
       init=() => (model, @moui.Effect::none()),
       update=(current, msg) => (update(current, msg), @moui.Effect::none()),
-      view~,
+      view=(model, environment) => view(model, environment),
     ),
     width=1280.0,
     height=800.0,

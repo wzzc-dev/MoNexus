@@ -1,16 +1,18 @@
 ///|
 /// Shell metrics and shared widgets.
 ///
-/// Every number here belongs to the fixed 1280x800 window contract: 8pt outer
-/// margin, 8pt island gap, 224pt sidebar, 44pt top bar, 26pt status bar. Views
-/// never re-derive these; they compose the helpers below so the eight pages
-/// read as one product.
+/// The design contract is an 8pt outer margin, 8pt island gap, 224pt sidebar,
+/// 44pt top bar and 26pt status bar. The main island keeps the 1032pt cap on
+/// wide windows and contracts to the remaining width on the owner's 1248pt
+/// window, so no right-hand control or rail is lost at the window edge. Views
+/// never re-derive these values; they read the metrics installed from the
+/// runtime viewport by `view`.
 
 ///|
-let ui_window_width : Double = 1280.0
+let ui_window_width : Ref[Double] = Ref(1280.0)
 
 ///|
-let ui_window_height : Double = 800.0
+let ui_window_height : Ref[Double] = Ref(800.0)
 
 ///|
 let ui_margin : Double = 8.0
@@ -25,13 +27,13 @@ let ui_island_radius : Double = 10.0
 let ui_sidebar_width : Double = 224.0
 
 ///|
-let ui_sidebar_height : Double = 784.0
+let ui_sidebar_height : Ref[Double] = Ref(784.0)
 
 ///|
-let ui_main_width : Double = 1032.0
+let ui_main_width : Ref[Double] = Ref(1032.0)
 
 ///|
-let ui_main_height : Double = 784.0
+let ui_main_height : Ref[Double] = Ref(784.0)
 
 ///|
 let ui_topbar_height : Double = 44.0
@@ -40,13 +42,67 @@ let ui_topbar_height : Double = 44.0
 let ui_statusbar_height : Double = 26.0
 
 ///|
-let ui_body_padding : Double = 20.0
+let ui_body_padding : Ref[Double] = Ref(20.0)
 
 ///|
 let ui_body_width : Double = 992.0
 
 ///|
-let ui_scroll_height : Double = 712.0
+let ui_scroll_height : Ref[Double] = Ref(712.0)
+
+///|
+/// Install the shell metrics for one viewport. The sidebar stays at its 224pt
+/// contract; the main island takes the rest of the width up to the 1032pt
+/// design cap. Page content keeps its 992pt rhythm, with the horizontal gutter
+/// tightening from 20pt to 8pt only when the window is narrower than 1280pt.
+fn ui_apply_shell(width : Double, height : Double) -> Unit {
+  let window_width = width.max(960.0)
+  let window_height = height.max(640.0)
+  let main_width = (window_width - ui_sidebar_width - 16.0).min(1032.0).max(720.0)
+  let main_height = (window_height - 2.0 * ui_margin).max(560.0)
+  let body_padding = ((main_width - 992.0) / 2.0).clamp(
+    min=8.0,
+    max=20.0,
+  )
+  ui_window_width.val = window_width
+  ui_window_height.val = window_height
+  ui_main_width.val = main_width
+  ui_main_height.val = main_height
+  ui_sidebar_height.val = main_height
+  ui_scroll_height.val =
+    (main_height - ui_topbar_height - ui_statusbar_height - 2.0).max(0.0)
+  ui_body_padding.val = body_padding
+}
+
+///|
+/// Top-bar control rhythm. Search, floating workspace and overflow actions
+/// share one 26pt height and a 7pt cluster gap so the strip reads as one
+/// deliberate action group on every route.
+let ui_top_control_height : Double = 26.0
+
+///|
+let ui_top_action_gap : Double = 7.0
+
+///|
+let ui_top_search_width : Double = 184.0
+
+///|
+let ui_top_search_inner_width : Double = 168.0
+
+///|
+let ui_top_float_width : Double = 120.0
+
+///|
+let ui_top_float_inner_width : Double = 104.0
+
+///|
+let ui_top_overflow_gap : Double = 3.0
+
+///|
+let ui_top_crumb_width : Double = 430.0
+
+///|
+let ui_top_refresh_width : Double = 64.0
 
 ///|
 /// One-pixel hairline border helper.
@@ -175,6 +231,75 @@ fn ui_mono(value : String, size : Double) -> @moui.View[Msg] {
 }
 
 ///|
+/// Approximate one character's advance in ems. The shell cannot call the text
+/// system while composing a view, so truncation uses a deliberately
+/// conservative split: CJK/fullwidth glyphs take a full em, ASCII takes a
+/// little over half, and the remaining scripts sit between. The result is an
+/// honest ellipsis instead of the hard glyph clipping a fixed-width text box
+/// would produce.
+fn ui_char_em(ch : Char) -> Double {
+  let code = ch.to_int()
+  if code == 32 {
+    0.34
+  } else if code < 128 {
+    0.58
+  } else if code >= 0x2E80 {
+    1.0
+  } else {
+    0.72
+  }
+}
+
+///|
+fn ui_truncate(value : String, width : Double, font_size : Double) -> String {
+  if value == "" || width <= 0.0 || font_size <= 0.0 {
+    return value
+  }
+  let chars = value.to_array()
+  let mut total = 0.0
+  for ch in chars {
+    total = total + ui_char_em(ch)
+  }
+  let max_units = width / font_size
+  if total <= max_units {
+    return value
+  }
+  let budget = (max_units - 1.0).max(0.0)
+  let mut used = 0.0
+  let mut keep = 0
+  for ch in chars {
+    let units = ui_char_em(ch)
+    if used + units > budget {
+      break
+    }
+    used = used + units
+    keep = keep + 1
+  }
+  let head = if keep == 0 {
+    ""
+  } else {
+    @string.from_array(chars[0:keep]).trim_end().to_owned()
+  }
+  if head == "" {
+    "…"
+  } else {
+    head + "…"
+  }
+}
+
+///|
+/// Approximate rendered advance of a string at a given font size. Used only
+/// for content-width tabs and compact labels where the view must reserve the
+/// same footprint as its text without a second measurement pass.
+fn ui_advance(value : String, font_size : Double) -> Double {
+  let mut total = 0.0
+  for ch in value.to_array() {
+    total = total + ui_char_em(ch)
+  }
+  total * font_size
+}
+
+///|
 fn ui_mono_wrapped(
   value : String,
   size : Double,
@@ -269,6 +394,7 @@ fn ui_tag(label : String) -> @moui.View[Msg] {
       horizontal=6.0,
     ),
     height=18.0,
+    background=clear_color(),
     corner_radius=3.0,
     border=Some(ui_edge(tone.multiply_alpha(0.5))),
     padding=0.0,
@@ -309,6 +435,7 @@ fn ui_state_pill(label : String, tone : @core.Color) -> @moui.View[Msg] {
       vertical=0.0,
     ),
     height=20.0,
+    background=clear_color(),
     corner_radius=3.0,
     border=Some(ui_edge(ui_border())),
     padding=0.0,
@@ -381,7 +508,7 @@ fn ui_ghost_compact(label : String, msg : Msg, width : Double) -> @moui.View[Msg
     on_click=msg,
     style=ghost_button_style(),
     width~,
-    height=28.0,
+    height=ui_top_control_height,
   )
 }
 
@@ -517,16 +644,16 @@ fn ui_choice_segment(
 ) -> @moui.View[Msg] {
   let view = @views.container(
     @views.padding_xy(
-      @views.text(label, align=@core.TextAlign::TextStart).font(ui_font(12.0, 500)).foreground(
+      @views.text(label, align=@core.TextAlign::TextStart).font(ui_font(11.0, 500)).foreground(
         if active {
           ui_ink()
         } else {
           ui_muted()
         },
       ),
-      horizontal=18.0,
+      horizontal=14.0,
     ),
-    height=30.0,
+    height=27.0,
     background=if active { ui_selected() } else { ui_surface() },
     corner_radius=4.0,
     border=Some(

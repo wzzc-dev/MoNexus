@@ -1,10 +1,11 @@
 ///|
 /// The MoNexus desktop shell and its eight pages.
 ///
-/// Layout contract (1280x800): 8pt outer margin, two islands with an 8pt gap.
-/// The 224pt sidebar owns navigation; the 1032pt main island is a 44pt top
-/// bar, a scrolling 992pt body, and a 26pt status bar. Every colour, font and
-/// radius comes from `theme.mbt`/`ui.mbt`; this file only composes.
+/// Layout at the 1280x800 reference: 8pt outer margin, two islands with an 8pt
+/// gap. The 224pt sidebar owns navigation; the main island is capped at 1032pt
+/// and takes the remaining viewport width on narrower windows, with a 44pt top
+/// bar, a 992pt body rhythm and a 26pt status bar. Every colour, font and radius
+/// comes from `theme.mbt`/`ui.mbt`; this file only composes.
 
 ///|
 using @views {
@@ -305,7 +306,7 @@ fn bot_initial(name : String) -> String {
 }
 
 ///|
-/// Left navigation row: 32pt tall, Lucide glyph + label, accent tint when the
+/// Left navigation row: 29pt tall, Lucide glyph + label, accent tint when the
 /// page is open and a hover wash otherwise. The Inbox row carries its needs-you
 /// count.
 fn nav_item(model : Model, page : Page) -> @moui.View[Msg] {
@@ -336,8 +337,8 @@ fn nav_item(model : Model, page : Page) -> @moui.View[Msg] {
       corner_radius=1.0,
       padding=0.0,
     ),
-    lucide_icon(page_icon(page), size=16.0, color=tone),
-    text(label, align=@core.TextAlign::TextStart).font(ui_font(13.0, if active { 600 } else { 400 }))
+    lucide_icon(page_icon(page), size=14.0, color=tone),
+    text(label, align=@core.TextAlign::TextStart).font(ui_font(11.0, if active { 620 } else { 500 }))
     .foreground(tone),
     spacer(weight=1.0),
   ]
@@ -349,12 +350,12 @@ fn nav_item(model : Model, page : Page) -> @moui.View[Msg] {
   }
   container(
     padding_xy(
-      row(children, spacing=10.0, align=@style.CrossAlign::Center).frame(
+      row(children, spacing=9.0, align=@style.CrossAlign::Center).frame(
         width=168.0,
       ),
       horizontal=8.0,
     ),
-    height=32.0,
+    height=29.0,
     background=background,
     corner_radius=4.0,
     padding=0.0,
@@ -385,7 +386,8 @@ fn sidebar_group_label(label : String) -> @moui.View[Msg] {
       bottom=5.0,
       left=8.0,
     ),
-    height=20.0,
+    height=19.0,
+    background=clear_color(),
     padding=0.0,
   )
 }
@@ -401,27 +403,43 @@ fn sidebar_chat_row(
   let tone = if active || hovered { ui_text_color() } else { ui_muted() }
   let bot = bot_name_for_chat(model, chat)
   let when = compact_time(chat.updated_at)
-  let meta = if when == "" {
+  let base_meta = if when == "" {
     bot
   } else {
     bot + " · " + when
   }
+  let title = ui_truncate(chat.title, 182.0, 11.0)
+  let meta = ui_truncate(base_meta, 182.0, 9.0)
   let msg = if chat.is_fallback {
     SelectPage(Workroom)
   } else {
     SelectChat(chat.id)
   }
   container(
-    padding_edges(
-      column([
-        text(chat.title, align=@core.TextAlign::TextStart).font(ui_font(11.0, if active { 600 } else { 500 })).foreground(tone),
-        text(meta, align=@core.TextAlign::TextStart).font(ui_font(9.0, 400)).foreground(ui_dim()),
-      ], spacing=2.0, align=@style.CrossAlign::Start).frame(width=174.0),
-      top=6.0,
-      right=8.0,
-      bottom=6.0,
-      left=8.0,
-    ),
+    row([
+      container(
+        @views.empty(),
+        width=2.0,
+        height=26.0,
+        background=if active { ui_ink() } else { clear_color() },
+        corner_radius=1.0,
+        padding=0.0,
+      ),
+      padding_edges(
+        column([
+          text(title, width=182.0, align=@core.TextAlign::TextStart, wrap=false).font(
+            ui_font(11.0, if active { 620 } else { 500 }),
+          ).foreground(tone),
+          text(meta, width=182.0, align=@core.TextAlign::TextStart, wrap=false).font(
+            ui_font(9.0, 400),
+          ).foreground(ui_dim()),
+        ], spacing=2.0, align=@style.CrossAlign::Start).frame(width=182.0),
+        top=6.0,
+        right=8.0,
+        bottom=6.0,
+        left=8.0,
+      ),
+    ], spacing=0.0, align=@style.CrossAlign::Center).frame(width=200.0),
     height=38.0,
     background=if active {
       ui_selected()
@@ -474,36 +492,53 @@ fn sidebar_bot_row(
   } else {
     SelectBot(identity.id)
   }
+  let name = ui_truncate(identity.name, 132.0, 11.0)
+  let shown_status = ui_truncate(status, 132.0, 9.0)
   container(
-    padding_edges(
-      row([
-        container(
-          text(
-            bot_initial(identity.name),
-            align=@core.TextAlign::TextCenter,
-          ).font(ui_font(10.0, 600)).foreground(
-            if active { ui_on_ink() } else { ui_muted() },
+    row([
+      container(
+        @views.empty(),
+        width=2.0,
+        height=26.0,
+        background=if active { ui_ink() } else { clear_color() },
+        corner_radius=1.0,
+        padding=0.0,
+      ),
+      padding_edges(
+        row([
+          container(
+            text(
+              bot_initial(identity.name),
+              align=@core.TextAlign::TextCenter,
+            ).font(ui_font(10.0, 600)).foreground(
+              if active { ui_on_ink() } else { ui_muted() },
+            ),
+            width=25.0,
+            height=25.0,
+            background=if active { ui_ink() } else { ui_surface_alt() },
+            corner_radius=12.5,
+            border=Some(ui_edge(if active { ui_ink() } else { ui_border() })),
+            padding=0.0,
           ),
-          width=24.0,
-          height=24.0,
-          background=if active { ui_ink() } else { ui_surface_alt() },
-          corner_radius=12.0,
-          border=Some(ui_edge(if active { ui_ink() } else { ui_border() })),
-          padding=0.0,
-        ),
-        column([
-          text(identity.name, align=@core.TextAlign::TextStart).font(ui_font(11.0, if active { 600 } else { 500 })).foreground(
-            if active { ui_text_color() } else { ui_muted() },
-          ),
-          text(status, align=@core.TextAlign::TextStart).font(ui_font(9.0, 400)).foreground(ui_dim()),
-        ], spacing=1.0, align=@style.CrossAlign::Start).frame(width=130.0),
-        ui_dot(dot),
-      ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=176.0),
-      top=4.0,
-      right=6.0,
-      bottom=4.0,
-      left=6.0,
-    ),
+          column([
+            text(name, width=132.0, align=@core.TextAlign::TextStart, wrap=false).font(
+              ui_font(11.0, if active { 620 } else { 500 }),
+            ).foreground(
+              if active { ui_text_color() } else { ui_muted() },
+            ),
+            text(shown_status, width=132.0, align=@core.TextAlign::TextStart, wrap=false).font(
+              ui_font(9.0, 400),
+            ).foreground(ui_dim()),
+          ], spacing=1.0, align=@style.CrossAlign::Start).frame(width=132.0),
+          @views.spacer(weight=1.0),
+          ui_dot(dot),
+        ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=186.0),
+        top=4.0,
+        right=6.0,
+        bottom=4.0,
+        left=6.0,
+      ),
+    ], spacing=0.0, align=@style.CrossAlign::Center).frame(width=200.0),
     height=34.0,
     background=if active {
       ui_selected()
@@ -531,7 +566,7 @@ fn new_chat_action(model : Model) -> @moui.View[Msg] {
           ).foreground(ui_text_color()),
           spacer(weight=1.0),
           ui_meta("⌘N"),
-        ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=176.0),
+        ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=168.0),
         top=0.0,
         right=8.0,
         bottom=0.0,
@@ -645,6 +680,7 @@ fn sidebar_chat_list(model : Model) -> Array[@moui.View[Msg]] {
           left=8.0,
         ),
         height=22.0,
+        background=clear_color(),
         padding=0.0,
       ).on_tap(SelectBotTab(BotChats)).cursor(
         @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
@@ -673,6 +709,7 @@ fn sidebar_chat_list(model : Model) -> Array[@moui.View[Msg]] {
               left=8.0,
             ),
             height=44.0,
+            background=clear_color(),
             padding=0.0,
           ),
         )
@@ -713,6 +750,7 @@ fn sidebar_bot_list(model : Model) -> Array[@moui.View[Msg]] {
           left=8.0,
         ),
         height=44.0,
+        background=clear_color(),
         padding=0.0,
       ),
     )
@@ -724,6 +762,7 @@ fn sidebar_bot_list(model : Model) -> Array[@moui.View[Msg]] {
 fn sidebar(model : Model) -> @moui.View[Msg] {
   let chat_rows = sidebar_chat_list(model)
   let bot_rows = sidebar_bot_list(model)
+  let active_bot_name = active_bot_identity(model).name
   let host_name = if model.host.host_id == "" {
     tr(model.lang, "Local host", "本地主机")
   } else {
@@ -736,12 +775,14 @@ fn sidebar(model : Model) -> @moui.View[Msg] {
         column([
           text("MoNexus", align=@core.TextAlign::TextStart).font(ui_font(14.0, 600)).foreground(ui_text_color()),
           text(
-            tr(model.lang, "Workspace", "工作区") +
-            " · " +
-            active_bot_identity(model).name,
+            ui_truncate(
+              tr(model.lang, "Workspace", "工作区") + " · " + active_bot_name,
+              160.0,
+              9.0,
+            ),
             align=@core.TextAlign::TextStart,
           ).font(ui_font(9.0, 400)).foreground(ui_dim()),
-        ], spacing=2.0, align=@style.CrossAlign::Start).frame(width=150.0),
+        ], spacing=2.0, align=@style.CrossAlign::Start).frame(width=160.0),
       ], spacing=9.0, align=@style.CrossAlign::Center).frame(width=196.0),
       top=2.0,
       right=12.0,
@@ -795,10 +836,12 @@ fn sidebar(model : Model) -> @moui.View[Msg] {
     padding_edges(
       row([
         ui_dot(link_tone(model.host.link)),
-        text(host_name, align=@core.TextAlign::TextStart).font(ui_font(9.0, 400)).foreground(ui_muted()),
+        text(ui_truncate(host_name, 118.0, 9.0), align=@core.TextAlign::TextStart).font(
+          ui_font(9.0, 400),
+        ).foreground(ui_muted()),
         spacer(weight=1.0),
         ui_mono(model.host.link.label_in(model.lang), 8.5),
-      ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=176.0),
+      ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=200.0),
       top=12.0,
       right=12.0,
       bottom=6.0,
@@ -808,7 +851,7 @@ fn sidebar(model : Model) -> @moui.View[Msg] {
       column([
         nav_item(model, Settings),
         padding_edges(
-          ui_mono(@contracts.PRODUCT_VERSION, 9.0).frame(width=176.0),
+          ui_mono(@contracts.PRODUCT_VERSION, 9.0).frame(width=168.0),
           top=2.0,
           right=8.0,
           bottom=2.0,
@@ -820,8 +863,13 @@ fn sidebar(model : Model) -> @moui.View[Msg] {
       bottom=8.0,
       left=12.0,
     ),
-  ], spacing=0.0).frame(width=ui_sidebar_width, height=ui_sidebar_height)
-  ui_panel(content, width=ui_sidebar_width, height=ui_sidebar_height, fill=ui_rail())
+  ], spacing=0.0).frame(width=ui_sidebar_width, height=ui_sidebar_height.val)
+  ui_panel(
+    content,
+    width=ui_sidebar_width,
+    height=ui_sidebar_height.val,
+    fill=ui_rail(),
+  )
 }
 
 ///|
@@ -844,11 +892,11 @@ fn topbar_crumb(
   msg : Msg,
   active : Bool,
 ) -> @moui.View[Msg] {
+  let label_width = if active { 164.0 } else { 106.0 }
   container(
     padding_xy(
       text(
-        label,
-        width=if active { 220.0 } else { 130.0 },
+        ui_truncate(label, label_width, 10.0),
         align=@core.TextAlign::TextStart,
         wrap=false,
       ).font(ui_font(10.0, if active { 600 } else { 400 })).foreground(
@@ -857,6 +905,7 @@ fn topbar_crumb(
       horizontal=2.0,
     ),
     height=24.0,
+    background=clear_color(),
     padding=0.0,
   ).on_tap(msg).cursor(@core.CursorStyle::Icon(@core.CursorIcon::CursorPointer))
 }
@@ -871,13 +920,25 @@ fn topbar_sep() -> @moui.View[Msg] {
 ///|
 fn topbar_icon_action(icon : String, msg : Msg, active : Bool) -> @moui.View[Msg] {
   container(
-    lucide_icon(icon, size=14.0, color=ui_dim()),
+    lucide_icon(icon, size=14.0, color=if active { ui_ink() } else { ui_dim() }),
     width=26.0,
-    height=26.0,
+    height=ui_top_control_height,
     background=if active { ui_selected() } else { clear_color() },
     corner_radius=4.0,
     padding=0.0,
   ).on_tap(msg).cursor(@core.CursorStyle::Icon(@core.CursorIcon::CursorPointer))
+}
+
+///|
+fn topbar_kbd(label : String) -> @moui.View[Msg] {
+  container(
+    padding_xy(ui_mono(label, 8.5), horizontal=4.0),
+    height=16.0,
+    background=ui_surface_alt(),
+    corner_radius=3.0,
+    border=Some(ui_edge(ui_border_soft())),
+    padding=0.0,
+  )
 }
 
 ///|
@@ -889,19 +950,65 @@ fn topbar_search(model : Model) -> @moui.View[Msg] {
         text(
           tr(model.lang, "Search", "搜索"),
           align=@core.TextAlign::TextStart,
+          wrap=false,
         ).font(ui_font(10.0, 400)).foreground(ui_dim()),
         spacer(weight=1.0),
-        ui_mono("⌘K", 8.5),
-      ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=132.0),
+        topbar_kbd("⌘K"),
+      ], spacing=7.0, align=@style.CrossAlign::Center).frame(
+        width=ui_top_search_inner_width,
+      ),
       horizontal=8.0,
     ),
-    width=150.0,
-    height=26.0,
+    width=ui_top_search_width,
+    height=ui_top_control_height,
     background=ui_paper(),
     corner_radius=4.0,
     border=Some(ui_edge(ui_border())),
     padding=0.0,
   ).on_tap(SelectPage(Search)).cursor(
+    @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
+  )
+}
+
+///|
+/// Real floating-workspace trigger. The count comes from the overlay's actual
+/// tabs, never a decorative sample, and the shortcut is shown as a quiet mono
+/// cue inside the same 26pt control height as Search.
+fn topbar_float_trigger(model : Model) -> @moui.View[Msg] {
+  let active = model.float.open
+  let tone = if active { ui_ink() } else { ui_muted() }
+  container(
+    padding_xy(
+      row([
+        lucide_icon("panel-right", size=12.0, color=if active { ui_ink() } else { ui_dim() }),
+        text(
+          ui_truncate(tr(model.lang, "Float", "浮岛"), 42.0, 9.5),
+          align=@core.TextAlign::TextStart,
+        ).font(ui_font(9.5, 500)).foreground(tone),
+        container(
+          text(
+            model.float.tabs.length().to_string(),
+            align=@core.TextAlign::TextCenter,
+          ).font(mono_font(8.5, 500)).foreground(ui_muted()),
+          width=15.0,
+          height=15.0,
+          background=ui_selected(),
+          corner_radius=2.0,
+          padding=0.0,
+        ),
+        ui_mono("⌥Space", 8.0),
+      ], spacing=6.0, align=@style.CrossAlign::Center).frame(
+        width=ui_top_float_inner_width,
+      ),
+      horizontal=8.0,
+    ),
+    width=ui_top_float_width,
+    height=ui_top_control_height,
+    background=if active { ui_selected() } else { ui_surface() },
+    corner_radius=4.0,
+    border=Some(ui_edge(ui_border())),
+    padding=0.0,
+  ).on_tap(ToggleFloatWorkspace).cursor(
     @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
   )
 }
@@ -916,7 +1023,7 @@ fn topbar_more(model : Model) -> @moui.View[Msg] {
     topbar_icon_action("list", SelectPage(Tasks), model.page == Tasks),
     topbar_icon_action("columns-3", SelectPage(Manage), model.page == Manage),
     topbar_icon_action("settings", SelectPage(Settings), model.page == Settings),
-  ], spacing=3.0, align=@style.CrossAlign::Center)
+  ], spacing=ui_top_overflow_gap, align=@style.CrossAlign::Center)
 }
 
 ///|
@@ -971,29 +1078,42 @@ fn top_bar(model : Model) -> @moui.View[Msg] {
       )
     }
   }
-  let children : Array[@moui.View[Msg]] = [
-    row(crumbs, spacing=7.0, align=@style.CrossAlign::Center).frame(
-      width=520.0,
-    ),
-    spacer(weight=1.0),
-    topbar_search(model),
-    topbar_more(model),
-  ]
-  match page_refresh_msg(model) {
+  let refresh_slot = match page_refresh_msg(model) {
     Some(msg) =>
-      children.push(
+      container(
         ui_ghost_compact(tr(model.lang, "Refresh", "刷新"), msg, 64.0),
+        width=ui_top_refresh_width,
+        height=ui_top_control_height,
+        background=clear_color(),
+        padding=0.0,
       )
-    None => ()
+    None => container(
+      @views.empty(),
+      width=ui_top_refresh_width,
+      height=ui_top_control_height,
+      background=clear_color(),
+      padding=0.0,
+    )
   }
+  let actions = row([
+    topbar_search(model),
+    topbar_float_trigger(model),
+    topbar_more(model),
+  ], spacing=ui_top_action_gap, align=@style.CrossAlign::Center)
   container(
     padding_xy(
-      row(children, spacing=10.0, align=@style.CrossAlign::Center).frame(
-        width=992.0,
-      ),
-      horizontal=20.0,
+      row([
+        row(crumbs, spacing=6.0, align=@style.CrossAlign::Center).frame(
+          width=ui_top_crumb_width,
+        ),
+        spacer(weight=1.0),
+        refresh_slot,
+        actions,
+      ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=992.0),
+      horizontal=ui_body_padding.val,
     ),
     height=ui_topbar_height,
+    background=clear_color(),
     padding=0.0,
   )
 }
@@ -1020,13 +1140,14 @@ fn status_bar(model : Model) -> @moui.View[Msg] {
   container(
     padding_xy(
       row([
-        ui_mono(left, 10.5),
+        ui_mono(ui_truncate(left, 420.0, 9.5), 9.5),
         spacer(weight=1.0),
-        ui_mono(right, 10.5),
+        ui_mono(ui_truncate(right, 520.0, 9.5), 9.5),
       ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=992.0),
-      horizontal=20.0,
+      horizontal=ui_body_padding.val,
     ),
     height=ui_statusbar_height,
+    background=clear_color(),
     padding=0.0,
   )
 }
@@ -1316,7 +1437,7 @@ fn entry_row(
           color=if selected { ui_accent() } else { ui_dim() },
         ),
         text(
-          entry.name,
+          ui_truncate(entry.name, 560.0, 11.0),
           width=560.0,
           align=@core.TextAlign::TextStart,
           wrap=false,
@@ -1355,8 +1476,18 @@ fn workspace_row(
   }
   let actions : Array[@moui.View[Msg]] = [
     column([
-      ui_row_title(record.name),
-      ui_mono(record.root, 11.0),
+      @views.text(
+        ui_truncate(record.name, 560.0, 14.0),
+        width=560.0,
+        align=@core.TextAlign::TextStart,
+        wrap=false,
+      ).font(ui_font(14.0, 600)).foreground(ui_text_color()),
+      @views.text(
+        ui_truncate(record.root, 560.0, 11.0),
+        width=560.0,
+        align=@core.TextAlign::TextStart,
+        wrap=false,
+      ).font(mono_font(11.0, 400)).foreground(ui_dim()),
     ], spacing=3.0, align=@style.CrossAlign::Start),
     spacer(weight=1.0),
     ui_tag(
@@ -1392,7 +1523,7 @@ fn workspace_row(
     padding(child, 14.0),
     width=992.0,
     background=if selected { ui_accent_soft() } else { ui_surface() },
-    corner_radius=10.0,
+    corner_radius=5.0,
     border=Some(
       ui_edge(
         if selected {
@@ -1582,20 +1713,20 @@ fn project_chat_row(
       @views.row([
         @views.column([
           @views.text(
-            chat.title,
+            ui_truncate(chat.title, 360.0, 11.5),
             width=360.0,
             align=@core.TextAlign::TextStart,
             wrap=false,
           ).font(ui_font(11.5, 560)).foreground(ui_text_color()),
           @views.text(
-            bot_name_label,
+            ui_truncate(bot_name_label, 360.0, 9.0),
             width=360.0,
             align=@core.TextAlign::TextStart,
             wrap=false,
           ).font(ui_font(9.0, 400)).foreground(ui_dim()),
         ], spacing=2.0, align=@style.CrossAlign::Start).frame(width=360.0),
         @views.text(
-          agent_label,
+          ui_truncate(agent_label, 250.0, 9.0),
           width=250.0,
           align=@core.TextAlign::TextStart,
           wrap=false,
@@ -2340,7 +2471,7 @@ fn inbox_decision_card(
     padding(column(body, spacing=8.0).frame(width=964.0), 14.0),
     width=992.0,
     background=ui_surface(),
-    corner_radius=10.0,
+    corner_radius=5.0,
     border=Some(ui_edge(ui_border_soft())),
     padding=0.0,
   )
@@ -2498,7 +2629,7 @@ fn task_card(
     padding(column([child], spacing=0.0), 14.0),
     width=992.0,
     background=if selected { ui_accent_soft() } else { ui_surface() },
-    corner_radius=10.0,
+    corner_radius=5.0,
     border=Some(
       ui_edge(
         if selected {
@@ -2779,6 +2910,7 @@ fn activity_view(model : Model) -> @moui.View[Msg] {
             horizontal=0.0,
           ),
           height=26.0,
+          background=clear_color(),
           padding=0.0,
         ),
       )
@@ -3284,24 +3416,27 @@ fn main_island(model : Model) -> @moui.View[Msg] {
     // page scroll would nest two vertical scrollers.
     padding_edges(
       page_body(model),
-      top=ui_body_padding,
-      right=ui_body_padding,
-      bottom=ui_body_padding,
-      left=ui_body_padding,
+      top=ui_body_padding.val,
+      right=ui_body_padding.val,
+      bottom=ui_body_padding.val,
+      left=ui_body_padding.val,
     )
   } else if model.page == Workroom || model.page == BotDetail {
-    page_body(model).frame(width=ui_main_width, height=ui_scroll_height)
+    page_body(model).frame(
+      width=ui_main_width.val,
+      height=ui_scroll_height.val,
+    )
   } else {
     scroll_view(
       padding_edges(
         page_body(model).frame(width=ui_body_width),
-        top=ui_body_padding,
-        right=ui_body_padding,
-        bottom=ui_body_padding,
-        left=ui_body_padding,
+        top=ui_body_padding.val,
+        right=ui_body_padding.val,
+        bottom=ui_body_padding.val,
+        left=ui_body_padding.val,
       ),
-      width=ui_main_width,
-      height=ui_scroll_height,
+      width=ui_main_width.val,
+      height=ui_scroll_height.val,
       request=@core.ScrollRequest::new(
         id=model.scroll_epoch,
         offset=@core.Point::new(x=0.0, y=0.0),
@@ -3315,12 +3450,25 @@ fn main_island(model : Model) -> @moui.View[Msg] {
     body,
     ui_divider(),
     status_bar(model),
-  ], spacing=0.0).frame(width=ui_main_width, height=ui_main_height)
-  ui_panel(content, width=ui_main_width, height=ui_main_height)
+  ], spacing=0.0).frame(
+    width=ui_main_width.val,
+    height=ui_main_height.val,
+  )
+  ui_panel(
+    content,
+    width=ui_main_width.val,
+    height=ui_main_height.val,
+    fill=ui_canvas(),
+  )
 }
 
 ///|
-pub fn view(model : Model) -> @moui.View[Msg] {
+pub fn view(
+  model : Model,
+  environment : @core.ViewEnvironment,
+) -> @moui.View[Msg] {
+  let viewport = environment.viewport_size()
+  ui_apply_shell(viewport.width, viewport.height)
   // Repaint the whole window from the model's appearance before building any
   // child, so the hand-painted shell and MoUI controls agree on one palette.
   apply_theme_mode(model.theme_mode)
@@ -3330,8 +3478,8 @@ pub fn view(model : Model) -> @moui.View[Msg] {
   ], spacing=ui_gap, align=@style.CrossAlign::Start)
   let framed = container(
     shell,
-    width=ui_window_width,
-    height=ui_window_height,
+    width=ui_window_width.val,
+    height=ui_window_height.val,
     background=ui_frame(),
     padding=ui_margin,
   ).theme(app_theme())

@@ -5,6 +5,61 @@
 /// same hairline/row system as the workroom instead of rounded-card grids.
 
 ///|
+fn bot_body_height() -> Double {
+  (ui_scroll_height.val - 82.0 - 32.0 - 1.0).max(0.0)
+}
+
+///|
+fn bot_detail_width() -> Double {
+  (ui_main_width.val - 430.0 - 1.0).max(0.0)
+}
+
+///|
+fn bot_detail_inner_width() -> Double {
+  (bot_detail_width() - 44.0).max(0.0)
+}
+
+///|
+fn bot_header_width() -> Double {
+  (ui_main_width.val - 44.0).max(0.0)
+}
+
+///|
+fn bot_page_inner_width() -> Double {
+  (ui_main_width.val - 40.0).max(0.0)
+}
+
+///|
+fn bot_page_row_width() -> Double {
+  (bot_page_inner_width() - 24.0).max(0.0)
+}
+
+///|
+fn bot_page_wide_row_width() -> Double {
+  (bot_page_inner_width() - 32.0).max(0.0)
+}
+
+///|
+fn bot_item_scroll_height() -> Double {
+  (bot_body_height() - 28.0).max(0.0)
+}
+
+///|
+fn bot_detail_scroll_height() -> Double {
+  (bot_body_height() - 36.0).max(0.0)
+}
+
+///|
+fn bot_tab_scroll_height() -> Double {
+  (bot_body_height() - 32.0).max(0.0)
+}
+
+///|
+fn bot_agents_scroll_height() -> Double {
+  (bot_body_height() - 40.0).max(0.0)
+}
+
+///|
 fn bot_open_chat_msg(model : Model, bot : BotIdentity) -> Msg? {
   match latest_chat_for_bot(model.chats, bot.id) {
     Some(chat) => Some(SelectChat(chat.id))
@@ -54,6 +109,8 @@ fn bot_tab(
 ) -> @moui.View[Msg] {
   let active = model.bot_tab == tab
   let label = tab.label_in(model.lang)
+  let count_width = if count == "" { 0.0 } else { 5.0 + ui_advance(count, 8.5) }
+  let tab_width = ui_advance(label, 10.5) + count_width + 1.0
   let content = @views.row([
     @views.text(
       label,
@@ -68,19 +125,19 @@ fn bot_tab(
         mono_font(8.5, 400),
       ).foreground(ui_dim())
     },
-  ], spacing=5.0, align=@style.CrossAlign::Center).frame(width=80.0)
+  ], spacing=5.0, align=@style.CrossAlign::Center).frame(width=tab_width)
   @views.column([
     @views.padding_xy(content, horizontal=0.0, vertical=0.0),
     @views.container(
       @views.empty(),
-      width=80.0,
+      width=tab_width,
       height=2.0,
       background=if active { ui_ink() } else { clear_color() },
       padding=0.0,
     ),
   ], spacing=0.0, align=@style.CrossAlign::Start).frame(
-    width=80.0,
-    height=33.0,
+    width=tab_width,
+    height=32.0,
   ).on_tap(SelectBotTab(tab)).cursor(
     @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
   )
@@ -146,7 +203,9 @@ fn bot_project_filter_row(model : Model) -> @moui.View[Msg] {
       },
       236.0,
     ),
-  ], spacing=10.0, align=@style.CrossAlign::End).frame(width=992.0)
+  ], spacing=10.0, align=@style.CrossAlign::End).frame(
+    width=bot_page_inner_width(),
+  )
 }
 
 ///|
@@ -157,6 +216,7 @@ fn bot_directory_row(
 ) -> @moui.View[Msg] {
   let activity = bot_recent_activity(model, record)
   let latest = latest_chat_for_bot(model.chats, record.id)
+  let name = bot_name(record)
   let recent = match latest {
     Some(chat) => {
       let suffix = if activity == "" { "" } else { " · " + activity }
@@ -169,12 +229,14 @@ fn bot_directory_row(
         activity
       }
   }
+  let shown_name = ui_truncate(name, 220.0, 11.0)
+  let shown_recent = ui_truncate(recent, 600.0, 9.0)
   @views.container(
     @views.padding_edges(
       @views.row([
         @views.container(
           @views.text(
-            bot_initial(bot_name(record)),
+            bot_initial(name),
             align=@core.TextAlign::TextCenter,
           ).font(ui_font(9.0, 620)).foreground(ui_on_ink()),
           width=22.0,
@@ -186,7 +248,7 @@ fn bot_directory_row(
         @views.column([
           @views.row([
             @views.text(
-              bot_name(record),
+              shown_name,
               width=220.0,
               align=@core.TextAlign::TextStart,
               wrap=false,
@@ -200,7 +262,7 @@ fn bot_directory_row(
             }),
           ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=330.0),
           @views.text(
-            recent,
+            shown_recent,
             width=600.0,
             align=@core.TextAlign::TextStart,
             wrap=false,
@@ -215,13 +277,15 @@ fn bot_directory_row(
           },
           align=@core.TextAlign::TextEnd,
         ).font(ui_font(9.0, 500)).foreground(ui_dim()),
-      ], spacing=9.0, align=@style.CrossAlign::Center).frame(width=968.0),
+      ], spacing=9.0, align=@style.CrossAlign::Center).frame(
+        width=bot_page_row_width(),
+      ),
       top=7.0,
       right=12.0,
       bottom=7.0,
       left=12.0,
     ),
-    width=992.0,
+    width=bot_page_inner_width(),
     background=if selected { ui_selected() } else { clear_color() },
     corner_radius=3.0,
     padding=0.0,
@@ -238,7 +302,7 @@ fn bot_directory_rows(model : Model, selected_bot : String) -> Array[@moui.View[
     rows.push(
       @views.text(
         tr(model.lang, "Loading Bots from the host...", "正在从主机加载 Bot..."),
-        width=992.0,
+        width=bot_page_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(10.0, 400)).foreground(ui_dim()),
@@ -251,7 +315,7 @@ fn bot_directory_rows(model : Model, selected_bot : String) -> Array[@moui.View[
           "No Bot matches this Project filter. Bot membership is derived from active Chat participants; the host exposes no project.membership.list RPC.",
           "没有 Bot 符合此项目筛选。Bot 成员资格来自对话中的有效参与者；主机未暴露 project.membership.list RPC。",
         ),
-        width=992.0,
+        width=bot_page_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(10.0, 400)).foreground(ui_dim()),
@@ -333,11 +397,15 @@ fn bot_task_row(
         wrap=true,
       ).font(ui_font(10.5, 560)).foreground(ui_text_color()),
       @views.text(
-        if task.goal == "" {
-          task.status
-        } else {
-          task.status + " · " + task.goal
-        },
+        ui_truncate(
+          if task.goal == "" {
+            task.status
+          } else {
+            task.status + " · " + task.goal
+          },
+          310.0,
+          8.5,
+        ),
         width=310.0,
         align=@core.TextAlign::TextStart,
         wrap=false,
@@ -356,6 +424,7 @@ fn bot_task_row(
         ).font(mono_font(10.5, 500)).foreground(ui_muted()),
         width=16.0,
         height=16.0,
+        background=clear_color(),
         corner_radius=3.0,
         border=Some(ui_edge(ui_border_soft())),
         padding=0.0,
@@ -494,7 +563,7 @@ fn bot_automation_rows(model : Model) -> Array[@moui.View[Msg]] {
         @views.row([
           @views.lucide_icon("refresh-cw", size=12.0, color=ui_dim()),
           @views.text(
-            automation.title,
+            ui_truncate(automation.title, 260.0, 9.5),
             width=260.0,
             align=@core.TextAlign::TextStart,
             wrap=false,
@@ -635,7 +704,7 @@ fn bot_item_pane(
             @views.row([
               @views.lucide_icon("folder", size=11.0, color=ui_dim()),
               @views.text(
-                project_name(project),
+                ui_truncate(project_name(project), 270.0, 9.0),
                 width=270.0,
                 align=@core.TextAlign::TextStart,
                 wrap=false,
@@ -653,6 +722,7 @@ fn bot_item_pane(
             left=6.0,
           ),
           width=390.0,
+          background=clear_color(),
           padding=0.0,
         ).on_tap(SelectProject(project.id)).cursor(
           @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
@@ -700,7 +770,7 @@ fn bot_item_pane(
           width=402.0,
         ),
         width=402.0,
-        height=569.0,
+        height=bot_item_scroll_height(),
         request=@core.ScrollRequest::new(
           id=model.scroll_epoch + 300,
           offset=@core.Point::new(x=0.0, y=0.0),
@@ -713,7 +783,7 @@ fn bot_item_pane(
       left=14.0,
     ),
     width=430.0,
-    height=597.0,
+    height=bot_body_height(),
     background=ui_surface_alt(),
     padding=0.0,
   )
@@ -784,7 +854,9 @@ fn bot_task_detail(
         ).font(ui_font(17.0, 640)).foreground(ui_text_color()),
         ui_tag(task.status),
         @views.spacer(weight=1.0),
-      ], spacing=8.0, align=@style.CrossAlign::Start).frame(width=557.0),
+      ], spacing=8.0, align=@style.CrossAlign::Start).frame(
+        width=bot_detail_inner_width(),
+      ),
       @views.row([
         @views.text(
           tr(model.lang, "Item ", "事项 ") + short_metadata_id(task.id),
@@ -809,7 +881,9 @@ fn bot_task_detail(
           align=@core.TextAlign::TextStart,
         ).font(mono_font(8.5, 400)).foreground(ui_dim()),
         @views.spacer(weight=1.0),
-      ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=557.0),
+      ], spacing=7.0, align=@style.CrossAlign::Center).frame(
+        width=bot_detail_inner_width(),
+      ),
     ], spacing=7.0, align=@style.CrossAlign::Start),
   ]
   sections.push(ui_divider_soft())
@@ -826,7 +900,7 @@ fn bot_task_detail(
       } else {
         task.goal
       },
-      width=557.0,
+      width=bot_detail_inner_width(),
       align=@core.TextAlign::TextStart,
       wrap=true,
     ).font(ui_font(10.5, 400)).foreground(ui_muted()),
@@ -842,7 +916,7 @@ fn bot_task_detail(
     sections.push(
       @views.text(
         tr(model.lang, "No criteria recorded.", "尚无完成标准。"),
-        width=557.0,
+        width=bot_detail_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(10.0, 400)).foreground(ui_dim()),
@@ -861,11 +935,13 @@ fn bot_task_detail(
           ),
           @views.text(
             criterion,
-            width=540.0,
+            width=bot_detail_inner_width() - 17.0,
             align=@core.TextAlign::TextStart,
             wrap=true,
           ).font(ui_font(9.5, 400)).foreground(ui_muted()),
-        ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=557.0),
+        ], spacing=8.0, align=@style.CrossAlign::Center).frame(
+          width=bot_detail_inner_width(),
+        ),
       )
     }
   }
@@ -893,12 +969,14 @@ fn bot_task_detail(
             }),
             align=@core.TextAlign::TextEnd,
           ).font(mono_font(8.0, 400)).foreground(ui_dim()),
-        ], spacing=6.0, align=@style.CrossAlign::Center).frame(width=557.0),
+        ], spacing=6.0, align=@style.CrossAlign::Center).frame(
+          width=bot_detail_inner_width(),
+        ),
       )
       sections.push(
         @views.text(
           launch,
-          width=557.0,
+          width=bot_detail_inner_width(),
           align=@core.TextAlign::TextStart,
           wrap=true,
         ).font(ui_font(9.5, 400)).foreground(ui_muted()),
@@ -913,12 +991,14 @@ fn bot_task_detail(
             align=@core.TextAlign::TextStart,
           ).font(ui_font(9.0, 600)).foreground(ui_text_color()),
           @views.spacer(weight=1.0),
-        ], spacing=6.0, align=@style.CrossAlign::Center).frame(width=557.0),
+        ], spacing=6.0, align=@style.CrossAlign::Center).frame(
+          width=bot_detail_inner_width(),
+        ),
       )
       sections.push(
         @views.text(
           transcript,
-          width=557.0,
+          width=bot_detail_inner_width(),
           align=@core.TextAlign::TextStart,
           wrap=true,
         ).font(ui_font(9.5, 400)).foreground(ui_muted()),
@@ -932,7 +1012,7 @@ fn bot_task_detail(
           "No Chat is mapped to this item yet.",
           "尚未有聊天映射到此事项。",
         ),
-        width=557.0,
+        width=bot_detail_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(9.5, 400)).foreground(ui_dim()),
@@ -945,7 +1025,9 @@ fn bot_task_detail(
         align=@core.TextAlign::TextStart,
       ).font(ui_font(8.5, 500)).foreground(ui_muted()),
       @views.spacer(weight=1.0),
-    ], spacing=6.0, align=@style.CrossAlign::Center).frame(width=557.0).on_tap(
+    ], spacing=6.0, align=@style.CrossAlign::Center).frame(
+      width=bot_detail_inner_width(),
+    ).on_tap(
       SelectPage(Workroom),
     ).cursor(@core.CursorStyle::Icon(@core.CursorIcon::CursorPointer)),
   )
@@ -960,7 +1042,7 @@ fn bot_task_detail(
     sections.push(
       @views.text(
         tr(model.lang, "No activity recorded.", "尚无活动记录。"),
-        width=557.0,
+        width=bot_detail_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(9.5, 400)).foreground(ui_dim()),
@@ -993,7 +1075,9 @@ fn bot_task_detail(
             workroom_clock(event.ts),
             align=@core.TextAlign::TextEnd,
           ).font(mono_font(8.0, 400)).foreground(ui_dim()),
-        ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=557.0),
+        ], spacing=7.0, align=@style.CrossAlign::Center).frame(
+          width=bot_detail_inner_width(),
+        ),
       )
       shown = shown + 1
     }
@@ -1013,7 +1097,7 @@ fn bot_task_detail(
       lines=2,
       variant=@style.TextFieldVariant::Filled,
       theme=field_theme(),
-      width=557.0,
+      width=bot_detail_inner_width(),
       line_height=18.0,
     ),
   )
@@ -1041,13 +1125,15 @@ fn bot_task_detail(
       ).on_tap(BotCommentSave).cursor(
         @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
       ),
-    ], spacing=7.0, align=@style.CrossAlign::Center).frame(width=557.0),
+    ], spacing=7.0, align=@style.CrossAlign::Center).frame(
+      width=bot_detail_inner_width(),
+    ),
   )
   if model.bot_comment_note != "" {
     sections.push(
       @views.text(
         model.bot_comment_note,
-        width=557.0,
+        width=bot_detail_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(8.5, 400)).foreground(
@@ -1061,7 +1147,7 @@ fn bot_task_detail(
     )
   }
   @views.column(sections, spacing=9.0, align=@style.CrossAlign::Start).frame(
-    width=557.0,
+    width=bot_detail_inner_width(),
   )
 }
 
@@ -1084,8 +1170,8 @@ fn bot_detail_pane(
     @views.padding_edges(
       @views.scroll_view(
         body,
-        width=557.0,
-        height=561.0,
+        width=bot_detail_inner_width(),
+        height=bot_detail_scroll_height(),
         request=@core.ScrollRequest::new(
           id=model.scroll_epoch + 301,
           offset=@core.Point::new(x=0.0, y=0.0),
@@ -1097,8 +1183,8 @@ fn bot_detail_pane(
       bottom=20.0,
       left=22.0,
     ),
-    width=601.0,
-    height=597.0,
+    width=bot_detail_width(),
+    height=bot_body_height(),
     background=ui_canvas(),
     padding=0.0,
   )
@@ -1113,8 +1199,8 @@ fn bot_home(model : Model, bot : BotIdentity) -> @moui.View[Msg] {
     ui_divider_soft(),
     right,
   ], spacing=0.0, align=@style.CrossAlign::Start).frame(
-    width=1032.0,
-    height=597.0,
+    width=ui_main_width.val,
+    height=bot_body_height(),
   )
 }
 
@@ -1143,7 +1229,9 @@ fn bot_chats_tab(
         chats.length().to_string(),
         align=@core.TextAlign::TextEnd,
       ).font(mono_font(9.0, 400)).foreground(ui_dim()),
-    ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=992.0),
+    ], spacing=8.0, align=@style.CrossAlign::Center).frame(
+      width=bot_page_inner_width(),
+    ),
   )
   if model.bot_project_filter == PROJECT_FILTER_NONE {
     rows.push(
@@ -1153,7 +1241,7 @@ fn bot_chats_tab(
           "No-project Chats appear only here in the Bot view; they never enter a Project view.",
           "无项目对话只在此 Bot 视图出现，不会进入项目视图。",
         ),
-        width=992.0,
+        width=bot_page_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(9.5, 400)).foreground(ui_dim()),
@@ -1167,7 +1255,7 @@ fn bot_chats_tab(
           "No Chat matches this Project filter yet.",
           "此项目筛选下尚无对话。",
         ),
-        width=992.0,
+        width=bot_page_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(11.0, 400)).foreground(ui_dim()),
@@ -1176,7 +1264,9 @@ fn bot_chats_tab(
       @views.row([
         ui_primary(tr(model.lang, "New Chat", "新对话"), NewChat),
         @views.spacer(weight=1.0),
-      ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=992.0),
+      ], spacing=8.0, align=@style.CrossAlign::Center).frame(
+        width=bot_page_inner_width(),
+      ),
     )
   } else {
     for record in chats {
@@ -1186,21 +1276,29 @@ fn bot_chats_tab(
           @views.padding_edges(
             @views.row([
               @views.text(
-                chat.title,
+                ui_truncate(chat.title, 520.0, 12.0),
                 width=520.0,
                 align=@core.TextAlign::TextStart,
                 wrap=false,
               ).font(ui_font(12.0, 560)).foreground(ui_text_color()),
               @views.text(
-                chat_project_label(model, chat.project_id),
+                ui_truncate(
+                  chat_project_label(model, chat.project_id),
+                  160.0,
+                  9.5,
+                ),
+                width=160.0,
                 align=@core.TextAlign::TextStart,
+                wrap=false,
               ).font(ui_font(9.5, 400)).foreground(ui_muted()),
               if chat.agent_name == "" {
                 ui_meta("")
               } else {
                 @views.text(
-                  chat.agent_name,
+                  ui_truncate(chat.agent_name, 120.0, 9.0),
+                  width=120.0,
                   align=@core.TextAlign::TextStart,
+                  wrap=false,
                 ).font(ui_font(9.0, 400)).foreground(ui_dim())
               },
               @views.spacer(weight=1.0),
@@ -1208,13 +1306,15 @@ fn bot_chats_tab(
                 compact_time(chat.updated_at),
                 align=@core.TextAlign::TextEnd,
               ).font(mono_font(8.5, 400)).foreground(ui_dim()),
-            ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=968.0),
+            ], spacing=10.0, align=@style.CrossAlign::Center).frame(
+              width=bot_page_row_width(),
+            ),
             top=8.0,
             right=12.0,
             bottom=8.0,
             left=12.0,
           ),
-          width=992.0,
+          width=bot_page_inner_width(),
           background=if chat.id == model.selected_chat {
             ui_selected()
           } else {
@@ -1233,10 +1333,10 @@ fn bot_chats_tab(
     @views.padding_edges(
       @views.scroll_view(
         @views.column(rows, spacing=10.0, align=@style.CrossAlign::Start).frame(
-          width=992.0,
+          width=bot_page_inner_width(),
         ),
-        width=992.0,
-          height=565.0,
+        width=bot_page_inner_width(),
+        height=bot_tab_scroll_height(),
         request=@core.ScrollRequest::new(
           id=model.scroll_epoch + 302,
           offset=@core.Point::new(x=0.0, y=0.0),
@@ -1248,8 +1348,9 @@ fn bot_chats_tab(
       bottom=16.0,
       left=20.0,
     ),
-    width=1032.0,
-    height=597.0,
+    width=ui_main_width.val,
+    height=bot_body_height(),
+    background=clear_color(),
     padding=0.0,
   )
 }
@@ -1361,13 +1462,15 @@ fn bot_agent_row(
         @views.spacer(weight=1.0),
         if when == "" { ui_meta("") } else { ui_mono(when, 8.5) },
         @views.row(actions, spacing=5.0, align=@style.CrossAlign::Center),
-      ], spacing=10.0, align=@style.CrossAlign::Center).frame(width=960.0),
+      ], spacing=10.0, align=@style.CrossAlign::Center).frame(
+        width=bot_page_wide_row_width(),
+      ),
       top=9.0,
       right=14.0,
       bottom=9.0,
       left=14.0,
     ),
-    width=992.0,
+    width=bot_page_inner_width(),
     background=ui_surface(),
     border=Some(ui_border_style(ui_border_soft(), 1.0)),
     corner_radius=4.0,
@@ -1417,7 +1520,9 @@ fn bot_agent_create_form(
         tr(model.lang, "optional", "可选"),
         260.0,
       ),
-    ], spacing=12.0, align=@style.CrossAlign::End).frame(width=960.0),
+    ], spacing=12.0, align=@style.CrossAlign::End).frame(
+      width=bot_page_wide_row_width(),
+    ),
     @views.row([
       @views.column([
         ui_field_label(tr(model.lang, "Launch", "启动方式")),
@@ -1443,7 +1548,9 @@ fn bot_agent_create_form(
         },
         BotAgentCreateSubmit,
       ),
-    ], spacing=12.0, align=@style.CrossAlign::End).frame(width=960.0),
+    ], spacing=12.0, align=@style.CrossAlign::End).frame(
+      width=bot_page_wide_row_width(),
+    ),
   ]
   if draft.launch_kind == @contracts.RUNTIME_LAUNCH_COMMAND {
     fields.push(
@@ -1462,7 +1569,9 @@ fn bot_agent_create_form(
           tr(model.lang, "space-separated", "以空格分隔"),
           560.0,
         ),
-      ], spacing=12.0, align=@style.CrossAlign::End).frame(width=960.0),
+      ], spacing=12.0, align=@style.CrossAlign::End).frame(
+        width=bot_page_wide_row_width(),
+      ),
     )
   }
   if bot.software_allowlist.is_empty() {
@@ -1473,7 +1582,7 @@ fn bot_agent_create_form(
           "This Bot projects no software allowlist. The host accepts the software name entered above; no agent id is typed.",
           "此 Bot 未投影软件允许列表。主机会接受上方输入的软件名称；无需输入 Agent ID。",
         ),
-        960.0,
+        bot_page_wide_row_width(),
       ),
     )
   }
@@ -1486,7 +1595,7 @@ fn bot_agent_create_form(
             "This Bot's create policy is off; the host will reject new Agents.",
             "此 Bot 的创建策略为关闭；主机会拒绝新的 Agent。",
           ),
-          width=960.0,
+          width=bot_page_wide_row_width(),
           align=@core.TextAlign::TextStart,
           wrap=true,
         ).font(ui_font(10.0, 400)).foreground(ui_warning()),
@@ -1499,7 +1608,7 @@ fn bot_agent_create_form(
             "This Bot's create policy is ask. The host requires an owner Decision id; this P1 form does not invent one, so creation will be rejected until the policy is changed outside this flow.",
             "此 Bot 的创建策略为询问。主机要求所有者决策 ID；此 P1 表单不会编造该 ID，因此在流程外更改策略前，创建会被拒绝。",
           ),
-          width=960.0,
+          width=bot_page_wide_row_width(),
           align=@core.TextAlign::TextStart,
           wrap=true,
         ).font(ui_font(10.0, 400)).foreground(ui_warning()),
@@ -1507,12 +1616,14 @@ fn bot_agent_create_form(
     _ => ()
   }
   if draft.message != "" {
-    fields.push(ui_muted_wrapped(draft.message, 960.0))
+    fields.push(
+      ui_muted_wrapped(draft.message, bot_page_wide_row_width()),
+    )
   } else if model.chat_error.has_prefix("bot.agent.") {
     fields.push(
       @views.text(
         model.chat_error,
-        width=960.0,
+        width=bot_page_wide_row_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(10.0, 400)).foreground(ui_danger()),
@@ -1540,13 +1651,15 @@ fn bot_agents_tab(model : Model) -> @moui.View[Msg] {
         tr(model.lang, "Refresh", "刷新"),
         SelectBotTab(BotAgents),
       ),
-    ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=992.0),
+    ], spacing=8.0, align=@style.CrossAlign::Center).frame(
+      width=bot_page_inner_width(),
+    ),
   ]
   if !bot_agents_loaded_for(model, bot_identity.id) {
     rows.push(
       @views.text(
         tr(model.lang, "Loading Agents from the host...", "正在从主机加载 Agent..."),
-        width=992.0,
+        width=bot_page_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(10.0, 400)).foreground(ui_dim()),
@@ -1559,7 +1672,7 @@ fn bot_agents_tab(model : Model) -> @moui.View[Msg] {
           "No Agents for this Bot yet. Create one by name and software below.",
           "此 Bot 尚无 Agent。请在下方按名称和软件创建。",
         ),
-        width=992.0,
+        width=bot_page_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(10.0, 400)).foreground(ui_dim()),
@@ -1584,7 +1697,7 @@ fn bot_agents_tab(model : Model) -> @moui.View[Msg] {
             "Open a projected Bot before creating an Agent.",
             "请先打开一个已投影的 Bot，再创建 Agent。",
           ),
-          width=992.0,
+          width=bot_page_inner_width(),
           align=@core.TextAlign::TextStart,
           wrap=true,
         ).font(ui_font(10.0, 400)).foreground(ui_warning()),
@@ -1605,7 +1718,7 @@ fn bot_agents_tab(model : Model) -> @moui.View[Msg] {
         "Legacy session controls stay reachable; Chat owns the visible thread.",
         "旧会话控制仍可访问；可见线程由 Chat 承载。",
       ),
-      width=992.0,
+      width=bot_page_inner_width(),
       align=@core.TextAlign::TextStart,
       wrap=true,
     ).font(ui_font(9.0, 400)).foreground(ui_dim()),
@@ -1617,10 +1730,10 @@ fn bot_agents_tab(model : Model) -> @moui.View[Msg] {
     @views.padding_edges(
       @views.scroll_view(
         @views.column(rows, spacing=10.0, align=@style.CrossAlign::Start).frame(
-          width=992.0,
+          width=bot_page_inner_width(),
         ),
-        width=992.0,
-        height=557.0,
+        width=bot_page_inner_width(),
+        height=bot_agents_scroll_height(),
         request=@core.ScrollRequest::new(
           id=model.scroll_epoch + 303,
           offset=@core.Point::new(x=0.0, y=0.0),
@@ -1632,8 +1745,9 @@ fn bot_agents_tab(model : Model) -> @moui.View[Msg] {
       bottom=20.0,
       left=20.0,
     ),
-    width=1032.0,
-    height=597.0,
+    width=ui_main_width.val,
+    height=bot_body_height(),
+    background=clear_color(),
     padding=0.0,
   )
 }
@@ -1658,7 +1772,7 @@ fn bot_files_tab(
           "No artifacts mapped to this Bot yet.",
           "尚无映射到此 Bot 的产物。",
         ),
-        width=992.0,
+        width=bot_page_inner_width(),
         align=@core.TextAlign::TextStart,
         wrap=true,
       ).font(ui_font(11.0, 400)).foreground(ui_dim()),
@@ -1673,10 +1787,10 @@ fn bot_files_tab(
     @views.padding_edges(
       @views.scroll_view(
         @views.column(rows, spacing=10.0, align=@style.CrossAlign::Start).frame(
-          width=992.0,
+          width=bot_page_inner_width(),
         ),
-        width=992.0,
-        height=565.0,
+        width=bot_page_inner_width(),
+        height=bot_tab_scroll_height(),
         request=@core.ScrollRequest::new(
           id=model.scroll_epoch + 304,
           offset=@core.Point::new(x=0.0, y=0.0),
@@ -1688,8 +1802,9 @@ fn bot_files_tab(
       bottom=16.0,
       left=20.0,
     ),
-    width=1032.0,
-    height=597.0,
+    width=ui_main_width.val,
+    height=bot_body_height(),
+    background=clear_color(),
     padding=0.0,
   )
 }
@@ -1711,6 +1826,10 @@ fn bot_detail_body(
 fn bot_detail_page(model : Model) -> @moui.View[Msg] {
   let bot = active_bot_identity(model)
   let chats = bot_chats_for(model, bot)
+  let summary = bot.summary +
+    " · " +
+    chats.length().to_string() +
+    tr(model.lang, " Chats", " 个 Chat")
   let tasks = bot_tasks_in_group(model, bot, BotWorkActive).length() +
     bot_tasks_in_group(model, bot, BotWorkWaiting).length() +
     bot_tasks_in_group(model, bot, BotWorkPlanned).length() +
@@ -1732,7 +1851,7 @@ fn bot_detail_page(model : Model) -> @moui.View[Msg] {
         @views.column([
           @views.row([
             @views.text(
-              bot.name,
+              ui_truncate(bot.name, 300.0, 21.0),
               width=300.0,
               align=@core.TextAlign::TextStart,
               wrap=false,
@@ -1746,10 +1865,7 @@ fn bot_detail_page(model : Model) -> @moui.View[Msg] {
             ),
           ], spacing=8.0, align=@style.CrossAlign::Center).frame(width=430.0),
           @views.text(
-            bot.summary +
-            " · " +
-            chats.length().to_string() +
-            tr(model.lang, " Chats", " 个 Chat"),
+            ui_truncate(summary, 430.0, 10.0),
             width=430.0,
             align=@core.TextAlign::TextStart,
             wrap=false,
@@ -1775,13 +1891,16 @@ fn bot_detail_page(model : Model) -> @moui.View[Msg] {
           spacing=6.0,
           align=@style.CrossAlign::Center,
         ),
-      ], spacing=13.0, align=@style.CrossAlign::Center).frame(width=988.0),
+      ], spacing=13.0, align=@style.CrossAlign::Center).frame(
+        width=bot_header_width(),
+      ),
       top=17.0,
       right=22.0,
       bottom=12.0,
       left=22.0,
     ),
     height=82.0,
+    background=clear_color(),
     padding=0.0,
   )
   let tabs = @views.container(
@@ -1800,27 +1919,30 @@ fn bot_detail_page(model : Model) -> @moui.View[Msg] {
           ),
           align=@core.TextAlign::TextEnd,
         ).font(ui_font(8.5, 400)).foreground(ui_dim()),
-      ], spacing=20.0, align=@style.CrossAlign::Center).frame(width=988.0),
+      ], spacing=20.0, align=@style.CrossAlign::Center).frame(
+        width=bot_header_width(),
+      ),
       top=0.0,
       right=22.0,
       bottom=0.0,
       left=22.0,
     ),
-    height=33.0,
-    border=Some(ui_border_style(ui_border_soft(), 1.0)),
+    height=32.0,
+    background=clear_color(),
     padding=0.0,
   )
   @views.container(
     @views.column([
       header,
       tabs,
+      ui_divider_soft(),
       bot_detail_body(model, bot),
     ], spacing=0.0, align=@style.CrossAlign::Start).frame(
-      width=1032.0,
-      height=712.0,
+      width=ui_main_width.val,
+      height=ui_scroll_height.val,
     ),
-    width=1032.0,
-    height=712.0,
+    width=ui_main_width.val,
+    height=ui_scroll_height.val,
     background=ui_canvas(),
     padding=0.0,
   )
