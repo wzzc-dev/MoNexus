@@ -109,27 +109,6 @@ fn terminal_argv(
 }
 
 ///|
-fn ssh_tty_argv(
-  target : @ssh.SshTarget,
-  remote_command : String,
-) -> Array[String] {
-  let argv = @ssh.ssh_argv(target, remote_command)
-  let out : Array[String] = []
-  if argv.length() < 2 {
-    return argv
-  }
-  let mut index = 0
-  while index < argv.length() - 2 {
-    out.push(argv[index])
-    index = index + 1
-  }
-  out.push("-tt")
-  out.push(argv[argv.length() - 2])
-  out.push(argv[argv.length() - 1])
-  out
-}
-
-///|
 async fn pump_local_pty(
   pty : @pty.Pty,
   output : @aqueue.Queue[@workspace.TerminalEvent],
@@ -211,97 +190,16 @@ async fn run_local_container_terminal(
 }
 
 ///|
-async fn pump_process_reader(
-  reader : @process.ReadFromProcess,
-  output : @aqueue.Queue[@workspace.TerminalEvent],
-) -> Unit {
-  for ;; {
-    let chunk = reader.read_some() catch { _ => break }
-    match chunk {
-      Some(bytes) => {
-        let text = @utf8.decode_lossy(bytes[:], ignore_bom=false)
-        let clean = sanitize_terminal(text)
-        if clean != "" {
-          output.put(@workspace.TerminalEvent::Data(clean)) catch {
-            _ => break
-          }
-        }
-      }
-      None => break
-    }
-  }
-  reader.close()
-}
-
-///|
 async fn run_ssh_container_terminal(
   target : @ssh.SshTarget,
   docker_argv : Array[String],
+  rows : Int32,
+  cols : Int32,
   input : @aqueue.Queue[@workspace.TerminalInput],
   output : @aqueue.Queue[@workspace.TerminalEvent],
 ) -> Unit {
   let remote = @ssh.remote_exec_command(".", docker_argv)
-  let argv = ssh_tty_argv(target, remote)
-  let (stdin, stdin_writer) = @process.write_to_process() catch {
-    error => {
-      output.put(
-        @workspace.TerminalEvent::Data(
-          "terminal: " + error.to_string() + "\n",
-        ),
-      ) catch { _ => () }
-      output.put(@workspace.TerminalEvent::Eof) catch { _ => () }
-      output.close()
-      return
-    }
-  }
-  let (stdout_reader, stdout_pipe) = @process.read_from_process() catch {
-    _ => {
-      output.put(@workspace.TerminalEvent::Eof) catch { _ => () }
-      output.close()
-      return
-    }
-  }
-  let (stderr_reader, stderr_pipe) = @process.read_from_process() catch {
-    _ => {
-      output.put(@workspace.TerminalEvent::Eof) catch { _ => () }
-      output.close()
-      return
-    }
-  }
-  @async.with_task_group(async fn(group) {
-    let exit = group.spawn(() => {
-      @process.run(
-        argv[0],
-        argv[1:].to_owned(),
-        stdin=stdin,
-        stdout=stdout_pipe,
-        stderr=stderr_pipe,
-      )
-    })
-    group.spawn_bg(() => pump_process_reader(stdout_reader, output))
-    group.spawn_bg(() => pump_process_reader(stderr_reader, output))
-    group.spawn_bg(() => {
-      let _ = exit.wait() catch { _ => 0 }
-      output.put(@workspace.TerminalEvent::Eof) catch { _ => () }
-      group.return_immediately(())
-    })
-    for ;; {
-      let item = input.get() catch { _ => break }
-      match item {
-        @workspace.TerminalInput::Data(text) =>
-          stdin_writer.write(text) catch {
-            _ => break
-          }
-        // The SSH transport is pipe-backed and has no window-change channel;
-        // ignore resize while keeping the container session alive.
-        @workspace.TerminalInput::Resize(_rows, _cols) => ()
-        @workspace.TerminalInput::Close => break
-      }
-    }
-  })
-  stdin_writer.close()
-  output.put(@workspace.TerminalEvent::Eof) catch { _ => () }
-  output.close()
+  @workspace.run_ssh_pty_terminal(target, remote, rows, cols, input, output)
 }
 
 ///|
@@ -372,7 +270,7 @@ pub async fn run_container_terminal(
       for item in docker_argv {
         remote_argv.push(item)
       }
-      run_ssh_container_terminal(target, remote_argv, input, output)
+      run_ssh_container_terminal(target, remote_argv, rows, cols, input, output)
     }
     None => {
       if runner.runtime {

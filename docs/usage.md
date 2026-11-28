@@ -1385,8 +1385,10 @@ only that Run's environment is touched. `terminal.open`,
 `workspace.gitStatus` and `workspace.gitDiff` redirect into a running
 environment for the workspace root (no specific `worktree_id`).
 `terminal.resize` takes `session_id`, `rows` and `cols` (validated `1..10000`);
-local PTY, container and runtime environments apply it, while pipe-backed SSH
-terminals accept and ignore it because they have no window-change channel.
+local PTY, SSH project terminals (including SSH container terminals), container
+and runtime environments apply it. SSH runs `ssh -tt` behind a local PTY, so
+resizing that PTY sends SIGWINCH to `ssh`, which forwards an SSH
+`window-change` request to the remote PTY.
 
 ### Start, stop, destroy, list, doctor
 

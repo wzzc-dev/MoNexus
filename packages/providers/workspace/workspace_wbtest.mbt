@@ -95,3 +95,31 @@ async test "local terminal resize reaches the PTY" {
     None => fail("local terminal resize test timed out")
   }
 }
+
+///|
+test "ssh PTY wrapper keeps -tt and preserves the ssh argv" {
+  let target = @ssh.SshTarget::new(
+    host="example.com",
+    port=2222,
+    user="tester",
+    identity="/tmp/key",
+    use_ssh_config=false,
+    host_key_policy="yes",
+    known_hosts_file="/tmp/kh",
+    timeout_seconds=3,
+  )
+  let ssh = ssh_tty_argv(target, "printf ssh-ok")
+  assert_eq(ssh[ssh.length() - 3], "-tt")
+  assert_eq(ssh[ssh.length() - 2], "tester@example.com")
+  assert_eq(ssh[ssh.length() - 1], "printf ssh-ok")
+
+  let argv = ssh_pty_argv(ssh)
+  assert_eq(argv[0], "sh")
+  assert_eq(argv[1], "-c")
+  assert_true(argv[2].contains("stty raw -echo"))
+  assert_true(argv[2].contains("exec \"$0\" \"$@\""))
+  assert_eq(argv.length(), ssh.length() + 3)
+  for index in 0..<ssh.length() {
+    assert_eq(argv[index + 3], ssh[index])
+  }
+}
