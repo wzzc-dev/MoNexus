@@ -103,6 +103,45 @@ fn bots_test_membership(
 }
 
 ///|
+fn bots_test_ensure_project(
+  store : MachineStore,
+  project_id : String,
+  now : String,
+) -> Unit raise {
+  match store.get_project(project_id) {
+    Ok(Some(_)) => return
+    Ok(None) => ()
+    Err(message) => fail("get_project failed: " + message)
+  }
+  let seq = match store.last_seq() {
+    Ok(value) => value
+    Err(message) => fail("last_seq failed: " + message)
+  }
+  let record = @contracts.ProjectRecord::new(
+    id=project_id,
+    name="Membership project",
+    repo_url="",
+    default_branch="main",
+    verify=[],
+    created_at=now,
+  )
+  let event = @contracts.EventEnvelope::new(
+    id="evt_" + project_id,
+    org_id=@contracts.ORG_LOCAL,
+    event_type=@contracts.EVENT_PROJECT_CREATED,
+    ts=now,
+    subject="project/" + project_id,
+    seq=seq + 1L,
+    payload=record.to_json(),
+    idempotency_key="evt/" + project_id,
+  )
+  match store.record_project_event(event, record) {
+    Ok(_) => ()
+    Err(message) => fail("record_project_event failed: " + message)
+  }
+}
+
+///|
 fn bots_test_sqlite_text(error : Error) -> String {
   error.to_string()
 }
@@ -173,6 +212,7 @@ test "bot events replay every complete projection record" {
   let now = "2026-11-27T02:00:00Z"
   let (bot, agent, chat) = bots_test_seed(store, now)
   let project_id = @contracts.new_project_id(1_010L)
+  bots_test_ensure_project(store, project_id, now)
   let membership = match
     store.add_project_membership(
       bots_test_membership(project_id, bot.id, now),
@@ -305,6 +345,7 @@ test "bot projection survives close and reopen" {
   }
   let (bot, agent, chat) = bots_test_seed(first, now)
   let project_id = @contracts.new_project_id(1_030L)
+  bots_test_ensure_project(first, project_id, now)
   let membership = match
     first.add_project_membership(
       bots_test_membership(project_id, bot.id, now),
@@ -706,6 +747,7 @@ test "project Chat requires an active membership" {
     Err(message) => fail("second create_bot failed: " + message)
   }
   let project_id = @contracts.new_project_id(1_020L)
+  bots_test_ensure_project(store, project_id, now)
   match
     store.add_project_membership(
       bots_test_membership(project_id, bot.id, now),
@@ -829,6 +871,7 @@ test "project membership removal waits for the AgentSession to end" {
   let now = "2026-11-27T03:25:00Z"
   let (bot, agent, _) = bots_test_seed(store, now)
   let project_id = @contracts.new_project_id(1_040L)
+  bots_test_ensure_project(store, project_id, now)
   match
     store.add_project_membership(
       bots_test_membership(project_id, bot.id, now),
@@ -903,6 +946,74 @@ test "project membership removal waits for the AgentSession to end" {
     Err(message) => fail("get_project_membership failed: " + message)
   }
   assert_eq(replayed.state, @contracts.MEMBERSHIP_STATE_REMOVED)
+  store.close()
+}
+
+///|
+test "membership add rejects unknown Project, unknown Bot and archived Bot" {
+  let store = bots_test_open()
+  let now = "2026-11-27T03:27:00Z"
+  let (bot, _, _) = bots_test_seed(store, now)
+  let missing_project = @contracts.new_project_id(1_041L)
+  match
+    store.add_project_membership(
+      @contracts.ProjectMembership::new(
+        project_id=missing_project,
+        bot_id=bot.id,
+        added_at=now,
+        access=[],
+      ),
+      "owner",
+      now,
+    ) {
+    Ok(_) => fail("membership accepted an unknown Project")
+    Err(message) => assert_true(message.contains("Project not found"))
+  }
+  let project_id = @contracts.new_project_id(1_042L)
+  bots_test_ensure_project(store, project_id, now)
+  let missing_bot = @contracts.new_bot_id(1_043L)
+  match
+    store.add_project_membership(
+      @contracts.ProjectMembership::new(
+        project_id~,
+        bot_id=missing_bot,
+        added_at=now,
+        access=[],
+      ),
+      "owner",
+      now,
+    ) {
+    Ok(_) => fail("membership accepted an unknown Bot")
+    Err(message) => assert_true(message.contains("Bot not found"))
+  }
+  let archived = match
+    store.create_bot(
+      { ..bots_test_bot("Archived", now), id: @contracts.new_bot_id(1_044L) },
+      "owner",
+      "test",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => fail("create archived Bot failed: " + message)
+  }
+  match store.archive_bot(archived.id, "retired", now, "owner") {
+    Ok(_) => ()
+    Err(message) => fail("archive_bot failed: " + message)
+  }
+  match
+    store.add_project_membership(
+      @contracts.ProjectMembership::new(
+        project_id~,
+        bot_id=archived.id,
+        added_at=now,
+        access=[],
+      ),
+      "owner",
+      now,
+    ) {
+    Ok(_) => fail("membership accepted an archived Bot")
+    Err(message) => assert_true(message.contains("archived"))
+  }
   store.close()
 }
 
@@ -1131,7 +1242,7 @@ test "Bot Agent concurrency cap is enforced when a session starts" {
 }
 
 ///|
-test "membership removal uses the Bot org and reactivation keeps access" {
+test "membership removal uses the Bot org and reactivation clears access" {
   let store = bots_test_open()
   let now = "2026-11-27T04:10:00Z"
   let bot = match
@@ -1145,6 +1256,7 @@ test "membership removal uses the Bot org and reactivation keeps access" {
     Err(message) => fail("create_bot failed: " + message)
   }
   let project_id = @contracts.new_project_id(1_050L)
+  bots_test_ensure_project(store, project_id, now)
   let membership = match
     store.add_project_membership(
       bots_test_membership(project_id, bot.id, now),
@@ -1193,9 +1305,8 @@ test "membership removal uses the Bot org and reactivation keeps access" {
     Err(message) => fail("reactivating membership failed: " + message)
   }
   assert_eq(restored.state, @contracts.MEMBERSHIP_STATE_ACTIVE)
-  assert_eq(restored.access.length(), 1)
-  assert_eq(restored.access[0], "repo:read")
-  assert_eq(restored.reason, removed.reason)
+  assert_eq(restored.access.length(), 0)
+  assert_eq(restored.reason, "")
   assert_eq(restored.removed_at, "")
   store.close()
 }
@@ -1206,6 +1317,7 @@ test "project change and participant removal replay generic records" {
   let now = "2026-11-27T04:20:00Z"
   let (bot, _, chat) = bots_test_seed(store, now)
   let project_id = @contracts.new_project_id(1_060L)
+  bots_test_ensure_project(store, project_id, now)
   match
     store.add_project_membership(
       bots_test_membership(project_id, bot.id, now),

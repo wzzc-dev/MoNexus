@@ -187,14 +187,14 @@ test "Bot selection opens its latest Chat or the Bot detail route" {
   let (bot_route, bot_commands) = update_full(no_chats, SelectBot("bot_a"))
   assert_true(bot_route.page == BotDetail)
   assert_eq(bot_route.selected_bot, "bot_a")
-  assert_eq(bot_commands.length(), 8)
+  assert_eq(bot_commands.length(), 9)
   match bot_commands[0] {
     AgentList => ()
     _ => fail("expected AgentList")
   }
   let (direct, direct_commands) = update_full(loaded, OpenBotDetail("bot_a"))
   assert_true(direct.page == BotDetail)
-  assert_eq(direct_commands.length(), 8)
+  assert_eq(direct_commands.length(), 9)
   let tabbed = update(direct, SelectBotTab(BotChats))
   assert_true(tabbed.page == BotDetail)
   assert_true(tabbed.bot_tab == BotChats)
@@ -224,9 +224,10 @@ test "the Bot page only offers a current Chat when one is projected" {
   assert_false(empty_harness.has_text("Open current Chat"))
   assert_true(
     empty_harness.has_text(
-      "No Project Chat membership evidence for this Bot yet.",
+      "Loading Projects and membership from the host...",
     ),
   )
+  assert_false(empty_harness.has_text("No Project Chat membership evidence"))
   assert_true(empty_harness.has_text("Open Manage"))
   empty_harness.tap_text("Files")
   assert_true(empty_harness.has_text("No artifacts mapped to this Bot yet."))
@@ -706,12 +707,16 @@ test "selecting context pages asks the worker for projections" {
     _ => fail("expected RefreshMachines")
   }
   let (_, agent_commands) = update_full(Model::new(), OpenBotDetail(""))
-  assert_eq(agent_commands.length(), 8)
+  assert_eq(agent_commands.length(), 9)
   match agent_commands[0] {
     AgentList => ()
     _ => fail("expected AgentList for the Bot page")
   }
   match agent_commands[6] {
+    ProjectMembershipList => ()
+    _ => fail("expected ProjectMembershipList for the Bot page")
+  }
+  match agent_commands[7] {
     RefreshMachines => ()
     _ => fail("expected RefreshMachines for the Bot page")
   }

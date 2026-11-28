@@ -97,6 +97,7 @@ pub async fn host_link_loop(state_dir : String) -> Unit {
     enqueue_machine_command(BotList)
     enqueue_machine_command(ChatList("", ""))
     enqueue_machine_command(ProjectCatalog)
+    enqueue_machine_command(ProjectMembershipList)
     // Tasks board and Activity replay after a reconnect; EventsLoaded dedupes
     // on seq so a stale cursor is safe.
     enqueue_machine_command(TaskRefresh(0L))

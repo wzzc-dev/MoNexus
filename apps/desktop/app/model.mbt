@@ -652,6 +652,10 @@ pub struct Model {
   bot_tab : BotTab
   bots : Array[@contracts.BotRecord]
   chats : Array[ChatProjection]
+  /// Active ProjectMembership projection from `project.membership.list`.
+  project_memberships : Array[@contracts.ProjectMembership]
+  project_memberships_loaded : Bool
+  project_membership_message : String
   /// Rich host details backing `chats`; participants, current Agent and
   /// AgentSession state stay available without inventing fields.
   chat_details : Array[@contracts.ChatDetail]
@@ -879,6 +883,9 @@ pub fn Model::new_with_preferences(
     bot_tab: BotHome,
     bots: [],
     chats: [],
+    project_memberships: [],
+    project_memberships_loaded: false,
+    project_membership_message: "",
     chat_details: [],
     bots_loaded: false,
     chats_loaded: false,
@@ -1062,6 +1069,15 @@ pub(all) enum Msg {
   SelectProject(String)
   ProjectCatalogLoaded(Array[@contracts.ProjectRecord])
   ProjectCatalogPicker(Bool)
+  ProjectMembershipsLoaded(Array[@contracts.ProjectMembership])
+  ProjectMembershipAdded(@contracts.ProjectMembership)
+  ProjectMembershipRemoved(@contracts.ProjectMembership)
+  /// Grant the selected Bot access to a Project; ids are resolved by the
+  /// name-based membership controls before the RPC is queued.
+  AddProjectMembership(String, String)
+  /// Revoke the selected Bot's access to a Project.
+  RemoveProjectMembership(String, String)
+  ProjectMembershipError(String)
   ProjectChatBotFilter(String)
   ProjectChatBotPicker(Bool)
   RouteArrived(RouteTarget)
@@ -1302,6 +1318,9 @@ pub(all) enum MachineCommand {
   BotAgentSuspend(String, String)
   BotAgentRetire(String, String)
   ProjectCatalog
+  ProjectMembershipList
+  ProjectMembershipAdd(String, String)
+  ProjectMembershipRemove(String, String, String)
   CopyText(String, String)
   AgentList
   DecisionList(String)
@@ -1937,6 +1956,64 @@ fn bot_recent_activity(model : Model, bot : @contracts.BotRecord) -> String {
 }
 
 ///|
+fn project_membership_is_active(
+  membership : @contracts.ProjectMembership,
+) -> Bool {
+  membership.state == @contracts.MEMBERSHIP_STATE_ACTIVE
+}
+
+///|
+fn active_memberships_for_project(
+  model : Model,
+  project_id : String,
+) -> Array[@contracts.ProjectMembership] {
+  let out : Array[@contracts.ProjectMembership] = []
+  for membership in model.project_memberships {
+    if membership.project_id == project_id &&
+      project_membership_is_active(membership) {
+      out.push(membership)
+    }
+  }
+  out
+}
+
+///|
+fn project_membership_active(
+  model : Model,
+  project_id : String,
+  bot_id : String,
+) -> Bool {
+  for membership in model.project_memberships {
+    if membership.project_id == project_id &&
+      membership.bot_id == bot_id &&
+      project_membership_is_active(membership) {
+      return true
+    }
+  }
+  false
+}
+
+///|
+fn membership_project_label(model : Model, project_id : String) -> String {
+  for record in model.project.projects {
+    if record.id == project_id {
+      return project_name(record)
+    }
+  }
+  tr(model.lang, "Unknown Project", "未知项目")
+}
+
+///|
+fn membership_bot_label(model : Model, bot_id : String) -> String {
+  for record in model.bots {
+    if record.id == bot_id {
+      return bot_name(record)
+    }
+  }
+  tr(model.lang, "Unknown Bot", "未知 Bot")
+}
+
+///|
 fn bots_in_project(model : Model, project_id : String) -> Array[@contracts.BotRecord] {
   if project_id == "" {
     return model.bots.copy()
@@ -1944,22 +2021,107 @@ fn bots_in_project(model : Model, project_id : String) -> Array[@contracts.BotRe
   let none_filter = project_id == PROJECT_FILTER_NONE
   let out : Array[@contracts.BotRecord] = []
   for bot in model.bots {
-    let mut member = false
-    for chat in model.chats {
-      let in_scope = if none_filter {
-        chat.project_id == ""
-      } else {
-        chat.project_id == project_id
+    let is_member = if none_filter {
+      let mut in_no_project_chat = false
+      for chat in model.chats {
+        if chat.project_id == "" && chat.participants.contains(bot.id) {
+          in_no_project_chat = true
+        }
       }
-      if in_scope && chat.participants.contains(bot.id) {
-        member = true
-      }
+      in_no_project_chat
+    } else {
+      project_membership_active(model, project_id, bot.id)
     }
-    if member {
+    if is_member {
       out.push(bot)
     }
   }
   out
+}
+
+///|
+fn memberships_with(
+  memberships : Array[@contracts.ProjectMembership],
+  record : @contracts.ProjectMembership,
+) -> Array[@contracts.ProjectMembership] {
+  let out : Array[@contracts.ProjectMembership] = []
+  let mut replaced = false
+  for existing in memberships {
+    if existing.project_id == record.project_id &&
+      existing.bot_id == record.bot_id {
+      out.push(record)
+      replaced = true
+    } else {
+      out.push(existing)
+    }
+  }
+  if !replaced {
+    out.push(record)
+  }
+  out
+}
+
+///|
+fn memberships_without(
+  memberships : Array[@contracts.ProjectMembership],
+  project_id : String,
+  bot_id : String,
+) -> Array[@contracts.ProjectMembership] {
+  let out : Array[@contracts.ProjectMembership] = []
+  for existing in memberships {
+    if existing.project_id != project_id || existing.bot_id != bot_id {
+      out.push(existing)
+    }
+  }
+  out
+}
+
+///|
+/// Keep the New Chat draft inside the current active membership projection so
+/// a revocation never leaves a removed Bot selected for a Project Chat.
+fn reconcile_chat_draft_membership(model : Model) -> Model {
+  if !model.composing_new_chat || model.chat_draft.project_id == "" {
+    return model
+  }
+  let project_id = model.chat_draft.project_id
+  let members = bots_in_project(model, project_id)
+  let bot_id = match bot_by_id(members, model.chat_draft.bot_id) {
+    Some(record) => record.id
+    None =>
+      match members {
+        [record, ..] => record.id
+        [] => ""
+      }
+  }
+  let agent_id = if bot_id == model.chat_draft.bot_id {
+    model.chat_draft.agent_id
+  } else {
+    ""
+  }
+  let message = if members.is_empty() {
+    tr(
+      model.lang,
+      "This Project has no Bot members yet. Add a Bot from the Project page, then choose it here.",
+      "此项目尚无 Bot 成员。请先在项目页添加 Bot，再在此选择。",
+    )
+  } else if bot_id == "" {
+    tr(
+      model.lang,
+      "Choose a Bot with membership in this Project.",
+      "请选择在此项目中有成员资格的 Bot。",
+    )
+  } else {
+    ""
+  }
+  {
+    ..model,
+    chat_draft: {
+      ..model.chat_draft,
+      bot_id,
+      agent_id,
+      message,
+    },
+  }
 }
 
 ///|
@@ -2580,6 +2742,7 @@ pub fn update_full(
               BotAgentList(bot_id),
               ProjectList,
               ProjectCatalog,
+              ProjectMembershipList,
               RefreshMachines,
               TaskRefresh(model.task.event_seq),
             ],
@@ -2619,6 +2782,7 @@ pub fn update_full(
         }),
         ProjectList,
         ProjectCatalog,
+        ProjectMembershipList,
         RefreshMachines,
         TaskRefresh(model.task.event_seq),
       ],
@@ -2770,11 +2934,19 @@ pub fn update_full(
         workspace_picker_open: false,
         agent_picker_open: false,
         message: if project_id != "" && member_bots.is_empty() {
-          tr(
-            model.lang,
-            "No Bot has active membership evidence in this Project. The host exposes no project.membership.list RPC, so this window will not guess; choose a Bot view Chat with Project membership first.",
-            "没有 Bot 在此项目中有有效成员证据。主机未暴露 project.membership.list RPC，因此此窗口不会猜测；请先选择在项目中有成员资格的 Bot 对话。",
-          )
+          if !model.project_memberships_loaded {
+            tr(
+              model.lang,
+              "Loading Project membership from the host...",
+              "正在从主机加载项目成员...",
+            )
+          } else {
+            tr(
+              model.lang,
+              "This Project has no Bot members yet. Add a Bot from the Project page, then choose it here.",
+              "此项目尚无 Bot 成员。请先在项目页添加 Bot，再在此选择。",
+            )
+          }
         } else {
           ""
         },
@@ -2818,6 +2990,9 @@ pub fn update_full(
           }
           if !model.project.projects_loaded {
             commands.push(ProjectCatalog)
+          }
+          if !model.project_memberships_loaded {
+            commands.push(ProjectMembershipList)
           }
           if !model.project.workspaces_loaded {
             commands.push(ProjectList)
@@ -3592,11 +3767,19 @@ pub fn update_full(
           ""
         },
         message: if project_id != "" && members.is_empty() {
-          tr(
-            model.lang,
-            "This Project has no Bot with active membership evidence yet. Create a project Chat on the host first, or choose No project in the Bot view.",
-            "此项目尚无具备有效成员证据的 Bot。请先在主机上创建项目对话，或在 Bot 视图选择“无项目”。",
-          )
+          if !model.project_memberships_loaded {
+            tr(
+              model.lang,
+              "Loading Project membership from the host...",
+              "正在从主机加载项目成员...",
+            )
+          } else {
+            tr(
+              model.lang,
+              "This Project has no Bot members yet. Add a Bot from the Project page, then choose it here.",
+              "此项目尚无 Bot 成员。请先在项目页添加 Bot，再在此选择。",
+            )
+          }
         } else if project_id != "" && bot_id == "" {
           tr(
             model.lang,
@@ -3998,7 +4181,7 @@ pub fn update_full(
         route_target: RouteProjects(project_id),
         route_note: "",
       },
-      [ChatList("", "")],
+      [ProjectMembershipList, ChatList("", "")],
     )
     ProjectCatalogLoaded(records) => {
       let route_project = match model.route_target {
@@ -4039,6 +4222,84 @@ pub fn update_full(
     }
     ProjectCatalogPicker(open) => (
       { ..model, project: { ..model.project, project_picker_open: open } },
+      none,
+    )
+    ProjectMembershipsLoaded(records) => {
+      let active : Array[@contracts.ProjectMembership] = []
+      for record in records {
+        if project_membership_is_active(record) {
+          active.push(record)
+        }
+      }
+      let next = {
+        ..model,
+        project_memberships: active,
+        project_memberships_loaded: true,
+        project_membership_message: "",
+      }
+      (reconcile_chat_draft_membership(next), none)
+    }
+    ProjectMembershipAdded(record) => {
+      let next = {
+        ..model,
+        project_memberships: memberships_with(
+          model.project_memberships,
+          record,
+        ),
+        project_memberships_loaded: true,
+        project_membership_message: tr(
+          model.lang,
+          "Project membership added: " +
+          membership_bot_label(model, record.bot_id) +
+          " · " +
+          membership_project_label(model, record.project_id),
+          "已添加项目成员：" +
+          membership_bot_label(model, record.bot_id) +
+          " · " +
+          membership_project_label(model, record.project_id),
+        ),
+      }
+      (
+        reconcile_chat_draft_membership(next),
+        [ProjectMembershipList, ChatList("", "")],
+      )
+    }
+    ProjectMembershipRemoved(record) => {
+      let next = {
+        ..model,
+        project_memberships: memberships_without(
+          model.project_memberships,
+          record.project_id,
+          record.bot_id,
+        ),
+        project_memberships_loaded: true,
+        project_membership_message: tr(
+          model.lang,
+          "Project membership removed: " +
+          membership_bot_label(model, record.bot_id) +
+          " · " +
+          membership_project_label(model, record.project_id),
+          "已移除项目成员：" +
+          membership_bot_label(model, record.bot_id) +
+          " · " +
+          membership_project_label(model, record.project_id),
+        ),
+      }
+      (
+        reconcile_chat_draft_membership(next),
+        [ProjectMembershipList, ChatList("", "")],
+      )
+    }
+    AddProjectMembership(project_id, bot_id) => (
+      { ..model, project_membership_message: "" },
+      [ProjectMembershipAdd(project_id, bot_id)],
+    )
+    RemoveProjectMembership(project_id, bot_id) => (
+      { ..model, project_membership_message: "" },
+      [ProjectMembershipRemove(project_id, bot_id, "owner request")],
+    )
+    ProjectMembershipError(message) => (
+      { ..model, project_membership_message: message },
       none,
     )
     ProjectChatBotFilter(bot_id) => (
@@ -4104,16 +4365,28 @@ pub fn update_full(
           BotList,
           ChatList("", ""),
           ProjectCatalog,
+          ProjectMembershipList,
           ChatGet(id),
         ]
         RouteBot(_) => [
           BotList,
           ChatList("", ""),
           ProjectCatalog,
+          ProjectMembershipList,
           BotAgentList(selected_bot),
         ]
-        RouteProjects(_) => [ProjectCatalog, BotList, ChatList("", "")]
-        RouteWorkroom => [BotList, ChatList("", ""), ProjectCatalog]
+        RouteProjects(_) => [
+          ProjectCatalog,
+          ProjectMembershipList,
+          BotList,
+          ChatList("", ""),
+        ]
+        RouteWorkroom => [
+          BotList,
+          ChatList("", ""),
+          ProjectCatalog,
+          ProjectMembershipList,
+        ]
       }
       (
         {

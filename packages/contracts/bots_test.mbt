@@ -668,6 +668,72 @@ test "ADR-0017 P0.3 RPC result records round-trip" {
 }
 
 ///|
+test "Project membership RPC params and results round-trip" {
+  let membership = ProjectMembership::new(
+    project_id="prj_test",
+    bot_id="bot_test",
+    added_at="2026-11-27T03:10:00Z",
+    access=[],
+  )
+  assert_eq(membership.access.length(), 0)
+  let list_result = round_trip_json(
+    project_memberships_result([membership]),
+  )
+  match project_memberships_from_result(list_result) {
+    Ok(values) => {
+      assert_eq(values.length(), 1)
+      assert_eq(values[0].project_id, "prj_test")
+      assert_eq(values[0].bot_id, "bot_test")
+      assert_eq(values[0].state, MEMBERSHIP_STATE_ACTIVE)
+      assert_eq(values[0].access.length(), 0)
+    }
+    Err(reason) => fail("project.membership.list result did not decode: " + reason)
+  }
+  match
+    project_membership_from_result(
+      round_trip_json(project_membership_result(membership)),
+    ) {
+    Ok(value) => {
+      assert_eq(value.project_id, "prj_test")
+      assert_eq(value.bot_id, "bot_test")
+    }
+    Err(reason) => fail("project.membership result did not decode: " + reason)
+  }
+  let list_params = project_membership_list_params("cid_list")
+  assert_eq(project_membership_filter_param(list_params), "")
+  assert_eq(
+    project_membership_filter_param(
+      project_membership_list_params("cid_list", project_id="prj_test"),
+    ),
+    "prj_test",
+  )
+  let add_params = project_membership_add_params(
+    "cid_add",
+    "prj_test",
+    "bot_test",
+  )
+  match project_id_param(add_params) {
+    Ok(value) => assert_eq(value, "prj_test")
+    Err(reason) => fail("project.membership.add project_id: " + reason)
+  }
+  match bot_id_param(add_params) {
+    Ok(value) => assert_eq(value, "bot_test")
+    Err(reason) => fail("project.membership.add bot_id: " + reason)
+  }
+  let remove_params = project_membership_remove_params(
+    "cid_remove",
+    "prj_test",
+    "bot_test",
+    reason="owner revoke",
+  )
+  assert_eq(bot_reason_param(remove_params), "owner revoke")
+  match project_id_param(Map([("bot_id", json_string("bot_test"))])) {
+    Ok(_) => fail("missing project_id was accepted")
+    Err(reason) => assert_true(reason.contains("missing project_id"))
+  }
+}
+
+///|
 test "ADR-0017 P0.3 RPC params validate and map errors" {
   let bot = bots_rpc_test_bot()
   let agent = bots_rpc_test_agent(bot)
@@ -712,6 +778,10 @@ test "ADR-0017 P0.3 RPC params validate and map errors" {
   assert_true(not_found.message.contains("NotFound"))
   let unauthorized = bots_error_from_message("project membership is required")
   assert_true(unauthorized.message.contains("Unauthorized"))
+  let membership_conflict = bots_error_from_message(
+    "ProjectMembership cannot be removed while the Bot has a non-terminal AgentSession",
+  )
+  assert_true(membership_conflict.message.contains("Conflict"))
   let conflict = bots_error_from_message("Bot Agent concurrency cap reached")
   assert_true(conflict.message.contains("Conflict"))
   let invalid = bots_error_from_message("bot_id is required")

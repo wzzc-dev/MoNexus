@@ -105,6 +105,12 @@ async fn handle_bots_rpc(
       handle_chat_stop(state, sink, request, client_request_id)
     @contracts.METHOD_CHAT_MESSAGES =>
       handle_chat_messages(state, sink, request, client_request_id)
+    @contracts.METHOD_PROJECT_MEMBERSHIP_LIST =>
+      handle_project_membership_list(state, sink, request, client_request_id)
+    @contracts.METHOD_PROJECT_MEMBERSHIP_ADD =>
+      handle_project_membership_add(state, sink, request, client_request_id)
+    @contracts.METHOD_PROJECT_MEMBERSHIP_REMOVE =>
+      handle_project_membership_remove(state, sink, request, client_request_id)
     _ =>
       send_machine_error(
         state,
@@ -1896,4 +1902,133 @@ async fn stop_chat_session(
   }
   state.mutex.release()
   stop_existing_chat_session(state, current, end_reason)
+}
+
+///|
+async fn handle_project_membership_list(
+  state : HostState,
+  sink : Sink,
+  request : @contracts.RpcRequest,
+  client_request_id : String,
+) -> Unit {
+  let project_id = @contracts.project_membership_filter_param(request.params)
+  state.mutex.acquire()
+  let memberships = match state.store.list_project_memberships(project_id) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      bots_domain_error(state, sink, request, client_request_id, message)
+      return
+    }
+  }
+  state.mutex.release()
+  let active : Array[@contracts.ProjectMembership] = []
+  for membership in memberships {
+    if membership.state == @contracts.MEMBERSHIP_STATE_ACTIVE {
+      active.push(membership)
+    }
+  }
+  send_machine_result(
+    state,
+    sink,
+    request,
+    client_request_id,
+    @contracts.project_memberships_result(active),
+  )
+}
+
+///|
+async fn handle_project_membership_add(
+  state : HostState,
+  sink : Sink,
+  request : @contracts.RpcRequest,
+  client_request_id : String,
+) -> Unit {
+  let project_id = match @contracts.project_id_param(request.params) {
+    Ok(value) => value
+    Err(message) => {
+      bots_param_error(state, sink, request, client_request_id, message)
+      return
+    }
+  }
+  let bot_id = match @contracts.bot_id_param(request.params) {
+    Ok(value) => value
+    Err(message) => {
+      bots_param_error(state, sink, request, client_request_id, message)
+      return
+    }
+  }
+  let actor = @contracts.bot_actor_param(request.params)
+  let now = @contracts.format_rfc3339(@async.now())
+  let membership = @contracts.ProjectMembership::new(
+    project_id~,
+    bot_id~,
+    added_at=now,
+    access=[],
+    state=@contracts.MEMBERSHIP_STATE_ACTIVE,
+  )
+  state.mutex.acquire()
+  let before = bots_last_seq_or_zero(state)
+  let added = state.store.add_project_membership(membership, actor, now)
+  state.sync_bots_events_after(before)
+  state.mutex.release()
+  match added {
+    Ok(record) =>
+      send_machine_result(
+        state,
+        sink,
+        request,
+        client_request_id,
+        @contracts.project_membership_result(record),
+      )
+    Err(message) => bots_domain_error(state, sink, request, client_request_id, message)
+  }
+}
+
+///|
+async fn handle_project_membership_remove(
+  state : HostState,
+  sink : Sink,
+  request : @contracts.RpcRequest,
+  client_request_id : String,
+) -> Unit {
+  let project_id = match @contracts.project_id_param(request.params) {
+    Ok(value) => value
+    Err(message) => {
+      bots_param_error(state, sink, request, client_request_id, message)
+      return
+    }
+  }
+  let bot_id = match @contracts.bot_id_param(request.params) {
+    Ok(value) => value
+    Err(message) => {
+      bots_param_error(state, sink, request, client_request_id, message)
+      return
+    }
+  }
+  let reason = @contracts.bot_reason_param(request.params)
+  let actor = @contracts.bot_actor_param(request.params)
+  let now = @contracts.format_rfc3339(@async.now())
+  state.mutex.acquire()
+  let before = bots_last_seq_or_zero(state)
+  let removed = state.store.remove_project_membership(
+    project_id,
+    bot_id,
+    reason,
+    actor,
+    now,
+  )
+  state.sync_bots_events_after(before)
+  state.mutex.release()
+  match removed {
+    Ok(record) =>
+      send_machine_result(
+        state,
+        sink,
+        request,
+        client_request_id,
+        @contracts.project_membership_result(record),
+      )
+    Err(message) => bots_domain_error(state, sink, request, client_request_id, message)
+  }
 }

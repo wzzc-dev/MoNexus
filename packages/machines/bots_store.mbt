@@ -2442,6 +2442,11 @@ pub fn MachineStore::add_project_membership(
   if membership.state != @contracts.MEMBERSHIP_STATE_ACTIVE {
     return Err("a new ProjectMembership must be active")
   }
+  match self.get_project(membership.project_id) {
+    Ok(Some(_)) => ()
+    Ok(None) => return Err("Project not found: " + membership.project_id)
+    Err(message) => return Err(message)
+  }
   let bot = match self.get_bot(membership.bot_id) {
     Ok(Some(value)) => value
     Ok(None) => return Err("Bot not found: " + membership.bot_id)
@@ -2469,6 +2474,8 @@ pub fn MachineStore::add_project_membership(
         let record = {
           ..current,
           state: @contracts.MEMBERSHIP_STATE_ACTIVE,
+          access: membership.access,
+          reason: membership.reason,
           added_at: now,
           removed_at: "",
         }
