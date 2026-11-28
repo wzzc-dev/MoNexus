@@ -93,7 +93,9 @@ Notes:
 
 Desktop: **Projects** → machine + root → **Open project**. The page provides
 a one-level file list, atomic read/write, git status/diff, a terminal, and a
-worktree form.
+worktree form. In the terminal input, plain Ctrl+C (or **Stop**) sends the raw
+interrupt byte, while Cmd+C, Ctrl+Shift+C and Ctrl+Insert copy; the same
+shortcuts work in the focused Projects terminal and the floating terminal.
 
 ```bash
 monexus host rpc --method workspace.open \

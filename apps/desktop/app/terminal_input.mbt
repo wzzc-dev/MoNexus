@@ -1,12 +1,11 @@
 ///|
 /// Terminal command input with a plain Ctrl+C interrupt.
 ///
-/// MoUI's host driver maps unmodified Ctrl+C to `CommandIntent::Copy` before
-/// the keyboard event reaches the view tree, and the text field handles Copy
-/// unconditionally. This wrapper keeps the text field's editing, selection,
-/// clipboard and accessibility behavior, but turns Copy-without-selection into
-/// `ProjectTerminalStop`. Copy with a real selection still delegates to the
-/// field, so ordinary copy is unchanged.
+/// MoUI 0.10.2 maps unmodified Ctrl+C to `CommandIntent::Interrupt`, while
+/// Cmd+C, Ctrl+Shift+C and Ctrl+Insert stay `Copy`. This wrapper keeps the
+/// text field's editing, selection, clipboard and accessibility behavior, and
+/// turns only Interrupt into `ProjectTerminalStop`. Copy always delegates to
+/// the field, with or without a selection.
 priv struct TerminalInputField {
   child : @core.View[Msg]
 }
@@ -272,16 +271,11 @@ fn terminal_input_field(
     event=(node, context) => node.child.event(context),
     text_command=(node, context, intent, paste_text) => {
       match intent {
-        @core.CommandIntent::Copy =>
-          if @core.active_text_selection(context.text_control.selection)
-            is None {
-            @core.ViewTextCommandResult::new(
-              result=@core.TextCommandResult::handled(),
-              messages=[ProjectTerminalStop],
-            )
-          } else {
-            node.child.text_command_result(context, intent, paste_text~)
-          }
+        @core.CommandIntent::Interrupt =>
+          @core.ViewTextCommandResult::new(
+            result=@core.TextCommandResult::handled(),
+            messages=[ProjectTerminalStop],
+          )
         _ => node.child.text_command_result(context, intent, paste_text~)
       }
     },

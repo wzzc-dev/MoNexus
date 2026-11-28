@@ -7,7 +7,7 @@
 
 ## 0. 摘要
 
-1. **交付形态**：MoUI 0.10.1 原生桌面应用（独立仓库）+ 本地守护进程 `monexus-host` + Provider 适配层。三者分开演进，UI 不直接碰 ssh / 文件系统 / 上游 API。
+1. **交付形态**：MoUI 0.10.2 原生桌面应用（独立仓库）+ 本地守护进程 `monexus-host` + Provider 适配层。三者分开演进，UI 不直接碰 ssh / 文件系统 / 上游 API。
 2. **V0.1 验收**：一条垂直切片——主控机上管理本地 + 一台远程 Ubuntu x86_64（RISC-V 延后），在各自 Workspace 执行命令、实时看输出、关窗不中断、重开能恢复。
 3. **状态权威**：V0.1 的组织、成员、任务、审批、机器注册与命令策略全部由 MoNexus host 持有；不引入外部控制面，也不预留第二套状态机。
 4. **不自研基础设施**：SSH 复用系统 `ssh`（模式来自 MoSpace `services/remote`），终端复用 MoUI `pty_host`，Agent 会话复用 ACP（模式来自 `mo_workbench`）；组织/任务/审批与机器注册只做薄层。
@@ -48,7 +48,7 @@
 
 ```text
 ┌──────────────────────────── 主控机 ────────────────────────────┐
-│  MoNexus Desktop（MoUI 0.10.1 / MoonBit）                      │
+│  MoNexus Desktop（MoUI 0.10.2 / MoonBit）                      │
 │  UI · 只读投影 · 用户意图 · 审批交互                            │
 │              │  JSON-RPC over WebSocket（127.0.0.1 + token）    │
 │  monexus-host（MoonBit 可执行）                                 │
@@ -376,7 +376,7 @@ MoSpace `services/remote` 已验证的模式（Apache-2.0，可复用并注明�
 
 ## 10. UI 架构
 
-- **依赖**：默认只消费发布版 `wzzc-dev/moui@0.10.1` 及子包（`moui_skia_renderer` 等）；独立仓库、`moui new` 结构。**MoUI 缺能力时按官方 vendor 流程**：`git clone` 到 `vendor/MoUI`（gitignored），在 `moon.work` 加入实际用到的模块做本地覆盖，在 MoNexus 中验证后向 `wzzc-dev/MoUI` 提 PR；上游发布后 bump 版本并移除覆盖（见 §15）。
+- **依赖**：默认只消费发布版 `wzzc-dev/moui@0.10.2` 及子包（`moui_skia_renderer` 等）；独立仓库、`moui new` 结构。**MoUI 缺能力时按官方 vendor 流程**：`git clone` 到 `vendor/MoUI`（gitignored），在 `moon.work` 加入实际用到的模块做本地覆盖，在 MoNexus 中验证后向 `wzzc-dev/MoUI` 提 PR；上游发布后 bump 版本并移除覆盖（见 §15）。
 - **结构**：`app/` 持有 `Model/Msg/update/view`；平台入口 `linux_skia/`、`macos_skia/`、`web_wasm/` 只做薄接线；`scenes/` 供截图与状态快照。
 - **Model 划分**：`HostProjection`（只读缓存）+ `UiState`（选中、面板、输入）；RPC 调用作为 `Effect`，事件订阅作为 `Subscription`。
 - **页面（V0.1）**：Home（组织概览 + 收件箱 + 全局任务输入）、Machines、Projects/Workspaces/Worktrees、Agents/Sessions、Tasks（看板）、Activity、Search、Settings。
@@ -534,7 +534,7 @@ MoNexus/
 | 风险 | 影响 | 对策 |
 |---|---|---|
 | 自研控制面范围膨胀 | 组织/任务层铺得过大、延期 | 固定 V0.2 最小集；事件模型先行；Skill/Resource Center 不进 V0.1 |
-| MoUI 版本漂移 | 构建/行为变化 | 锁 0.10.1；升级单独里程碑；不 fork |
+| MoUI 版本漂移 | 构建/行为变化 | 锁 0.10.2；升级单独里程碑；不 fork |
 | vendor 覆盖失同步 | 升级困难、孤儿补丁 | 按 `docs/vendor-workflow.md`：每个依赖改动必须有上游 PR；`vendor/` 不入库；CI 用注册表版本 |
 | 依赖系统 ssh | Windows/受限环境不可用 | 首版仅 macOS/Linux；Windows 走 OpenSSH 或 V0.3 自研常驻节点 |
 | 只支持 POSIX shell | 设备差异 | MachineProfile 探测；非 POSIX 明确不支持 |

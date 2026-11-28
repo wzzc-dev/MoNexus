@@ -178,8 +178,8 @@ fn terminal_hint(model : Model) -> @moui.View[Msg] {
   ui_meta(
     tr(
       model.lang,
-      "Enter sends · Ctrl+C, Ctrl+Shift+C or Stop interrupts",
-      "Enter 发送 · Ctrl+C、Ctrl+Shift+C 或 Stop 中断",
+      "Enter sends · Ctrl+C or Stop interrupts · Cmd+C / Ctrl+Shift+C copies",
+      "Enter 发送 · Ctrl+C 或 Stop 中断 · Cmd+C / Ctrl+Shift+C 复制",
     ),
   )
 }
