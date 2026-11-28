@@ -85,7 +85,13 @@ fi
 set -e
 
 REAL_USER="$(id -un)"
-REAL_HOME="$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)"
+REAL_HOME=""
+if command -v getent >/dev/null 2>&1; then
+  REAL_HOME="$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6 || true)"
+elif command -v dscl >/dev/null 2>&1; then
+  REAL_HOME="$(dscl . -read "/Users/$REAL_USER" NFSHomeDirectory 2>/dev/null \
+    | sed -n 's/^NFSHomeDirectory: //p' || true)"
+fi
 [ -n "$REAL_HOME" ] || REAL_HOME="${HOME:-/root}"
 REAL_SSH_DIR="$REAL_HOME/.ssh"
 
@@ -181,8 +187,15 @@ EOF
   SSHD_PID=$!
   READY=0
   for _ in $(seq 1 100); do
-    if kill -0 "$SSHD_PID" 2>/dev/null \
-      && ss -ltn 2>/dev/null | grep -Fq "127.0.0.1:$SSH_PORT"; then
+    LISTENING=0
+    if command -v ss >/dev/null 2>&1; then
+      ss -ltn 2>/dev/null | grep -Fq "127.0.0.1:$SSH_PORT" && LISTENING=1
+    elif command -v lsof >/dev/null 2>&1; then
+      lsof -nP -iTCP:"$SSH_PORT" -sTCP:LISTEN >/dev/null 2>&1 && LISTENING=1
+    else
+      nc -z 127.0.0.1 "$SSH_PORT" >/dev/null 2>&1 && LISTENING=1
+    fi
+    if kill -0 "$SSHD_PID" 2>/dev/null && [ "$LISTENING" -eq 1 ]; then
       READY=1
       break
     fi

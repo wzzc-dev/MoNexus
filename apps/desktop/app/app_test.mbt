@@ -146,6 +146,19 @@ test "Manage keeps Projects and Machines as tabs of one destination" {
 }
 
 ///|
+test "Manage machine picker closes after selecting and stays idempotent" {
+  let (manage, _) = update_full(Model::new(), SelectPage(Manage))
+  let opened = update(manage, ProjectMachineToggle)
+  assert_true(opened.project.machine_picker_open)
+  let selected = update(opened, ProjectMachineSelect("mch_local"))
+  assert_false(selected.project.machine_picker_open)
+  assert_eq(selected.project.machine_id, "mch_local")
+  let selected_again = update(selected, ProjectMachineSelect("mch_local"))
+  assert_false(selected_again.project.machine_picker_open)
+  assert_eq(selected_again.project.machine_id, "mch_local")
+}
+
+///|
 test "Bot selection opens its latest Chat or the Bot detail route" {
   let bot = @contracts.BotRecord::new(
     id="bot_a",
