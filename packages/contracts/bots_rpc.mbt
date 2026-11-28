@@ -62,6 +62,15 @@ pub const METHOD_CHAT_STOP : String = "chat.stop"
 ///|
 pub const METHOD_CHAT_MESSAGES : String = "chat.messages"
 
+///|
+pub const METHOD_PROJECT_MEMBERSHIP_LIST : String = "project.membership.list"
+
+///|
+pub const METHOD_PROJECT_MEMBERSHIP_ADD : String = "project.membership.add"
+
+///|
+pub const METHOD_PROJECT_MEMBERSHIP_REMOVE : String = "project.membership.remove"
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -115,9 +124,6 @@ pub fn bots_error_from_message(message : String) -> RpcError {
   if lower.contains("not found") {
     return bots_error(BOTS_ERR_NOT_FOUND, message)
   }
-  if lower.contains("membership") || lower.contains("not an active") {
-    return bots_error(BOTS_ERR_UNAUTHORIZED, message)
-  }
   if lower.contains("already exists") ||
     lower.contains("read-only") ||
     lower.contains("cap reached") ||
@@ -129,6 +135,9 @@ pub fn bots_error_from_message(message : String) -> RpcError {
     lower.contains("different") ||
     lower.contains("is not active") {
     return bots_error(BOTS_ERR_CONFLICT, message)
+  }
+  if lower.contains("membership") || lower.contains("not an active") {
+    return bots_error(BOTS_ERR_UNAUTHORIZED, message)
   }
   if lower.contains("required") ||
     lower.contains("not canonical") ||
@@ -590,6 +599,50 @@ pub fn chat_messages_params(
   ])
 }
 
+///|
+/// An empty `project_id` lists every active ProjectMembership.
+pub fn project_membership_list_params(
+  client_request_id : String,
+  project_id~ : String = "",
+) -> Map[String, @json.Json] {
+  Map([
+    ("client_request_id", json_string(client_request_id)),
+    ("project_id", json_string(project_id)),
+  ])
+}
+
+///|
+pub fn project_membership_add_params(
+  client_request_id : String,
+  project_id : String,
+  bot_id : String,
+  actor~ : String = "owner",
+) -> Map[String, @json.Json] {
+  Map([
+    ("client_request_id", json_string(client_request_id)),
+    ("project_id", json_string(project_id)),
+    ("bot_id", json_string(bot_id)),
+    ("actor", json_string(actor)),
+  ])
+}
+
+///|
+pub fn project_membership_remove_params(
+  client_request_id : String,
+  project_id : String,
+  bot_id : String,
+  reason~ : String = "",
+  actor~ : String = "owner",
+) -> Map[String, @json.Json] {
+  Map([
+    ("client_request_id", json_string(client_request_id)),
+    ("project_id", json_string(project_id)),
+    ("bot_id", json_string(bot_id)),
+    ("reason", json_string(reason)),
+    ("actor", json_string(actor)),
+  ])
+}
+
 // ---------------------------------------------------------------------------
 // Param parsers
 // ---------------------------------------------------------------------------
@@ -779,6 +832,23 @@ pub fn chat_end_reason_param(params : Map[String, @json.Json]) -> String {
 ///|
 pub fn chat_session_id_param(params : Map[String, @json.Json]) -> String {
   string_field_or(params, "session_id", "")
+}
+
+///|
+pub fn project_id_param(
+  params : Map[String, @json.Json],
+) -> Result[String, String] {
+  match string_field(params, "project_id") {
+    Some(value) if value != "" => Ok(value)
+    _ => Err("missing project_id")
+  }
+}
+
+///|
+pub fn project_membership_filter_param(
+  params : Map[String, @json.Json],
+) -> String {
+  string_field_or(params, "project_id", "")
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,4 +1088,62 @@ pub fn chat_read_result(
     state=session.state,
     pending_decision~,
   ).to_json()
+}
+
+///|
+pub fn project_memberships_result(
+  memberships : Array[ProjectMembership],
+) -> @json.Json {
+  let records : Array[@json.Json] = []
+  for membership in memberships {
+    records.push(membership.to_json())
+  }
+  bots_records_result("memberships", records)
+}
+
+///|
+pub fn project_memberships_from_result(
+  json : @json.Json,
+) -> Result[Array[ProjectMembership], String] {
+  let object = match as_object(json) {
+    Some(value) => value
+    None => return Err("result is not an object")
+  }
+  let items = match object.get("memberships") {
+    Some(@json.Json::Array(values)) => values
+    _ => return Err("result has no memberships")
+  }
+  let out : Array[ProjectMembership] = []
+  for item in items {
+    match project_membership_from_json(item) {
+      Some(record) => out.push(record)
+      None => return Err("malformed ProjectMembership record")
+    }
+  }
+  Ok(out)
+}
+
+///|
+pub fn project_membership_result(
+  membership : ProjectMembership,
+) -> @json.Json {
+  json_object([("membership", membership.to_json())])
+}
+
+///|
+pub fn project_membership_from_result(
+  json : @json.Json,
+) -> Result[ProjectMembership, String] {
+  let object = match as_object(json) {
+    Some(value) => value
+    None => return Err("result is not an object")
+  }
+  match object.get("membership") {
+    Some(value) =>
+      match project_membership_from_json(value) {
+        Some(record) => Ok(record)
+        None => Err("malformed ProjectMembership record")
+      }
+    None => Err("result has no membership")
+  }
 }

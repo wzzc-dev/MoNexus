@@ -94,6 +94,26 @@ fn bots_host_chat(title : String) -> @contracts.ChatRecord {
 }
 
 ///|
+fn bots_host_message(
+  chat : @contracts.ChatRecord,
+  session_id : String,
+  role : String,
+  body : String,
+  now : String,
+) -> @contracts.ChatMessage {
+  @contracts.ChatMessage::new(
+    id=@contracts.new_id("msg", 7_103L),
+    chat_id=chat.id,
+    role~,
+    body_ref="",
+    body~,
+    digest=@contracts.chat_message_digest(body, ""),
+    agent_session_id=session_id,
+    created_at=now,
+  )
+}
+
+///|
 async fn bots_host_call(
   state : HostState,
   request : @contracts.RpcRequest,
@@ -339,6 +359,569 @@ async test "Bot and Chat RPC round-trip with idempotent create" {
   }
   assert_eq(all_bots.length(), 1)
   assert_eq(all_bots[0].state, @contracts.BOT_STATE_ARCHIVED)
+}
+
+///|
+async fn bots_host_seed_project(
+  state : HostState,
+  project_id : String,
+  now : String,
+) -> Unit raise {
+  let record = @contracts.ProjectRecord::new(
+    id=project_id,
+    name="Membership project",
+    repo_url="",
+    default_branch="main",
+    verify=[],
+    created_at=now,
+  )
+  state.mutex.acquire()
+  let appended = state.append_project_event(
+    @contracts.EVENT_PROJECT_CREATED,
+    "project/" + project_id,
+    record.to_json(),
+    record,
+  )
+  state.mutex.release()
+  match appended {
+    Ok(_) => ()
+    Err(message) => fail("append_project_event failed: " + message)
+  }
+}
+
+///|
+async fn bots_host_seed_bot(
+  state : HostState,
+  bot : @contracts.BotRecord,
+  now : String,
+) -> @contracts.BotRecord raise {
+  state.mutex.acquire()
+  let result = state.store.create_bot(bot, "owner", "test", now)
+  state.mutex.release()
+  match result {
+    Ok(value) => value
+    Err(message) => fail("create_bot failed: " + message)
+  }
+}
+
+///|
+async test "Project membership RPC lists active records and add is idempotent" {
+  let state = host_test_state("/tmp/monexus-host-project-membership-test", false) catch {
+    error => fail(error.to_string())
+  }
+  let now = "2026-11-27T04:30:00Z"
+  let first_project = @contracts.new_project_id(7_200L)
+  let second_project = @contracts.new_project_id(7_201L)
+  bots_host_seed_project(state, first_project, now) catch {
+    error => fail(error.to_string())
+  }
+  bots_host_seed_project(state, second_project, now) catch {
+    error => fail(error.to_string())
+  }
+  let first_bot = bots_host_seed_bot(
+    state,
+    { ..bots_host_bot(), id: @contracts.new_bot_id(7_202L) },
+    now,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let second_bot = bots_host_seed_bot(
+    state,
+    {
+      ..bots_host_bot(),
+      id: @contracts.new_bot_id(7_203L),
+      name: "Second Host Builder",
+    },
+    now,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let empty_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_list_empty",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_LIST,
+      @contracts.project_membership_list_params("cid_membership_list_empty"),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let empty = match
+    @contracts.project_memberships_from_result(bots_host_result(empty_text)) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.list: " + message)
+  }
+  assert_eq(empty.length(), 0)
+  let add_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_add_first",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_add_first",
+        first_project,
+        first_bot.id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let first = match
+    @contracts.project_membership_from_result(bots_host_result(add_text)) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.add: " + message)
+  }
+  assert_eq(first.state, @contracts.MEMBERSHIP_STATE_ACTIVE)
+  assert_eq(first.project_id, first_project)
+  assert_eq(first.bot_id, first_bot.id)
+  assert_eq(first.access.length(), 0)
+  state.mutex.acquire()
+  let stored_bot = state.store.get_bot(first_bot.id)
+  state.mutex.release()
+  match stored_bot {
+    Ok(Some(value)) =>
+      assert_eq(value.permission_ceiling, first_bot.permission_ceiling)
+    Ok(None) => fail("membership add lost the Bot")
+    Err(message) => fail("get_bot after membership add: " + message)
+  }
+  let add_again_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_add_first_again",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_add_first_again",
+        first_project,
+        first_bot.id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let again = match
+    @contracts.project_membership_from_result(
+      bots_host_result(add_again_text),
+    ) {
+    Ok(value) => value
+    Err(message) => fail("idempotent project.membership.add: " + message)
+  }
+  assert_eq(again.added_at, first.added_at)
+  let added_events = bots_host_events_of_type(
+    state,
+    0L,
+    @contracts.EVENT_PROJECT_MEMBER_ADDED,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  assert_eq(added_events.length(), 1)
+  let second_add_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_add_second",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_add_second",
+        second_project,
+        second_bot.id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let second = match
+    @contracts.project_membership_from_result(
+      bots_host_result(second_add_text),
+    ) {
+    Ok(value) => value
+    Err(message) => fail("second project.membership.add: " + message)
+  }
+  assert_eq(second.access.length(), 0)
+  let unknown_remove_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_remove_unknown",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_REMOVE,
+      @contracts.project_membership_remove_params(
+        "cid_membership_remove_unknown",
+        first_project,
+        second_bot.id,
+        reason="owner revoke",
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let unknown_remove = bots_host_error(unknown_remove_text)
+  assert_eq(bots_host_error_kind(unknown_remove), "not_found")
+  assert_true(unknown_remove.message.contains("not found"))
+  let all_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_list_all",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_LIST,
+      @contracts.project_membership_list_params("cid_membership_list_all"),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let all = match
+    @contracts.project_memberships_from_result(bots_host_result(all_text)) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.list all: " + message)
+  }
+  assert_eq(all.length(), 2)
+  let filtered_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_list_first",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_LIST,
+      @contracts.project_membership_list_params(
+        "cid_membership_list_first",
+        project_id=first_project,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let filtered = match
+    @contracts.project_memberships_from_result(
+      bots_host_result(filtered_text),
+    ) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.list filter: " + message)
+  }
+  assert_eq(filtered.length(), 1)
+  assert_eq(filtered[0].bot_id, first_bot.id)
+  let missing_project_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_add_missing_project",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_add_missing_project",
+        @contracts.new_project_id(7_204L),
+        first_bot.id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let missing_project = bots_host_error(missing_project_text)
+  assert_eq(bots_host_error_kind(missing_project), "not_found")
+  assert_true(missing_project.message.contains("Project not found"))
+  let missing_bot_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_add_missing_bot",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_add_missing_bot",
+        first_project,
+        @contracts.new_bot_id(7_205L),
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let missing_bot = bots_host_error(missing_bot_text)
+  assert_eq(bots_host_error_kind(missing_bot), "not_found")
+  assert_true(missing_bot.message.contains("Bot not found"))
+  let archived_bot = bots_host_seed_bot(
+    state,
+    {
+      ..bots_host_bot(),
+      id: @contracts.new_bot_id(7_206L),
+      name: "Archived Host Builder",
+    },
+    now,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  state.mutex.acquire()
+  let archive_result = state.store.archive_bot(archived_bot.id, "done", now, "owner")
+  state.mutex.release()
+  match archive_result {
+    Ok(_) => ()
+    Err(message) => fail("archive_bot failed: " + message)
+  }
+  let archived_add_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_add_archived_bot",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_add_archived_bot",
+        first_project,
+        archived_bot.id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let archived_add = bots_host_error(archived_add_text)
+  assert_eq(bots_host_error_kind(archived_add), "conflict")
+  assert_true(archived_add.message.contains("archived"))
+}
+
+///|
+async test "Project membership removal waits for the non-terminal AgentSession" {
+  let state = host_test_state(
+    "/tmp/monexus-host-project-membership-remove-test",
+    false,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let now = "2026-11-27T04:40:00Z"
+  let project_id = @contracts.new_project_id(7_210L)
+  bots_host_seed_project(state, project_id, now) catch {
+    error => fail(error.to_string())
+  }
+  let bot = bots_host_seed_bot(
+    state,
+    { ..bots_host_bot(), id: @contracts.new_bot_id(7_211L) },
+    now,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let add_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_remove_add",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_remove_add",
+        project_id,
+        bot.id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let _ = bots_host_result(add_text)
+  state.mutex.acquire()
+  let agent = match
+    state.store.create_agent(bots_host_agent(bot), "", "owner", "test", now) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("create_agent failed: " + message)
+    }
+  }
+  let chat = match
+    state.store.create_chat(
+      @contracts.ChatRecord::new(
+        id=@contracts.new_chat_id(7_212L),
+        org_id=@contracts.ORG_LOCAL,
+        title="Membership session",
+        created_at=now,
+        project_id~,
+      ),
+      [bot.id],
+      "owner",
+      "test",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("create_chat failed: " + message)
+    }
+  }
+  let session = @contracts.AgentSession::new(
+    id=@contracts.new_agent_session_id(7_213L),
+    chat_id=chat.id,
+    agent_id=agent.id,
+    permission_snapshot_hash="sha256:membership-test",
+    started_at=now,
+    project_id~,
+  )
+  match
+    state.store.start_chat_agent_session(
+      {
+        ..session,
+        workspace_id: "",
+      },
+      "owner",
+      now,
+    ) {
+    Ok(_) => ()
+    Err(message) => {
+      state.mutex.release()
+      fail("start_chat_agent_session failed: " + message)
+    }
+  }
+  state.mutex.release()
+  let blocked_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_remove_blocked",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_REMOVE,
+      @contracts.project_membership_remove_params(
+        "cid_membership_remove_blocked",
+        project_id,
+        bot.id,
+        reason="owner revoke",
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let blocked = bots_host_error(blocked_text)
+  assert_eq(bots_host_error_kind(blocked), "conflict")
+  assert_true(blocked.message.contains("non-terminal AgentSession"))
+  state.mutex.acquire()
+  let ended = state.store.end_chat_agent_session(
+    session.id,
+    @contracts.AGENT_SESSION_STATE_FAILED,
+    @contracts.AGENT_SESSION_END_REASON_ERROR,
+    "",
+    "",
+    now,
+  )
+  state.mutex.release()
+  match ended {
+    Ok(_) => ()
+    Err(message) => fail("end_chat_agent_session failed: " + message)
+  }
+  let remove_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_remove_after_end",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_REMOVE,
+      @contracts.project_membership_remove_params(
+        "cid_membership_remove_after_end",
+        project_id,
+        bot.id,
+        reason="owner revoke",
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let removed = match
+    @contracts.project_membership_from_result(
+      bots_host_result(remove_text),
+    ) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.remove after end: " + message)
+  }
+  assert_eq(removed.state, @contracts.MEMBERSHIP_STATE_REMOVED)
+  assert_eq(removed.reason, "owner revoke")
+  let list_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_list_after_remove",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_LIST,
+      @contracts.project_membership_list_params(
+        "cid_membership_list_after_remove",
+        project_id=project_id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let active = match
+    @contracts.project_memberships_from_result(bots_host_result(list_text)) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.list after remove: " + message)
+  }
+  assert_eq(active.length(), 0)
+}
+
+///|
+async test "Project membership re-add after removal drops historical access" {
+  let state = host_test_state(
+    "/tmp/monexus-host-project-membership-readd-test",
+    false,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let now = "2026-11-27T04:50:00Z"
+  let project_id = @contracts.new_project_id(7_220L)
+  bots_host_seed_project(state, project_id, now) catch {
+    error => fail(error.to_string())
+  }
+  let bot = bots_host_seed_bot(
+    state,
+    { ..bots_host_bot(), id: @contracts.new_bot_id(7_221L) },
+    now,
+  ) catch {
+    error => fail(error.to_string())
+  }
+  state.mutex.acquire()
+  let seeded = state.store.add_project_membership(
+    @contracts.ProjectMembership::new(
+      project_id~,
+      bot_id=bot.id,
+      added_at=now,
+      access=["repo:read"],
+      reason="legacy grant",
+    ),
+    "owner",
+    now,
+  )
+  state.mutex.release()
+  match seeded {
+    Ok(value) => assert_eq(value.access[0], "repo:read")
+    Err(message) => fail("seed legacy membership failed: " + message)
+  }
+  let remove_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_readd_remove",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_REMOVE,
+      @contracts.project_membership_remove_params(
+        "cid_membership_readd_remove",
+        project_id,
+        bot.id,
+        reason="owner revoke",
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let removed = match
+    @contracts.project_membership_from_result(bots_host_result(remove_text)) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.remove: " + message)
+  }
+  assert_eq(removed.state, @contracts.MEMBERSHIP_STATE_REMOVED)
+  assert_eq(removed.access[0], "repo:read")
+  let readd_text = bots_host_call(
+    state,
+    @contracts.RpcRequest::new(
+      "req_membership_readd_add",
+      @contracts.METHOD_PROJECT_MEMBERSHIP_ADD,
+      @contracts.project_membership_add_params(
+        "cid_membership_readd_add",
+        project_id,
+        bot.id,
+      ),
+    ),
+  ) catch {
+    error => fail(error.to_string())
+  }
+  let readded = match
+    @contracts.project_membership_from_result(bots_host_result(readd_text)) {
+    Ok(value) => value
+    Err(message) => fail("project.membership.add after remove: " + message)
+  }
+  assert_eq(readded.state, @contracts.MEMBERSHIP_STATE_ACTIVE)
+  assert_eq(readded.access.length(), 0)
+  assert_eq(readded.reason, "")
+  assert_eq(readded.removed_at, "")
+  state.mutex.acquire()
+  let stored = state.store.get_project_membership(project_id, bot.id)
+  state.mutex.release()
+  match stored {
+    Ok(Some(value)) => {
+      assert_eq(value.state, @contracts.MEMBERSHIP_STATE_ACTIVE)
+      assert_eq(value.access.length(), 0)
+      assert_eq(value.reason, "")
+    }
+    Ok(None) => fail("re-added ProjectMembership disappeared")
+    Err(message) => fail("get_project_membership after re-add: " + message)
+  }
 }
 
 ///|
@@ -820,10 +1403,271 @@ async test "fake ACP Chat bridge start/send/read/stop" {
     assert_true(second_stopped.stopped)
     assert_eq(second_stopped.session.state, @contracts.AGENT_SESSION_STATE_ENDED)
 
+    // Continue the first Chat in a new AgentSession. Visible history is
+    // injected once as a hidden prompt prefix; the current message, system
+    // boundaries and any other non user/assistant rows stay out.
+    let system_message = bots_host_message(
+      created_chat,
+      session.id,
+      @contracts.CHAT_MESSAGE_ROLE_SYSTEM,
+      "CHAT-SYSTEM-BOUNDARY must not enter continuation context",
+      now,
+    )
+    state.mutex.acquire()
+    let system_before = bots_last_seq_or_zero(state)
+    match state.store.append_chat_message(system_message, now) {
+      Ok(_) => state.sync_bots_events_after(system_before)
+      Err(message) => {
+        state.mutex.release()
+        fail("cannot seed the system boundary message: " + message)
+      }
+    }
+    state.mutex.release()
+    let continuation_start_text = bots_host_call(
+      state,
+      @contracts.RpcRequest::new(
+        "req_chat_continue_start",
+        @contracts.METHOD_CHAT_AGENT_SESSION_START,
+        @contracts.chat_agent_session_start_params(
+          "cid_chat_continue_start",
+          created_chat.id,
+          created_agent.id,
+          workspace.id,
+          workspace.root,
+        ),
+      ),
+    ) catch {
+      error => fail(error.to_string())
+    }
+    let continuation = match
+      @contracts.chat_agent_session_from_result(
+        bots_host_result(continuation_start_text),
+      ) {
+      Ok(value) => value
+      Err(message) => fail("continuation chat.start: " + message)
+    }
+    assert_eq(
+      continuation.state,
+      @contracts.AGENT_SESSION_STATE_ACTIVE,
+    )
+    assert_eq(continuation.handoff_from_session_id, session.id)
+    @async.sleep(500)
+    let first_continue_send = bots_host_call(
+      state,
+      @contracts.RpcRequest::new(
+        "req_chat_continue_send_1",
+        @contracts.METHOD_CHAT_SEND,
+        @contracts.chat_send_params(
+          "cid_chat_continue_send_1",
+          created_chat.id,
+          "continue please",
+        ),
+      ),
+    ) catch {
+      error => fail(error.to_string())
+    }
+    let first_continue_sent = match
+      @contracts.chat_send_result_from_json(
+        bots_host_result(first_continue_send),
+      ) {
+      Some(value) => value
+      None => fail("first continuation chat.send result did not decode")
+    }
+    assert_eq(first_continue_sent.session.id, continuation.id)
+    assert_eq(first_continue_sent.message.body, "continue please")
+    let mut continue_cursor = 0L
+    let mut first_continue_live = ""
+    let continue_deadline = @async.now() + 10_000L
+    let mut continue_attempt = 0
+    while @async.now() < continue_deadline {
+      let read_text = bots_host_call(
+        state,
+        @contracts.RpcRequest::new(
+          "req_chat_continue_read_1_" + continue_attempt.to_string(),
+          @contracts.METHOD_CHAT_READ,
+          @contracts.chat_read_params(
+            "cid_chat_continue_read_1_" + continue_attempt.to_string(),
+            created_chat.id,
+            continue_cursor,
+          ),
+        ),
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let read = match
+        @contracts.chat_read_result_from_json(bots_host_result(read_text)) {
+        Some(value) => value
+        None => fail("first continuation chat.read did not decode")
+      }
+      assert_eq(read.session_id, continuation.id)
+      first_continue_live = first_continue_live + read.text
+      continue_cursor = read.cursor
+      if first_continue_live.contains("done") {
+        break
+      }
+      continue_attempt = continue_attempt + 1
+      @async.sleep(50)
+    }
+    assert_true(first_continue_live.contains("RECOVERY_CONTEXT_SEEN"))
+    assert_false(first_continue_live.contains("SYSTEM_CONTEXT_LEAK"))
+    let mut continued_messages : Array[@contracts.ChatMessage] = []
+    let messages_deadline = @async.now() + 10_000L
+    while @async.now() < messages_deadline {
+      continued_messages = bots_host_chat_messages(state, created_chat.id) catch {
+        error => fail(error.to_string())
+      }
+      if continued_messages.length() >= 5 &&
+        continued_messages[4].body.contains("done") {
+        break
+      }
+      @async.sleep(50)
+    }
+    assert_eq(continued_messages.length(), 5)
+    assert_eq(continued_messages[2].id, system_message.id)
+    assert_eq(
+      continued_messages[2].role,
+      @contracts.CHAT_MESSAGE_ROLE_SYSTEM,
+    )
+    assert_eq(continued_messages[3].body, "continue please")
+    assert_eq(
+      continued_messages[3].role,
+      @contracts.CHAT_MESSAGE_ROLE_USER,
+    )
+    assert_true(continued_messages[4].body.contains("RECOVERY_CONTEXT_SEEN"))
+    assert_false(continued_messages[4].body.contains("SYSTEM_CONTEXT_LEAK"))
+    for message in continued_messages {
+      assert_false(
+        message.body.contains("[MoNexus Chat continuation context]"),
+      )
+    }
+    let persisted_transcript = match
+      state.store.load_chat_transcript(continuation.id) {
+      Ok(Some(value)) => value
+      Ok(None) => fail("continuation transcript was not persisted")
+      Err(message) => fail("load_chat_transcript failed: " + message)
+    }
+    assert_true(persisted_transcript.context_injected)
+    assert_true(
+      persisted_transcript.text.contains("RECOVERY_CONTEXT_SEEN"),
+    )
+    assert_false(
+      persisted_transcript.text.contains(
+        "[MoNexus Chat continuation context]",
+      ),
+    )
+    let recent_events = match state.store.load_recent_events(1_000) {
+      Ok(value) => value
+      Err(message) => fail("load_recent_events failed: " + message)
+    }
+    for event in recent_events {
+      assert_false(
+        event.payload.stringify().contains(
+          "[MoNexus Chat continuation context]",
+        ),
+      )
+    }
+    let second_continue_send = bots_host_call(
+      state,
+      @contracts.RpcRequest::new(
+        "req_chat_continue_send_2",
+        @contracts.METHOD_CHAT_SEND,
+        @contracts.chat_send_params(
+          "cid_chat_continue_send_2",
+          created_chat.id,
+          "again",
+        ),
+      ),
+    ) catch {
+      error => fail(error.to_string())
+    }
+    let second_continue_sent = match
+      @contracts.chat_send_result_from_json(
+        bots_host_result(second_continue_send),
+      ) {
+      Some(value) => value
+      None => fail("second continuation chat.send result did not decode")
+    }
+    assert_eq(second_continue_sent.message.body, "again")
+    let mut second_continue_live = ""
+    let second_deadline = @async.now() + 10_000L
+    let mut second_attempt = 0
+    while @async.now() < second_deadline {
+      let read_text = bots_host_call(
+        state,
+        @contracts.RpcRequest::new(
+          "req_chat_continue_read_2_" + second_attempt.to_string(),
+          @contracts.METHOD_CHAT_READ,
+          @contracts.chat_read_params(
+            "cid_chat_continue_read_2_" + second_attempt.to_string(),
+            created_chat.id,
+            continue_cursor,
+          ),
+        ),
+      ) catch {
+        error => fail(error.to_string())
+      }
+      let read = match
+        @contracts.chat_read_result_from_json(bots_host_result(read_text)) {
+        Some(value) => value
+        None => fail("second continuation chat.read did not decode")
+      }
+      second_continue_live = second_continue_live + read.text
+      continue_cursor = read.cursor
+      if second_continue_live.contains("done") {
+        break
+      }
+      second_attempt = second_attempt + 1
+      @async.sleep(50)
+    }
+    assert_true(second_continue_live.contains("done"))
+    assert_false(
+      second_continue_live.contains("RECOVERY_CONTEXT_SEEN"),
+    )
+    let mut final_messages : Array[@contracts.ChatMessage] = []
+    let final_deadline = @async.now() + 10_000L
+    while @async.now() < final_deadline {
+      final_messages = bots_host_chat_messages(state, created_chat.id) catch {
+        error => fail(error.to_string())
+      }
+      if final_messages.length() >= 7 &&
+        final_messages[6].body.contains("done") {
+        break
+      }
+      @async.sleep(50)
+    }
+    assert_eq(final_messages.length(), 7)
+    assert_eq(final_messages[5].body, "again")
+    assert_true(final_messages[6].body.contains("done"))
+    assert_false(final_messages[6].body.contains("RECOVERY_CONTEXT_SEEN"))
+    let continuation_stop_text = bots_host_call(
+      state,
+      @contracts.RpcRequest::new(
+        "req_chat_continue_stop",
+        @contracts.METHOD_CHAT_STOP,
+        @contracts.chat_stop_params(
+          "cid_chat_continue_stop",
+          created_chat.id,
+          end_reason=@contracts.AGENT_SESSION_END_REASON_TURN_END,
+          session_id=continuation.id,
+        ),
+      ),
+    ) catch {
+      error => fail(error.to_string())
+    }
+    let continuation_stopped = match
+      @contracts.chat_stop_result_from_json(
+        bots_host_result(continuation_stop_text),
+      ) {
+      Some(value) => value
+      None => fail("continuation chat.stop result did not decode")
+    }
+    assert_true(continuation_stopped.stopped)
+
     // A host restart drops the in-memory runtime and transcript. chat.read
     // must not reset the client cursor or invent text when both are missing.
     state.mutex.acquire()
     state.agent_transcripts.remove(session.runtime_session_id)
+    state.agent_transcripts.remove(continuation.runtime_session_id)
     state.mutex.release()
     let missing_text = bots_host_call(
       state,
@@ -847,6 +1691,12 @@ async test "fake ACP Chat bridge start/send/read/stop" {
     assert_eq(missing.cursor, cursor)
     assert_eq(missing.text, "")
     assert_eq(missing.state, @contracts.AGENT_SESSION_STATE_ENDED)
+    match
+      state.store.load_chat_transcript(continuation.id) {
+      Ok(Some(_)) => ()
+      Ok(None) => fail("persisted transcript disappeared across restart")
+      Err(message) => fail("load_chat_transcript after restart: " + message)
+    }
 
     done.put(())
   })
@@ -1718,6 +2568,333 @@ async test "Chat agent_session.end stops the runtime and repeats idempotently" {
     Some(state) => state.store.close()
     None => ()
   }
+}
+
+///|
+fn bots_handoff_message(
+  role : String,
+  body : String,
+) -> @contracts.ChatMessage {
+  @contracts.ChatMessage::new(
+    id=@contracts.new_id("msg", 7_200L),
+    chat_id="cht_test",
+    role~,
+    body_ref="",
+    body~,
+    digest=@contracts.chat_message_digest(body, ""),
+    created_at="2026-11-27T06:00:00Z",
+  )
+}
+
+///|
+test "chat handoff prefix is chronological, bounded and excludes system" {
+  let messages = [
+    bots_handoff_message(
+      @contracts.CHAT_MESSAGE_ROLE_SYSTEM,
+      "CHAT-SYSTEM-BOUNDARY",
+    ),
+    bots_handoff_message(@contracts.CHAT_MESSAGE_ROLE_ASSISTANT, "recent"),
+    bots_handoff_message(@contracts.CHAT_MESSAGE_ROLE_USER, "older"),
+  ]
+  let prefix = chat_handoff_prefix(messages)
+  assert_true(prefix.contains("user: older"))
+  assert_true(prefix.contains("assistant: recent"))
+  assert_false(prefix.contains("CHAT-SYSTEM-BOUNDARY"))
+  let older_at = match prefix.find("user: older") {
+    Some(value) => value
+    None => fail("older message missing from the prefix")
+  }
+  let recent_at = match prefix.find("assistant: recent") {
+    Some(value) => value
+    None => fail("recent message missing from the prefix")
+  }
+  assert_true(older_at < recent_at)
+  assert_true(
+    @utf8.encode(prefix).length() <= CHAT_HANDOFF_CONTEXT_CAP.to_int(),
+  )
+  let oversized_chunks : Array[String] = []
+  for _ in 0..<4_000 {
+    oversized_chunks.push("汉")
+  }
+  let oversized = oversized_chunks.join("")
+  let trimmed = chat_handoff_prefix([
+    bots_handoff_message(@contracts.CHAT_MESSAGE_ROLE_USER, oversized),
+  ])
+  let trimmed_bytes = @utf8.encode(trimmed)
+  assert_true(trimmed_bytes.length() <= CHAT_HANDOFF_CONTEXT_CAP.to_int())
+  assert_eq(
+    @utf8.decode_lossy(trimmed_bytes[:], ignore_bom=false),
+    trimmed,
+  )
+  assert_true(trimmed.contains("汉"))
+  let newest = "n".repeat(5_000)
+  let older = "o".repeat(5_000)
+  let newest_first = chat_handoff_prefix([
+    bots_handoff_message(@contracts.CHAT_MESSAGE_ROLE_ASSISTANT, newest),
+    bots_handoff_message(@contracts.CHAT_MESSAGE_ROLE_USER, older),
+  ])
+  assert_true(newest_first.contains(newest))
+  assert_false(newest_first.contains(older))
+  assert_true(
+    @utf8.encode(newest_first).length() <= CHAT_HANDOFF_CONTEXT_CAP.to_int(),
+  )
+}
+
+///|
+test "bounded transcript advances the absolute base when trimming the head" {
+  let chunk = "x".repeat(131_072)
+  let first = transcript_with_append({ base: 7L, text: "abc" }, chunk)
+  assert_eq(first.base, 10L)
+  assert_eq(first.text.length(), 131_072)
+  let second = transcript_with_append(first, "yz")
+  assert_eq(second.base, 12L)
+  assert_eq(second.text.length(), 131_072)
+  assert_true(second.text.has_suffix("yz"))
+}
+
+///|
+async test "startup reconcile ends interrupted Chat sessions and writes one boundary" {
+  let state = host_test_state("/tmp/monexus-host-chat-reconcile-test", false) catch {
+    error => fail(error.to_string())
+  }
+  let now = "2026-11-27T06:10:00Z"
+  let bot = { ..bots_host_bot(), agent_concurrency_cap: 4 }
+  let agent = bots_host_agent(bot)
+  let chats = [
+    bots_host_chat("Interrupted active"),
+    bots_host_chat("Interrupted waiting"),
+    bots_host_chat("Interrupted starting"),
+  ]
+  state.mutex.acquire()
+  let created_bot = match state.store.create_bot(bot, "owner", "test", now) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("cannot create the Bot: " + message)
+    }
+  }
+  let created_agent = match
+    state.store.create_agent(agent, "", "owner", "test", now) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("cannot create the Agent: " + message)
+    }
+  }
+  let created_chats : Array[@contracts.ChatRecord] = []
+  for chat in chats {
+    let created = match
+      state.store.create_chat(chat, [created_bot.id], "owner", "test", now) {
+      Ok(value) => value
+      Err(message) => {
+        state.mutex.release()
+        fail("cannot create the Chat: " + message)
+      }
+    }
+    created_chats.push(created)
+  }
+  let active = match
+    state.store.start_chat_agent_session(
+      @contracts.AgentSession::new(
+        id=@contracts.new_agent_session_id(8_100L),
+        chat_id=created_chats[0].id,
+        agent_id=created_agent.id,
+        permission_snapshot_hash="sha256:test",
+        started_at=now,
+      ),
+      "owner",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("cannot start active session: " + message)
+    }
+  }
+  let active = match
+    state.store.update_chat_agent_session(
+      active.id,
+      @contracts.AGENT_SESSION_STATE_ACTIVE,
+      "ags_active_runtime",
+      "",
+      0,
+      0,
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("cannot activate session: " + message)
+    }
+  }
+  let waiting = match
+    state.store.start_chat_agent_session(
+      @contracts.AgentSession::new(
+        id=@contracts.new_agent_session_id(8_101L),
+        chat_id=created_chats[1].id,
+        agent_id=created_agent.id,
+        permission_snapshot_hash="sha256:test",
+        started_at=now,
+      ),
+      "owner",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("cannot start waiting session: " + message)
+    }
+  }
+  let waiting = match
+    state.store.update_chat_agent_session(
+      waiting.id,
+      @contracts.AGENT_SESSION_STATE_ACTIVE,
+      "ags_waiting_runtime",
+      "",
+      0,
+      0,
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("cannot activate waiting session: " + message)
+    }
+  }
+  let waiting = match
+    state.store.update_chat_agent_session(
+      waiting.id,
+      @contracts.AGENT_SESSION_STATE_WAITING,
+      "",
+      "",
+      0,
+      0,
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("cannot move session to waiting: " + message)
+    }
+  }
+  let starting = match
+    state.store.start_chat_agent_session(
+      @contracts.AgentSession::new(
+        id=@contracts.new_agent_session_id(8_102L),
+        chat_id=created_chats[2].id,
+        agent_id=created_agent.id,
+        permission_snapshot_hash="sha256:test",
+        started_at=now,
+      ),
+      "owner",
+      now,
+    ) {
+    Ok(value) => value
+    Err(message) => {
+      state.mutex.release()
+      fail("cannot start starting session: " + message)
+    }
+  }
+  let decisions = [
+    @contracts.DecisionRecord::new(
+      id=@contracts.new_id("dec", 8_100L),
+      kind=@contracts.DECISION_KIND_PERMISSION,
+      title="Active approval",
+      detail="pending across restart",
+      session_id=active.runtime_session_id,
+      agent_id=created_agent.id,
+      options=[],
+      created_at=now,
+    ),
+    @contracts.DecisionRecord::new(
+      id=@contracts.new_id("dec", 8_101L),
+      kind=@contracts.DECISION_KIND_PERMISSION,
+      title="Waiting approval",
+      detail="pending across restart",
+      session_id=waiting.runtime_session_id,
+      agent_id=created_agent.id,
+      options=[],
+      created_at=now,
+    ),
+    @contracts.DecisionRecord::new(
+      id=@contracts.new_id("dec", 8_102L),
+      kind=@contracts.DECISION_KIND_PERMISSION,
+      title="Starting approval",
+      detail="pending across restart",
+      session_id=starting.id,
+      agent_id=created_agent.id,
+      options=[],
+      created_at=now,
+    ),
+  ]
+  for decision in decisions {
+    match
+      state.append_decision_event(
+        @contracts.EVENT_DECISION_REQUESTED,
+        decision.id,
+        @contracts.decision_payload(decision),
+        decision,
+      ) {
+      Ok(_) => ()
+      Err(message) => {
+        state.mutex.release()
+        fail("cannot append pending Decision: " + message)
+      }
+    }
+  }
+  state.mutex.release()
+  match reconcile_agent_sessions(state) {
+    Ok(_) => ()
+    Err(message) => fail("startup reconcile failed: " + message)
+  }
+  let all_sessions = match state.store.list_all_bot_agent_sessions() {
+    Ok(value) => value
+    Err(message) => fail("list_all_bot_agent_sessions failed: " + message)
+  }
+  assert_eq(all_sessions.length(), 3)
+  for session in all_sessions {
+    assert_eq(session.state, @contracts.AGENT_SESSION_STATE_ENDED)
+    assert_eq(
+      session.end_reason,
+      @contracts.AGENT_SESSION_END_REASON_HOST_RESTARTED,
+    )
+    assert_true(session.ended_at != "")
+  }
+  let stored_decisions = match state.store.list_decisions("", "") {
+    Ok(value) => value
+    Err(message) => fail("list_decisions failed: " + message)
+  }
+  assert_eq(stored_decisions.length(), 3)
+  for decision in stored_decisions {
+    assert_eq(decision.status, @contracts.DECISION_STATUS_EXPIRED)
+  }
+  for chat in created_chats {
+    let messages = match state.store.list_chat_messages(chat.id, "", 10) {
+      Ok(value) => value
+      Err(message) => fail("list_chat_messages failed: " + message)
+    }
+    assert_eq(messages.length(), 1)
+    assert_eq(messages[0].role, @contracts.CHAT_MESSAGE_ROLE_SYSTEM)
+    assert_eq(messages[0].actor, "host")
+    assert_eq(
+      messages[0].body,
+      @contracts.CHAT_HOST_RESTART_BOUNDARY_BODY,
+    )
+    assert_true(messages[0].agent_session_id != "")
+  }
+  // A repeated reconcile must repair nothing into a second boundary.
+  match reconcile_agent_sessions(state) {
+    Ok(_) => ()
+    Err(message) => fail("second startup reconcile failed: " + message)
+  }
+  for chat in created_chats {
+    let messages = match state.store.list_chat_messages(chat.id, "", 10) {
+      Ok(value) => value
+      Err(message) => fail("second list_chat_messages failed: " + message)
+    }
+    assert_eq(messages.length(), 1)
+  }
+  state.store.close()
 }
 
 ///|

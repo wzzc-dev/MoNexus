@@ -217,24 +217,67 @@ fn memory_diff(before : String, after : String) -> String {
 }
 
 ///|
+/// Append to a bounded transcript. `base` is the absolute cursor of the head;
+/// trimming advances it by the number of removed code units.
+fn transcript_with_append(
+  current : AgentTranscript,
+  text : String,
+) -> AgentTranscript {
+  let combined = current.text + text
+  let overflow = combined.length() - AGENT_TRANSCRIPT_CAP
+  if overflow > 0 {
+    let dropped = combined[:overflow].to_owned()
+    {
+      base: current.base + dropped.length().to_int64(),
+      text: combined.substring(start=overflow),
+    }
+  } else {
+    { base: current.base, text: combined, }
+  }
+}
+
+///|
+/// Persist the runtime transcript under its canonical Chat AgentSession id.
+/// Caller holds `state.mutex`. Legacy runtime sessions have no Chat mapping and
+/// stay in memory only.
+fn persist_runtime_transcript_locked(
+  state : HostState,
+  runtime : AgentSessionRuntime,
+) -> Unit {
+  match state.chat_runtime_sessions.get(runtime.id) {
+    Some(session_id) => {
+      let transcript = runtime.transcript.val
+      let now = @contracts.format_rfc3339(@async.now())
+      match
+        state.store.save_chat_transcript(
+          session_id,
+          transcript.base,
+          transcript.text,
+          now,
+        ) {
+        Ok(_) => ()
+        Err(message) =>
+          println(
+            "monexus-host: cannot persist Chat transcript for " +
+            session_id +
+            ": " +
+            message,
+          )
+      }
+    }
+    None => ()
+  }
+}
+
+///|
 async fn append_transcript(
   state : HostState,
   runtime : AgentSessionRuntime,
   text : String,
 ) -> Unit {
   state.mutex.acquire()
-  let current = runtime.transcript.val
-  let combined = current.text + text
-  let overflow = combined.length() - AGENT_TRANSCRIPT_CAP
-  if overflow > 0 {
-    let dropped = combined[:overflow].to_owned()
-    runtime.transcript.val = {
-      base: current.base + dropped.length().to_int64(),
-      text: combined.substring(start=overflow),
-    }
-  } else {
-    runtime.transcript.val = { base: current.base, text: combined, }
-  }
+  runtime.transcript.val = transcript_with_append(runtime.transcript.val, text)
+  persist_runtime_transcript_locked(state, runtime)
   state.mutex.release()
 }
 
@@ -425,6 +468,8 @@ async fn finalize_agent_session(
   if state.agent_transcripts.size() < 64 {
     state.agent_transcripts.set(runtime.id, runtime.transcript.val)
   }
+  persist_runtime_transcript_locked(state, runtime)
+  state.chat_runtime_sessions.remove(runtime.id)
   let _ = state.store.search_index(
     "session/" + runtime.id,
     "session",
@@ -1200,6 +1245,7 @@ async fn handle_agent_start(
   sink : Sink,
   request : @contracts.RpcRequest,
   client_request_id : String,
+  chat_session_id~ : String = "",
 ) -> Unit {
   let agent_id = @contracts.agent_id_param(request.params)
   if !valid_agent_id(agent_id) {
@@ -1645,7 +1691,12 @@ async fn handle_agent_start(
     record,
   )
   match started {
-    Ok(_) => state.agent_sessions.set(session_id, runtime)
+    Ok(_) => {
+      state.agent_sessions.set(session_id, runtime)
+      if chat_session_id != "" {
+        state.chat_runtime_sessions.set(session_id, chat_session_id)
+      }
+    }
     Err(message) => {
       state.mutex.release()
       stop_session_credential_proxy(state, session_id)
@@ -2855,6 +2906,130 @@ async fn handle_decision_respond(
 // ---------------------------------------------------------------------------
 
 ///|
+/// Write the one visible system boundary for a Chat AgentSession interrupted
+/// by a host restart. Caller holds `state.mutex`.
+fn append_chat_restart_boundary_locked(
+  state : HostState,
+  session : @contracts.AgentSession,
+  timestamp : String,
+) -> Result[Unit, String] {
+  match state.store.has_chat_system_boundary(session.chat_id, session.id) {
+    Ok(true) => return Ok(())
+    Ok(false) => ()
+    Err(message) => return Err(message)
+  }
+  let message = @contracts.ChatMessage::new(
+    id=bots_new_message_id(@async.now()),
+    chat_id=session.chat_id,
+    role=@contracts.CHAT_MESSAGE_ROLE_SYSTEM,
+    agent_session_id=session.id,
+    body_ref="",
+    body=@contracts.CHAT_HOST_RESTART_BOUNDARY_BODY,
+    digest=@contracts.chat_message_digest(
+      @contracts.CHAT_HOST_RESTART_BOUNDARY_BODY,
+      "",
+    ),
+    actor="host",
+    created_at=timestamp,
+  )
+  let before = bots_last_seq_or_zero(state)
+  match state.store.append_chat_message(message, timestamp) {
+    Ok(_) => {
+      state.sync_bots_events_after(before)
+      Ok(())
+    }
+    Err(error) => Err(error)
+  }
+}
+
+///|
+/// Close every Chat AgentSession that could not have survived the restart.
+/// Pending Decisions are expired and each interrupted session gets exactly one
+/// visible boundary message. The boundary check also repairs an earlier run
+/// that closed the session but failed to write its boundary.
+fn reconcile_chat_agent_sessions_locked(
+  state : HostState,
+  timestamp : String,
+) -> Result[Unit, String] {
+  let sessions = match state.store.list_all_bot_agent_sessions() {
+    Ok(records) => records
+    Err(message) => return Err("cannot list Chat AgentSessions: " + message)
+  }
+  for record in sessions {
+    let interrupted = record.state == @contracts.AGENT_SESSION_STATE_STARTING ||
+      record.state == @contracts.AGENT_SESSION_STATE_ACTIVE ||
+      record.state == @contracts.AGENT_SESSION_STATE_WAITING ||
+      record.state == @contracts.AGENT_SESSION_STATE_ENDING
+    let mut final_record = record
+    if interrupted {
+      if record.state != @contracts.AGENT_SESSION_STATE_ENDING {
+        let before = bots_last_seq_or_zero(state)
+        match
+          state.store.update_chat_agent_session(
+            record.id,
+            @contracts.AGENT_SESSION_STATE_ENDING,
+            "",
+            "",
+            0,
+            0,
+            timestamp,
+          ) {
+          Ok(_) => ()
+          Err(message) =>
+            return Err(
+              "cannot move Chat AgentSession " +
+              record.id +
+              " to ending: " +
+              message,
+            )
+        }
+        state.sync_bots_events_after(before)
+      }
+      let before = bots_last_seq_or_zero(state)
+      let ended = match
+        state.store.end_chat_agent_session(
+          record.id,
+          @contracts.AGENT_SESSION_STATE_ENDED,
+          @contracts.AGENT_SESSION_END_REASON_HOST_RESTARTED,
+          "",
+          "",
+          timestamp,
+        ) {
+        Ok(value) => value
+        Err(message) =>
+          return Err(
+            "cannot end Chat AgentSession " +
+            record.id +
+            " after restart: " +
+            message,
+          )
+      }
+      state.sync_bots_events_after(before)
+      final_record = ended
+      expire_session_decisions(state, record.id, timestamp)
+      if record.runtime_session_id != "" &&
+        record.runtime_session_id != record.id {
+        expire_session_decisions(state, record.runtime_session_id, timestamp)
+      }
+    }
+    if final_record.end_reason ==
+      @contracts.AGENT_SESSION_END_REASON_HOST_RESTARTED {
+      match append_chat_restart_boundary_locked(state, final_record, timestamp) {
+        Ok(_) => ()
+        Err(message) =>
+          println(
+            "monexus-host: cannot append Chat restart boundary for " +
+            final_record.id +
+            ": " +
+            message,
+          )
+      }
+    }
+  }
+  Ok(())
+}
+
+///|
 /// A host restart kills ACP processes (M0 found no durable process), so live
 /// sessions are closed as `host_restarted` and every pending decision expires.
 pub async fn reconcile_agent_sessions(
@@ -2887,6 +3062,13 @@ pub async fn reconcile_agent_sessions(
         updated,
       )
       expire_session_decisions(state, record.id, timestamp)
+    }
+  }
+  match reconcile_chat_agent_sessions_locked(state, timestamp) {
+    Ok(_) => ()
+    Err(message) => {
+      state.mutex.release()
+      return Err(message)
     }
   }
   let p = match

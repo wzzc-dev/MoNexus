@@ -130,6 +130,29 @@ A worktree is a first-class object: each Run can target its own worktree, so
 two concurrent Runs do not share a working directory. Non-git workspaces use
 exclusive leases instead.
 
+### Project membership by Bot name
+
+Desktop: **Manage** → **Projects** → select a Project. The **Bot members**
+section lists active members; use **Remove** beside a Bot name, or **Add**
+beside an available Bot name. The same controls are on the Bot page's Project
+section. Lists and pickers show Bot and Project names, not raw `bot_`/`prj_`
+ids. Adding or removing a member refreshes the Project page, Bot page and the
+New Chat draft so a revoked Bot is not left selected.
+
+```bash
+monexus host rpc --method project.membership.list --params '{"project_id":"prj_..."}'
+monexus host rpc --method project.membership.add \
+  --params '{"project_id":"prj_...","bot_id":"bot_..."}'
+monexus host rpc --method project.membership.remove \
+  --params '{"project_id":"prj_...","bot_id":"bot_...","reason":"owner request"}'
+```
+
+`project.membership.list` with no `project_id` returns every active membership.
+Adding an existing active member is idempotent. Removal fails with `conflict`
+while that Bot has a non-terminal AgentSession in the Project; stop the session
+first. M1 access is always empty, and permissions stay bounded by the Bot
+ceiling plus the existing permission snapshot.
+
 ## 4. Agent sessions
 
 Desktop: **Agents** → workspace/worktree + adapter → **Start session**; the
@@ -175,8 +198,33 @@ Real ACP adapter:
   becomes `.`.
 - SSH-backed remote agent sessions are still a gated PoC behind
   `MONEXUS_AGENT_SSH=1` (ADR-0011); they are not part of the V0.2 runtime
-  path. Transcripts are kept in memory (bounded); sessions/decisions/artifacts
-  persist but transcript text does not survive a host restart.
+  path. Legacy runtime sessions keep transcripts in memory (bounded); Chat
+  AgentSession transcripts are also written to a bounded audit cache keyed by
+  the canonical Chat session id, but `chat.read` never replays that cache as
+  visible text after a restart.
+
+### Chat continuation and restart recovery
+
+- The Chat timeline is built from `ChatMessage` and is the only user-visible
+  history authority. Assistant messages keep their `agent_session_id`; host
+  boundaries are ordinary `role=system`, `actor=host` messages.
+- A host restart closes every `starting|active|waiting` Chat AgentSession as
+  `ended` with `end_reason=host_restarted`, expires its pending Decisions and
+  writes exactly one visible boundary message per interrupted session. Repeating
+  startup reconcile does not add a second boundary.
+- In an interrupted Chat, use **Continue Agent session** on the same Chat. The
+  new AgentSession records `handoff_from_session_id`; this does not create a new
+  Chat and does not resurrect the old ACP process.
+- The first `chat.send` of a new session injects at most 8 KiB (UTF-8) of the
+  most recent user/assistant visible history as a hidden prompt prefix. system
+  boundaries, Decisions and the current message are excluded, and the prefix is
+  sent only once. It never appears in `ChatMessage.body`, the durable transcript
+  or event payloads.
+- The durable transcript is execution/audit cache, not UI replay. With the
+  runtime gone, `chat.read` still returns empty `text` and keeps the caller's
+  cursor; a new AgentSession starts a new runtime transcript at cursor 0.
+- Runtime `prompt=""` and `memory_limit=0` are unchanged; Bot memory injection
+  remains M1b scope.
 
 Remote agent PoC (rounds 1–2, not full remote-agent support):
 
@@ -358,6 +406,10 @@ monexus host rpc --method audit.list --params '{"limit":100}'
 - `MONEXUS_RECOVERY_POLL_MS` and `MONEXUS_RECOVERY_UNVERIFIABLE_MS` tune the
   poll and silence windows (used by acceptance/tests; defaults 120 ms and
   15 s).
+- Chat recovery is separate from Run recovery: interrupted Chat AgentSessions
+  become `ended/host_restarted`, pending Decisions expire, and one system
+  boundary is kept in the Chat timeline. Durable transcripts remain available
+  for audit but are never replayed into `chat.read`.
 
 ## 9. Schedule and webhook triggers
 

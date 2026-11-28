@@ -101,6 +101,12 @@ pub const AGENT_SESSION_END_REASON_EXITED : String = "exited"
 pub const AGENT_SESSION_END_REASON_HOST_RESTART : String = "host_restart"
 
 ///|
+/// ADR-0019: the terminal reason written when startup reconcile closes a Chat
+/// AgentSession whose ACP process did not survive the host restart. The legacy
+/// runtime-session reason above stays `host_restart` for backward compatibility.
+pub const AGENT_SESSION_END_REASON_HOST_RESTARTED : String = "host_restarted"
+
+///|
 pub const AGENT_SESSION_END_REASON_LOST : String = "lost"
 
 ///|
@@ -127,6 +133,12 @@ pub const CHAT_MESSAGE_ROLE_ASSISTANT : String = "assistant"
 
 ///|
 pub const CHAT_MESSAGE_ROLE_SYSTEM : String = "system"
+
+///|
+/// Visible Chat boundary written once per AgentSession interrupted by a host
+/// restart. It is an ordinary ChatMessage, never hidden recovery context.
+pub const CHAT_HOST_RESTART_BOUNDARY_BODY : String =
+  "运行时已中断，记录已保留。可在同一 Chat 启动新的智能体会话继续。"
 
 ///|
 /// Maximum inline Chat transcript body. Runtime stdout and hidden prompts are

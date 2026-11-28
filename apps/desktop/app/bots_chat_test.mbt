@@ -73,6 +73,21 @@ fn p1_project(id : String, name : String) -> @contracts.ProjectRecord {
 }
 
 ///|
+fn p1_membership(
+  project_id : String,
+  bot_id : String,
+  state : String,
+) -> @contracts.ProjectMembership {
+  @contracts.ProjectMembership::new(
+    project_id~,
+    bot_id~,
+    added_at="2026-01-01T00:00:00Z",
+    access=[],
+    state~,
+  )
+}
+
+///|
 fn p1_session(
   chat_id : String,
   agent_id : String,
@@ -540,9 +555,18 @@ test "Project view filters Chats by Project and Bot and excludes no-project Chat
   let model = update(model, ProjectCatalogLoaded([project]))
   let model = update(model, SelectProject("prj_1"))
   let model = update(model, ChatsLoaded([in_project, no_project]))
+  let model = update(
+    model,
+    ProjectMembershipsLoaded([
+      p1_membership("prj_1", "bot_a", @contracts.MEMBERSHIP_STATE_ACTIVE),
+    ]),
+  )
   let harness = test_harness_for_model(model)
   assert_true(harness.has_text("Chats in this Project"))
   assert_true(harness.has_text("Release chat"))
+  assert_true(harness.has_text("Bot members"))
+  assert_true(harness.has_text("Ada"))
+  assert_false(harness.has_text("bot_a"))
   let filtered = update(model, ProjectChatBotFilter("bot_b"))
   let filtered_harness = test_harness_for_model(filtered)
   assert_true(
@@ -553,11 +577,50 @@ test "Project view filters Chats by Project and Bot and excludes no-project Chat
   let (new_chat, _) = update_full(model, NewChat)
   assert_true(new_chat.composing_new_chat)
   assert_eq(new_chat.chat_draft.project_id, "prj_1")
-  // `bot_a` is the only Bot with membership evidence from the existing Chat.
+  // `bot_a` is the only Bot with active Project membership in the projection.
   assert_eq(new_chat.chat_draft.bot_id, "bot_a")
   let non_member = update(new_chat, ChatDraftBot("bot_b"))
   assert_eq(non_member.chat_draft.bot_id, "")
   assert_true(non_member.chat_draft.message.contains("no active membership"))
+}
+
+///|
+test "Project page manages membership by Bot name without raw ids" {
+  let bot_a = p1_bot("bot_a", "Ada", ["claude-code"])
+  let bot_b = p1_bot("bot_b", "Beta", ["claude-code"])
+  let project = p1_project("prj_1", "Release")
+  let model = update(Model::new(), BotsLoaded([bot_a, bot_b]))
+  let model = update(model, ProjectCatalogLoaded([project]))
+  let model = update(model, SelectProject("prj_1"))
+  let model = update(
+    model,
+    ProjectMembershipsLoaded([
+      p1_membership("prj_1", "bot_a", @contracts.MEMBERSHIP_STATE_ACTIVE),
+    ]),
+  )
+  let harness = test_harness_for_model(model)
+  assert_true(harness.has_text("Bot members"))
+  assert_true(harness.has_text("Ada"))
+  assert_true(harness.has_text("Beta"))
+  assert_true(harness.has_text("Add a Bot by name"))
+  assert_true(harness.has_text("Remove"))
+  assert_true(harness.has_text("Add"))
+  assert_false(harness.has_text("bot_a"))
+  assert_false(harness.has_text("bot_b"))
+  assert_false(harness.has_text("prj_1"))
+  let removed = update(
+    model,
+    ProjectMembershipRemoved(
+      p1_membership("prj_1", "bot_a", @contracts.MEMBERSHIP_STATE_REMOVED),
+    ),
+  )
+  let removed_harness = test_harness_for_model(removed)
+  assert_true(
+    removed_harness.has_text(
+      "No Bot is a member of this Project yet. Add one below by name.",
+    ),
+  )
+  assert_true(removed_harness.has_text("Add a Bot by name"))
 }
 
 ///|
@@ -709,4 +772,51 @@ test "startup route metadata round-trips for base and id routes" {
   let chat_route = Model::new()
   assert_true(chat_route.page == Workroom)
   assert_eq(model_route(chat_route), "chat/chat_a")
+}
+
+///|
+test "interrupted Chat shows the system boundary and continuation entry" {
+  let bot = p1_bot("bot_a", "Ada", ["claude-code"])
+  let detail = p1_chat_detail(
+    "chat_a",
+    "bot_a",
+    "Plan the release",
+    "",
+    "agent_1",
+    @contracts.AGENT_SESSION_STATE_ENDED,
+  )
+  let model = update(
+    update(Model::new(), BotsLoaded([bot])),
+    ChatsLoaded([detail]),
+  )
+  let (opened, _) = update_full(model, ChatOpened(detail))
+  let boundary = @contracts.ChatMessage::new(
+    id="msg_boundary",
+    chat_id="chat_a",
+    role=@contracts.CHAT_MESSAGE_ROLE_SYSTEM,
+    body_ref="",
+    body=@contracts.CHAT_HOST_RESTART_BOUNDARY_BODY,
+    digest=@contracts.chat_message_digest(
+      @contracts.CHAT_HOST_RESTART_BOUNDARY_BODY,
+      "",
+    ),
+    agent_session_id="asn_chat_a",
+    actor="host",
+    created_at="2026-01-02T00:00:00Z",
+  )
+  let (loaded, commands) = update_full(
+    opened,
+    ChatMessagesLoaded("chat_a", [boundary], "msg_boundary", false),
+  )
+  assert_eq(commands.length(), 0)
+  let harness = test_harness_for_model(loaded)
+  assert_true(harness.has_text(@contracts.CHAT_HOST_RESTART_BOUNDARY_BODY))
+  assert_true(harness.has_text("Continue Agent session"))
+  assert_true(
+    harness.has_text(
+      "The previous runtime was interrupted; its records were kept. " +
+      "Start an Agent session to continue in this same Chat.",
+    ),
+  )
+  assert_false(harness.has_text("Start Agent session"))
 }

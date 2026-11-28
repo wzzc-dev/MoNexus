@@ -458,7 +458,10 @@ async fn handle_request(
     | @contracts.METHOD_CHAT_SEND
     | @contracts.METHOD_CHAT_READ
     | @contracts.METHOD_CHAT_STOP
-    | @contracts.METHOD_CHAT_MESSAGES => {
+    | @contracts.METHOD_CHAT_MESSAGES
+    | @contracts.METHOD_PROJECT_MEMBERSHIP_LIST
+    | @contracts.METHOD_PROJECT_MEMBERSHIP_ADD
+    | @contracts.METHOD_PROJECT_MEMBERSHIP_REMOVE => {
       state.mutex.release()
       handle_bots_rpc(state, sink, request, client_request_id)
     }

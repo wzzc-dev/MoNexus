@@ -312,8 +312,8 @@ fn bot_directory_rows(model : Model, selected_bot : String) -> Array[@moui.View[
       @views.text(
         tr(
           model.lang,
-          "No Bot matches this Project filter. Bot membership is derived from active Chat participants; the host exposes no project.membership.list RPC.",
-          "没有 Bot 符合此项目筛选。Bot 成员资格来自对话中的有效参与者；主机未暴露 project.membership.list RPC。",
+          "No Bot is an active member of this Project. Add one from the Project page or the Bot page.",
+          "没有 Bot 是此项目的有效成员。请从项目页或 Bot 页添加成员。",
         ),
         width=bot_page_inner_width(),
         align=@core.TextAlign::TextStart,
@@ -685,36 +685,87 @@ fn bot_item_pane(
       left=8.0,
     ),
   )
-  // A Chat carries the Project id. Membership is only claimed when an active
-  // participant in a projected Project Chat is this Bot; no membership RPC
-  // exists yet, so the window never guesses access.
-  let project_rows : Array[@moui.View[Msg]] = []
-  for project in model.project.projects {
-    let mut chat_count = 0
-    for chat in model.chats {
-      if chat.project_id == project.id &&
-        (chat.bot_id == bot.id || chat.participants.contains(bot.id)) {
-        chat_count = chat_count + 1
+  // Project membership is the host's active relation; Chats never imply it.
+  if bot.is_fallback || bot.id == "" {
+    content.push(
+      @views.text(
+        tr(
+          model.lang,
+          "Project membership belongs to a projected Bot. Load the Bot list to manage it.",
+          "项目成员关系属于已投影的 Bot。加载 Bot 列表后即可管理。",
+        ),
+        width=390.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(8.5, 400)).foreground(ui_dim()),
+    )
+  } else if !model.project.projects_loaded || !model.project_memberships_loaded {
+    content.push(
+      @views.text(
+        tr(
+          model.lang,
+          "Loading Projects and membership from the host...",
+          "正在从主机加载项目与成员关系...",
+        ),
+        width=390.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(8.5, 400)).foreground(ui_dim()),
+    )
+  } else if model.project.projects.is_empty() {
+    content.push(
+      @views.text(
+        tr(
+          model.lang,
+          "No Project exists yet. Create one on the Projects page, then add this Bot.",
+          "尚无项目。请先在项目页创建项目，再添加此 Bot。",
+        ),
+        width=390.0,
+        align=@core.TextAlign::TextStart,
+        wrap=true,
+      ).font(ui_font(8.5, 400)).foreground(ui_dim()),
+    )
+  } else {
+    for project in model.project.projects {
+      let is_member = project_membership_active(model, project.id, bot.id)
+      let mut chat_count = 0
+      for chat in model.chats {
+        if chat.project_id == project.id &&
+          (chat.bot_id == bot.id || chat.participants.contains(bot.id)) {
+          chat_count = chat_count + 1
+        }
       }
-    }
-    if chat_count > 0 {
-      project_rows.push(
+      content.push(
         @views.container(
           @views.padding_edges(
             @views.row([
               @views.lucide_icon("folder", size=11.0, color=ui_dim()),
               @views.text(
-                ui_truncate(project_name(project), 270.0, 9.0),
-                width=270.0,
+                ui_truncate(project_name(project), 210.0, 9.0),
+                width=210.0,
                 align=@core.TextAlign::TextStart,
                 wrap=false,
               ).font(ui_font(9.0, 540)).foreground(ui_text_color()),
               @views.spacer(weight=1.0),
-              @views.text(
-                chat_count.to_string() +
-                tr(model.lang, " Chats", " 个 Chat"),
-                align=@core.TextAlign::TextEnd,
-              ).font(mono_font(8.5, 400)).foreground(ui_dim()),
+              if is_member {
+                @views.text(
+                  chat_count.to_string() + tr(model.lang, " Chats", " 个 Chat"),
+                  align=@core.TextAlign::TextEnd,
+                ).font(mono_font(8.5, 400)).foreground(ui_dim())
+              } else {
+                @views.empty()
+              },
+              if is_member {
+                ui_ghost_small(
+                  tr(model.lang, "Remove", "移除"),
+                  RemoveProjectMembership(project.id, bot.id),
+                )
+              } else {
+                ui_ghost_small(
+                  tr(model.lang, "Add", "添加"),
+                  AddProjectMembership(project.id, bot.id),
+                )
+              },
             ], spacing=6.0, align=@style.CrossAlign::Center).frame(width=378.0),
             top=5.0,
             right=6.0,
@@ -724,28 +775,18 @@ fn bot_item_pane(
           width=390.0,
           background=clear_color(),
           padding=0.0,
-        ).on_tap(SelectProject(project.id)).cursor(
-          @core.CursorStyle::Icon(@core.CursorIcon::CursorPointer),
         ),
       )
     }
-  }
-  if project_rows.is_empty() {
-    content.push(
-      @views.text(
-        tr(
-          model.lang,
-          "No Project Chat membership evidence for this Bot yet.",
-          "此 Bot 尚无项目对话成员证据。",
-        ),
-        width=390.0,
-        align=@core.TextAlign::TextStart,
-        wrap=true,
-      ).font(ui_font(8.5, 400)).foreground(ui_dim()),
-    )
-  } else {
-    for row in project_rows {
-      content.push(row)
+    if model.project_membership_message != "" {
+      content.push(
+        @views.text(
+          model.project_membership_message,
+          width=390.0,
+          align=@core.TextAlign::TextStart,
+          wrap=true,
+        ).font(ui_font(8.5, 400)).foreground(ui_dim()),
+      )
     }
   }
   content.push(
