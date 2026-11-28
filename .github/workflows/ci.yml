@@ -93,6 +93,9 @@ jobs:
       - name: Runtime e2e
         run: bash scripts/runtime_e2e.sh
 
+      - name: M1a bootstrap e2e
+        run: bash scripts/m1a_bootstrap_e2e.sh
+
   test-macos:
     name: build-test-macos
     # GitHub retired the macOS 14 hosted-runner image on 2026-11-02.

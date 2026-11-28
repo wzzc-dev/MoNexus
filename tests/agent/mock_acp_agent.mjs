@@ -27,11 +27,17 @@
 //     prove `lost` (kill local ssh) and `interrupted` (kill this process);
 //   * --exit-after-turn exits 0 shortly after a normal prompt response — used
 //     to prove a clean turn followed by EOF is still `exited`.
+//   * --m1a-demo runs the M1a bootstrap demo only on the first prompt: it
+//     reads AGENTS.md and one file under docs/, appends M1A-DEMO-EDIT to
+//     --m1a-file (default notes.txt) once, runs --m1a-check (default
+//     `sh -c 'test -f AGENTS.md && echo ok'`) and reports the cwd and markers.
+//     This is opt-in so the existing smokes see the same bytes as before.
 //
 // Kept in JavaScript on purpose: test-only, never linked into monexus-host.
 
 import fs from "node:fs";
 import readline from "node:readline";
+import { spawnSync } from "node:child_process";
 
 const failMode = process.env.MOCK_ACP_FAIL || "";
 const advertiseLoad = process.env.MOCK_ACP_LOAD !== "0";
@@ -43,14 +49,25 @@ const keyEnabled = flags.has("--stderr-key");
 const cwdEnabled = flags.has("--cwd");
 const hangEnabled = flags.has("--hang");
 const exitAfterTurn = flags.has("--exit-after-turn");
+const m1aDemoEnabled = flags.has("--m1a-demo");
 
 let pidFile = "";
+let m1aFile = "notes.txt";
+let m1aCheck = "sh -c 'test -f AGENTS.md && echo ok'";
 for (let i = 0; i < process.argv.length; i += 1) {
   const arg = process.argv[i];
   if (arg === "--pid-file" && i + 1 < process.argv.length) {
     pidFile = process.argv[i + 1];
   } else if (arg.startsWith("--pid-file=")) {
     pidFile = arg.slice("--pid-file=".length);
+  } else if (arg === "--m1a-file" && i + 1 < process.argv.length) {
+    m1aFile = process.argv[i + 1];
+  } else if (arg.startsWith("--m1a-file=")) {
+    m1aFile = arg.slice("--m1a-file=".length);
+  } else if (arg === "--m1a-check" && i + 1 < process.argv.length) {
+    m1aCheck = process.argv[i + 1];
+  } else if (arg.startsWith("--m1a-check=")) {
+    m1aCheck = arg.slice("--m1a-check=".length);
   }
 }
 
@@ -149,6 +166,49 @@ async function requestPermission(text) {
   return outcome;
 }
 
+async function m1aRead(path) {
+  const text = fs.readFileSync(path, "utf8");
+  return Buffer.byteLength(text, "utf8");
+}
+
+async function runM1aDemo() {
+  try {
+    const agentsBytes = await m1aRead("AGENTS.md");
+    await sendChunk(" M1A-AGENTS-READ bytes=" + agentsBytes);
+    const docsEntries = fs
+      .readdirSync("docs", { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name)
+      .sort();
+    if (docsEntries.length === 0) {
+      throw new Error("docs/ has no readable file");
+    }
+    const docPath = "docs/" + docsEntries[0];
+    const docBytes = await m1aRead(docPath);
+    await sendChunk(" M1A-DOCS-READ=" + docPath + " bytes=" + docBytes);
+    const marker = "M1A-DEMO-EDIT\n";
+    const current = fs.readFileSync(m1aFile, "utf8");
+    if (!current.includes(marker)) {
+      const separator = current.endsWith("\n") ? "" : "\n";
+      fs.appendFileSync(m1aFile, separator + marker);
+    }
+    await sendChunk(" M1A-EDIT=" + m1aFile);
+    const check = spawnSync("sh", ["-c", m1aCheck], { encoding: "utf8" });
+    if (check.error || check.status !== 0) {
+      throw new Error(
+        "validation failed status=" +
+          check.status +
+          " stderr=" +
+          String(check.stderr ?? check.error ?? "").trim(),
+      );
+    }
+    await sendChunk(" M1A-VALIDATE: " + String(check.stdout).trim());
+    await sendChunk(" M1A-CWD=" + process.cwd());
+  } catch (error) {
+    await sendChunk(" M1A-ERROR: " + String(error.message ?? error));
+  }
+}
+
 async function handlePrompt(id, params) {
   promptCount += 1;
   const text = (params?.prompt ?? []).map((block) => block?.text ?? "").join(" ");
@@ -157,6 +217,9 @@ async function handlePrompt(id, params) {
     await sendChunk(
       " CWD=" + process.cwd() + " TTY=" + (process.stdout.isTTY ? "yes" : "no"),
     );
+  }
+  if (m1aDemoEnabled && promptCount === 1) {
+    await runM1aDemo();
   }
   if (hangEnabled) {
     // In-flight turn: publish the pid for the smoke harness and never send the
@@ -175,6 +238,14 @@ async function handlePrompt(id, params) {
   if (text.includes("SMOKE-MEMORY")) await sendChunk(" MEMORY_SEEN");
   if (text.includes("[MoNexus Chat continuation context]")) {
     await sendChunk(" RECOVERY_CONTEXT_SEEN");
+    const start = text.indexOf("[MoNexus Chat continuation context]");
+    const endMarker = "[/MoNexus Chat continuation context]";
+    const end = text.indexOf(endMarker, start + 1);
+    if (start >= 0 && end >= 0) {
+      const block = text.slice(start, end + endMarker.length);
+      await sendChunk(" M1A-HANDOFF-SEEN");
+      await sendChunk(" M1A-HANDOFF-BYTES=" + Buffer.byteLength(block, "utf8"));
+    }
   }
   if (text.includes("CHAT-SYSTEM-BOUNDARY")) {
     await sendChunk(" SYSTEM_CONTEXT_LEAK");
