@@ -173,6 +173,12 @@ async function handlePrompt(id, params) {
   if (text.includes("[MoNexus agent context]")) await sendChunk(" BLOCK_SEEN");
   if (text.includes("AGENTS.md (read-only)")) await sendChunk(" AGENTS_SEEN");
   if (text.includes("SMOKE-MEMORY")) await sendChunk(" MEMORY_SEEN");
+  if (text.includes("[MoNexus Chat continuation context]")) {
+    await sendChunk(" RECOVERY_CONTEXT_SEEN");
+  }
+  if (text.includes("CHAT-SYSTEM-BOUNDARY")) {
+    await sendChunk(" SYSTEM_CONTEXT_LEAK");
+  }
   if (/permission/i.test(text)) {
     await requestPermission(text);
   } else {

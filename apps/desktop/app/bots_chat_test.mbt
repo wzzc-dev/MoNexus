@@ -773,3 +773,50 @@ test "startup route metadata round-trips for base and id routes" {
   assert_true(chat_route.page == Workroom)
   assert_eq(model_route(chat_route), "chat/chat_a")
 }
+
+///|
+test "interrupted Chat shows the system boundary and continuation entry" {
+  let bot = p1_bot("bot_a", "Ada", ["claude-code"])
+  let detail = p1_chat_detail(
+    "chat_a",
+    "bot_a",
+    "Plan the release",
+    "",
+    "agent_1",
+    @contracts.AGENT_SESSION_STATE_ENDED,
+  )
+  let model = update(
+    update(Model::new(), BotsLoaded([bot])),
+    ChatsLoaded([detail]),
+  )
+  let (opened, _) = update_full(model, ChatOpened(detail))
+  let boundary = @contracts.ChatMessage::new(
+    id="msg_boundary",
+    chat_id="chat_a",
+    role=@contracts.CHAT_MESSAGE_ROLE_SYSTEM,
+    body_ref="",
+    body=@contracts.CHAT_HOST_RESTART_BOUNDARY_BODY,
+    digest=@contracts.chat_message_digest(
+      @contracts.CHAT_HOST_RESTART_BOUNDARY_BODY,
+      "",
+    ),
+    agent_session_id="asn_chat_a",
+    actor="host",
+    created_at="2026-01-02T00:00:00Z",
+  )
+  let (loaded, commands) = update_full(
+    opened,
+    ChatMessagesLoaded("chat_a", [boundary], "msg_boundary", false),
+  )
+  assert_eq(commands.length(), 0)
+  let harness = test_harness_for_model(loaded)
+  assert_true(harness.has_text(@contracts.CHAT_HOST_RESTART_BOUNDARY_BODY))
+  assert_true(harness.has_text("Continue Agent session"))
+  assert_true(
+    harness.has_text(
+      "The previous runtime was interrupted; its records were kept. " +
+      "Start an Agent session to continue in this same Chat.",
+    ),
+  )
+  assert_false(harness.has_text("Start Agent session"))
+}

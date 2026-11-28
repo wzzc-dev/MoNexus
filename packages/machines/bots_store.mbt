@@ -53,6 +53,17 @@ pub(all) struct BotsReconcileCounts {
   memberships : Int
 }
 
+///|
+/// Bounded runtime transcript persisted for one canonical Chat AgentSession.
+/// `base` is the absolute cursor of `text[0]` after head trimming.
+pub(all) struct ChatTranscriptRecord {
+  session_id : String
+  base : Int64
+  text : String
+  context_injected : Bool
+  updated_at : String
+}
+
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
@@ -197,6 +208,19 @@ fn bots_store_migrate(
     conn,
     "CREATE INDEX IF NOT EXISTS chat_messages_chat_idx " +
     "ON chat_messages(chat_id,id)",
+  )
+  // ADR-0019: execution/audit transcript, keyed by the canonical Chat
+  // AgentSession id. This table is never replayed by chat.read and is not
+  // cleared by Bot/Chat event projection replay.
+  exec_raise(
+    conn,
+    "CREATE TABLE IF NOT EXISTS chat_transcripts (" +
+    "session_id TEXT PRIMARY KEY, " +
+    "base INTEGER NOT NULL DEFAULT 0, " +
+    "text TEXT NOT NULL DEFAULT '', " +
+    "context_injected INTEGER NOT NULL DEFAULT 0, " +
+    "updated_at TEXT NOT NULL" +
+    ")",
   )
   exec_raise(
     conn,
@@ -804,6 +828,182 @@ pub fn MachineStore::list_chat_messages(
 }
 
 ///|
+/// Read visible Chat history newest-first, excluding system boundaries and the
+/// current message. Used only to build the bounded continuation prefix; it is
+/// deliberately separate from the user-visible `chat.messages` paging order.
+pub fn MachineStore::list_chat_messages_before(
+  self : MachineStore,
+  chat_id : String,
+  before_message_id : String,
+  limit : Int,
+) -> Result[Array[@contracts.ChatMessage], String] {
+  try {
+    let bounded_limit = limit.max(1).min(200)
+    let stmt = if before_message_id == "" {
+      let prepared = self.conn.prepare(
+        "SELECT record_json FROM chat_messages " +
+        "WHERE chat_id=?1 AND role IN ('user','assistant') " +
+        "ORDER BY rowid DESC LIMIT ?2",
+      )
+      prepared.bind(index=1, chat_id)
+      prepared.bind(index=2, bounded_limit.to_int64())
+      prepared
+    } else {
+      let prepared = self.conn.prepare(
+        "SELECT record_json FROM chat_messages " +
+        "WHERE chat_id=?1 AND id<>?2 AND role IN ('user','assistant') " +
+        "AND rowid<(SELECT rowid FROM chat_messages WHERE id=?2 AND chat_id=?1) " +
+        "ORDER BY rowid DESC LIMIT ?3",
+      )
+      prepared.bind(index=1, chat_id)
+      prepared.bind(index=2, before_message_id)
+      prepared.bind(index=3, bounded_limit.to_int64())
+      prepared
+    }
+    let out : Array[@contracts.ChatMessage] = []
+    while stmt.step() {
+      let text : String = stmt.column(index=0)
+      match @contracts.chat_message_from_json(bots_parse_json(text)) {
+        Some(record) => out.push(record)
+        None => ()
+      }
+    }
+    stmt.finalize()
+    Ok(out)
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
+/// Persist the bounded runtime transcript for a canonical Chat AgentSession.
+/// The context-injection marker is preserved across ordinary transcript saves.
+pub fn MachineStore::save_chat_transcript(
+  self : MachineStore,
+  session_id : String,
+  base : Int64,
+  text : String,
+  now : String,
+) -> Result[Unit, String] {
+  if !@contracts.is_agent_session_id(session_id) {
+    return Err("Chat transcript session id is not canonical: " + session_id)
+  }
+  if base < 0L {
+    return Err("Chat transcript base must not be negative")
+  }
+  try {
+    let stmt = self.conn.prepare(
+      "INSERT INTO chat_transcripts " +
+      "(session_id,base,text,context_injected,updated_at) " +
+      "VALUES (?1,?2,?3,0,?4) " +
+      "ON CONFLICT(session_id) DO UPDATE SET " +
+      "base=excluded.base,text=excluded.text,updated_at=excluded.updated_at",
+    )
+    stmt.bind(index=1, session_id)
+    stmt.bind(index=2, base)
+    stmt.bind(index=3, text)
+    stmt.bind(index=4, now)
+    let _ = stmt.step()
+    stmt.finalize()
+    Ok(())
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
+/// Load a durable Chat transcript. A missing, unreadable or malformed row
+/// degrades to `None`: this cache is audit-only and must never break reads.
+pub fn MachineStore::load_chat_transcript(
+  self : MachineStore,
+  session_id : String,
+) -> Result[ChatTranscriptRecord?, String] {
+  try {
+    let stmt = self.conn.prepare(
+      "SELECT base,text,context_injected,updated_at FROM chat_transcripts " +
+      "WHERE session_id=?1",
+    )
+    stmt.bind(index=1, session_id)
+    let mut found : ChatTranscriptRecord? = None
+    if stmt.step() {
+      let base : Int64 = stmt.column(index=0)
+      let text : String = stmt.column(index=1)
+      let injected : Int64 = stmt.column(index=2)
+      let updated_at : String = stmt.column(index=3)
+      if base >= 0L {
+        found = Some({
+          session_id,
+          base,
+          text,
+          context_injected: injected > 0L,
+          updated_at,
+        })
+      }
+    }
+    stmt.finalize()
+    Ok(found)
+  } catch {
+    _ => Ok(None)
+  }
+}
+
+///|
+/// Atomically claim the one-time continuation-context injection for a Chat
+/// AgentSession. Returns true only for the first successful claim, so a second
+/// send (or a restart replay) never repeats the hidden prefix.
+pub fn MachineStore::claim_chat_context_injection(
+  self : MachineStore,
+  session_id : String,
+  now : String,
+) -> Result[Bool, String] {
+  if !@contracts.is_agent_session_id(session_id) {
+    return Err("Chat context session id is not canonical: " + session_id)
+  }
+  try {
+    let stmt = self.conn.prepare(
+      "INSERT INTO chat_transcripts " +
+      "(session_id,base,text,context_injected,updated_at) " +
+      "VALUES (?1,0,'',1,?2) " +
+      "ON CONFLICT(session_id) DO UPDATE SET " +
+      "context_injected=1,updated_at=excluded.updated_at " +
+      "WHERE context_injected=0",
+    )
+    stmt.bind(index=1, session_id)
+    stmt.bind(index=2, now)
+    let _ = stmt.step()
+    let claimed = self.conn.changes() > 0L
+    stmt.finalize()
+    Ok(claimed)
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
+/// True when the Chat already has the visible system boundary for this
+/// AgentSession. Startup reconcile uses this to stay idempotent and to repair
+/// a boundary that was missing from an earlier interrupted run.
+pub fn MachineStore::has_chat_system_boundary(
+  self : MachineStore,
+  chat_id : String,
+  session_id : String,
+) -> Result[Bool, String] {
+  try {
+    let stmt = self.conn.prepare(
+      "SELECT 1 FROM chat_messages " +
+      "WHERE chat_id=?1 AND agent_session_id=?2 AND role='system' LIMIT 1",
+    )
+    stmt.bind(index=1, chat_id)
+    stmt.bind(index=2, session_id)
+    let found = stmt.step()
+    stmt.finalize()
+    Ok(found)
+  } catch {
+    error => Err(sqlite_text(error))
+  }
+}
+
+///|
 pub fn MachineStore::get_bot_agent_session(
   self : MachineStore,
   session_id : String,
@@ -1386,6 +1586,7 @@ fn bots_end_reason_known(value : String) -> Bool {
   value == @contracts.AGENT_SESSION_END_REASON_ERROR ||
   value == @contracts.AGENT_SESSION_END_REASON_EXITED ||
   value == @contracts.AGENT_SESSION_END_REASON_HOST_RESTART ||
+  value == @contracts.AGENT_SESSION_END_REASON_HOST_RESTARTED ||
   value == @contracts.AGENT_SESSION_END_REASON_LOST ||
   value == @contracts.AGENT_SESSION_END_REASON_INTERRUPTED ||
   value == @contracts.AGENT_SESSION_END_REASON_AGENT_SWITCH ||

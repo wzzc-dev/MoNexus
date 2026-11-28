@@ -445,6 +445,20 @@ fn chat_live_tail(model : Model) -> String {
 }
 
 ///|
+/// Host-written system boundary from startup reconcile. Its presence means the
+/// owner should continue an interrupted Chat, not start a fresh Chat.
+fn chat_has_restart_boundary(messages : Array[@contracts.ChatMessage]) -> Bool {
+  for message in messages {
+    if message.role == @contracts.CHAT_MESSAGE_ROLE_SYSTEM &&
+      message.actor == "host" &&
+      message.agent_session_id != "" {
+      return true
+    }
+  }
+  false
+}
+
+///|
 fn workroom_chat_message_entry(
   model : Model,
   message : @contracts.ChatMessage,
@@ -767,21 +781,38 @@ fn workroom_thread(
         )
       }
       if !chat_session_active(model.chat_session_state) {
+        let interrupted = chat_has_restart_boundary(model.chat_messages)
         entries.push(
           @views.column([
             @views.text(
-              tr(
-                model.lang,
-                "This Chat has no running Agent session.",
-                "此对话没有运行中的智能体会话。",
-              ),
+              if interrupted {
+                tr(
+                  model.lang,
+                  "The previous runtime was interrupted; its records were kept. Start an Agent session to continue in this same Chat.",
+                  "上一次运行时已中断，记录已保留。启动智能体会话即可在此 Chat 继续。",
+                )
+              } else {
+                tr(
+                  model.lang,
+                  "This Chat has no running Agent session.",
+                  "此对话没有运行中的智能体会话。",
+                )
+              },
               width=workroom_inner_width(),
               align=@core.TextAlign::TextStart,
               wrap=true,
             ).font(ui_font(10.0, 400)).foreground(ui_muted()),
             @views.row([
               ui_ghost_small(
-                tr(model.lang, "Start Agent session", "启动智能体会话"),
+                if interrupted {
+                  tr(
+                    model.lang,
+                    "Continue Agent session",
+                    "继续智能体会话",
+                  )
+                } else {
+                  tr(model.lang, "Start Agent session", "启动智能体会话")
+                },
                 ChatStartSession,
               ),
               @views.spacer(weight=1.0),

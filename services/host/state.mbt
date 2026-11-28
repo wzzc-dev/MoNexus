@@ -150,6 +150,9 @@ pub struct HostState {
   terminals : Map[String, TerminalSession]
   agent_sessions : Map[String, AgentSessionRuntime]
   agent_transcripts : Map[String, AgentTranscript]
+  /// Runtime session id -> canonical Chat AgentSession id. Present only for
+  /// sessions started by the Chat bridge; used to key durable transcripts.
+  chat_runtime_sessions : Map[String, String]
   /// Registered paired-runtime launchers, keyed by runtime machine id. The
   /// transport attach layer (or a test harness) fills this; an empty entry
   /// fails `agent.start` honestly instead of pretending the machine is local.
@@ -363,6 +366,7 @@ fn HostState::new(
     terminals: Map([]),
     agent_sessions: Map([]),
     agent_transcripts: Map([]),
+    chat_runtime_sessions: Map([]),
     runtime_agent_launchers: Map([]),
     runtime_primary: Ref(None),
     runtime_policy_snapshot: Ref(None),

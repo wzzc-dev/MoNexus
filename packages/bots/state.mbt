@@ -63,6 +63,7 @@ pub fn agent_session_transition_allowed(from : String, to : String) -> Bool {
   }
   match from {
     "starting" => to == @contracts.AGENT_SESSION_STATE_ACTIVE ||
+      to == @contracts.AGENT_SESSION_STATE_ENDING ||
       to == @contracts.AGENT_SESSION_STATE_FAILED
     "active" => to == @contracts.AGENT_SESSION_STATE_WAITING ||
       to == @contracts.AGENT_SESSION_STATE_ENDING ||
